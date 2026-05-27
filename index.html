@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kommissionier-App</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="pdf.min.js" defer></script>
+    <script src="app.js?v=20260527-1" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Lager</p>
+        <h1>Kommissionierliste</h1>
+      </div>
+      <div class="header-actions">
+        <button class="icon-button" id="newOrderButton" type="button" title="Neuen Auftrag starten" aria-label="Neuen Auftrag starten">
+          <span aria-hidden="true">+</span>
+        </button>
+        <button class="icon-button" id="printButton" type="button" title="Drucken oder als PDF speichern" aria-label="Drucken oder als PDF speichern">
+          <span aria-hidden="true">P</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="toolbar" aria-label="Auftrag importieren">
+        <label class="file-drop" for="pdfInput">
+          <span class="file-drop-title">PDF importieren</span>
+          <span class="file-drop-copy">Auftrag auswählen, Positionen prüfen und digital abhaken.</span>
+          <input id="pdfInput" type="file" accept="application/pdf">
+        </label>
+
+        <div class="order-picker">
+          <h2>Auftraege</h2>
+          <label>
+            Aktueller Auftrag
+            <select id="orderSelect">
+              <option value="">Kein gespeicherter Auftrag</option>
+            </select>
+          </label>
+          <div class="stacked-actions">
+            <button id="saveOrderButton" class="primary-button" type="button">Auftrag speichern</button>
+            <button id="refreshOrdersButton" class="secondary-button" type="button">Liste laden</button>
+          </div>
+          <p id="serverStatus" class="export-status">Server wird gesucht...</p>
+          <p id="importStatus" class="import-status sr-only" role="status"></p>
+        </div>
+
+        <div class="order-meta">
+          <label>
+            Auftragsnummer
+            <input id="orderNumber" type="text" autocomplete="off" placeholder="z. B. 240153">
+          </label>
+          <label>
+            Kunde
+            <input id="customerName" type="text" autocomplete="off" placeholder="Name">
+          </label>
+          <label>
+            Datum
+            <input id="orderDate" type="date">
+          </label>
+        </div>
+      </section>
+
+      <section class="status-strip" aria-label="Fortschritt">
+        <div>
+          <strong id="pickedCount">0</strong>
+          <span>erledigt</span>
+        </div>
+        <div>
+          <strong id="openCount">0</strong>
+          <span>offen</span>
+        </div>
+        <div>
+          <strong id="changedCount">0</strong>
+          <span>korrigiert</span>
+        </div>
+      </section>
+
+      <section class="main-grid">
+        <div class="list-panel">
+          <div class="section-heading">
+            <h2>Positionen</h2>
+          </div>
+          <div id="emptyState" class="empty-state">
+            <h3>Noch kein Auftrag geladen</h3>
+            <p>Importiere eine PDF oder füge Positionen manuell hinzu.</p>
+          </div>
+          <div id="pickList" class="pick-list" aria-live="polite"></div>
+        </div>
+
+        <aside class="side-panel">
+          <div class="summary-box">
+            <h2>Abschluss</h2>
+            <div class="summary-fields">
+              <label>
+                Europaletten
+                <input id="euroPallets" type="number" inputmode="decimal" min="0" step="0.5" placeholder="0">
+              </label>
+              <label>
+                Stellplätze
+                <input id="storageSpaces" type="number" inputmode="decimal" min="0" step="0.5" placeholder="0">
+              </label>
+              <label>
+                Notiz
+                <textarea id="orderNote" rows="4" placeholder="Schäden, Fehlmengen, Besonderheiten"></textarea>
+              </label>
+            </div>
+          </div>
+<div class="summary-box">
+            <h2>Daten</h2>
+            <div class="stacked-actions">
+              <button id="exportButton" class="primary-button" type="button">CSV exportieren</button>
+              <button id="pdfExportButton" class="primary-button" type="button">PDF ausgeben</button>
+              <button id="clearDoneButton" class="secondary-button" type="button">Erledigte einklappen</button>
+            </div>
+            <p id="exportStatus" class="export-status" hidden></p>
+            <div id="pdfPreview" class="pdf-preview" hidden></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <section id="printReport" class="print-report" aria-hidden="true" hidden></section>
+
+    <template id="lineTemplate">
+      <article class="pick-item">
+        <label class="check-target">
+          <input class="picked-input" type="checkbox">
+          <span class="checkmark" aria-hidden="true"></span>
+        </label>
+        <div class="line-body">
+          <div class="line-top">
+            <input class="warehouse-order-input short-input" aria-label="Lagerauftrag" placeholder="Lagerauftrag">
+            <input class="product-input short-input" aria-label="Produkt" placeholder="Produkt">
+            <input class="description-input" aria-label="Produktbeschreibung" placeholder="Produktbeschreibung">
+          </div>
+          <div class="location-row">
+            <label>
+              Von HU
+              <input class="from-hu-input" type="text" inputmode="decimal" pattern="[0-9,]*" placeholder="Handling Unit">
+            </label>
+            <label>
+              Von Lagerplatz
+              <input class="from-bin-input" type="text" placeholder="002-H4-SL5C1">
+            </label>
+            <label>
+              Nach Lagerplatz
+              <input class="to-bin-input" type="text" placeholder="9020-TREUCHTLINGEN">
+            </label>
+          </div>
+          <div class="quantity-row">
+            <label>
+              Soll
+              <input class="target-qty-input" type="text" inputmode="decimal" placeholder="0">
+            </label>
+            <label>
+              Ist
+              <input class="actual-qty-input" type="text" inputmode="decimal" placeholder="0">
+            </label>
+            <label>
+              Einheit
+              <input class="unit-input" type="text" placeholder="Stk">
+            </label>
+          </div>
+        </div>
+      </article>
+    </template>
+  </body>
+</html>

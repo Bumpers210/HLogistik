@@ -1,0 +1,1041 @@
+const STORAGE_KEY = "kommissionier-app-state-v1";
+const API_BASE = "";
+
+const state = {
+  id: "",
+  orderNumber: "",
+  customerName: "",
+  orderDate: new Date().toISOString().slice(0, 10),
+  euroPallets: "",
+  storageSpaces: "",
+  orderNote: "",
+  rawText: "",
+  collapseDone: false,
+  lines: []
+};
+
+const elements = {};
+let activeDownloadUrl = "";
+let saveTimer = null;
+let serverOnline = false;
+
+document.addEventListener("DOMContentLoaded", () => {
+  bindElements();
+  clearCurrentOrder();
+  bindEvents();
+  configurePdfJs();
+  render();
+  initializeServer();
+});
+
+function bindElements() {
+  [
+    "pdfInput",
+    "orderNumber",
+    "customerName",
+    "orderDate",
+    "euroPallets",
+    "storageSpaces",
+    "orderNote",
+    "importStatus",
+    "newOrderButton",
+    "printButton",
+    "exportButton",
+    "pdfExportButton",
+    "exportStatus",
+    "pdfPreview",
+    "printReport",
+    "orderSelect",
+    "saveOrderButton",
+    "refreshOrdersButton",
+    "serverStatus",
+    "clearDoneButton",
+    "pickList",
+    "emptyState",
+    "pickedCount",
+    "openCount",
+    "changedCount",
+    "lineTemplate"
+  ].forEach((id) => {
+    elements[id] = document.getElementById(id);
+  });
+}
+
+function bindEvents() {
+  elements.pdfInput.addEventListener("change", handlePdfUpload);
+  elements.newOrderButton.addEventListener("click", resetOrder);
+  elements.printButton.addEventListener("click", () => window.print());
+  elements.exportButton.addEventListener("click", exportCsv);
+  elements.pdfExportButton.addEventListener("click", exportPdf);
+  elements.saveOrderButton.addEventListener("click", saveOrderNow);
+  elements.refreshOrdersButton.addEventListener("click", loadOrderList);
+  elements.orderSelect.addEventListener("change", () => loadOrder(elements.orderSelect.value));
+  window.addEventListener("afterprint", cleanupPrintReport);
+  elements.clearDoneButton.addEventListener("click", () => {
+    state.collapseDone = !state.collapseDone;
+    elements.clearDoneButton.textContent = state.collapseDone ? "Erledigte anzeigen" : "Erledigte einklappen";
+    saveAndRender();
+  });
+
+  ["orderNumber", "customerName", "orderDate", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
+    elements[id].addEventListener("input", () => {
+      state[id] = elements[id].value;
+      saveState();
+      updateCounts();
+    });
+  });
+}
+
+function configurePdfJs() {
+  if (!window.pdfjsLib) return;
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.min.js";
+}
+
+async function handlePdfUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  let data;
+
+  if (!window.pdfjsLib) {
+    setImportStatus("PDF-Modul konnte nicht geladen werden. Seite neu laden.", "error");
+    return;
+  }
+
+  try {
+    setImportStatus(`Lese ${file.name} ...`);
+    data = await file.arrayBuffer();
+    const pdf = await window.pdfjsLib.getDocument({ data }).promise;
+    const pages = [];
+
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      pages.push(rebuildPageRows(content.items));
+    }
+
+    const fullText = pages.join("\n");
+    state.rawText = fullText;
+    const result = importText(fullText, file.name);
+    if (result.lines > 0) {
+      setImportStatus(`${result.lines} Positionen importiert.`, "ok");
+    } else if (fullText.trim()) {
+      setImportStatus("PDF-Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
+    } else {
+      setImportStatus("Keine lesbaren PDF-Texte gefunden. Ist es ein Scan?", "error");
+    }
+  } catch (error) {
+    console.error(error);
+    const fallbackText = data ? extractTextFromSimplePdf(data) : "";
+    if (fallbackText.trim()) {
+      const result = importText(fallbackText, file.name);
+      setImportStatus(`Fallback genutzt: ${result.lines} Positionen importiert.`, result.lines ? "ok" : "error");
+    } else {
+      setImportStatus("PDF konnte nicht ausgelesen werden. Bei Scan-PDFs ist OCR noetig.", "error");
+    }
+  } finally {
+    event.target.value = "";
+  }
+}
+
+function importText(text, fileName = "") {
+  const parsed = parseOrderText(text);
+  state.rawText = text;
+
+  if (parsed.orderNumber && !state.orderNumber) state.orderNumber = parsed.orderNumber;
+  if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
+  if (!state.orderNumber && fileName) state.orderNumber = fileName.replace(/\.pdf$/i, "");
+
+  state.lines = parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })];
+  saveAndRender();
+  return { lines: parsed.lines.length };
+}
+
+function setImportStatus(message, type = "") {
+  if (!elements.importStatus) return;
+  elements.importStatus.textContent = message;
+  elements.importStatus.classList.toggle("is-ok", type === "ok");
+  elements.importStatus.classList.toggle("is-error", type === "error");
+}
+
+function extractTextFromSimplePdf(arrayBuffer) {
+  const source = new TextDecoder("latin1").decode(new Uint8Array(arrayBuffer));
+  const rows = [];
+  const pattern = /BT\s+\/F\d+\s+[\d.]+\s+Tf\s+([\d.]+)\s+([\d.]+)\s+Td\s+\((.*?)\)\s+Tj\s+ET/gs;
+  let match;
+
+  while ((match = pattern.exec(source))) {
+    const x = Number(match[1]);
+    const y = Number(match[2]);
+    const text = unescapePdfText(match[3]).trim();
+    let row = rows.find((entry) => Math.abs(entry.y - y) < 3);
+    if (!row) {
+      row = { y, cells: [] };
+      rows.push(row);
+    }
+    row.cells.push({ x, text });
+  }
+
+  return rows
+    .sort((a, b) => b.y - a.y)
+    .map((row) => row.cells.sort((a, b) => a.x - b.x).map((cell) => cell.text).join("\t"))
+    .join("\n");
+}
+
+function unescapePdfText(value) {
+  return value
+    .replace(/\\\)/g, ")")
+    .replace(/\\\(/g, "(")
+    .replace(/\\\\/g, "\\");
+}
+
+function parseOrderText(text) {
+  const cleanedLines = text
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const orderNumber = findFirst(text, [
+    /(?:^|\n)\s*(?:auftragsnr\.?|auftragsnummer|belegnr\.?)\s*[:#-]?\s*([A-Z0-9-]{4,})/i,
+    /(?:^|\n)\s*(?:auftrag|kommission|lieferschein)\s*[:#-]\s*([A-Z0-9-]{4,})/i
+  ]);
+  const customerName = findFirst(text, [
+    /(?:kunde|lieferadresse|empfänger)\s*[:#-]?\s*([^\n\t]{3,80})/i
+  ]);
+
+  const tableRows = cleanedLines
+    .map(parseWarehouseLine)
+    .filter(Boolean);
+
+  if (tableRows.length) {
+    return {
+      orderNumber: orderNumber || "",
+      customerName: customerName || "",
+      lines: tableRows.map((line) => createLine({
+        ...line,
+        actualQty: line.targetQty,
+        fromHandlingUnitEditable: !String(line.fromHandlingUnit || "").trim()
+      }))
+    };
+  }
+
+  const candidates = [];
+  let current = null;
+
+  cleanedLines.forEach((line) => {
+    const starter = line.match(/^(\d{1,4})(?:[.)\s-]+)(.+)$/);
+    const looksLikeArticle = /\b[A-Z0-9][A-Z0-9/-]{3,}\b/.test(line);
+    const hasQuantity = /\b\d+(?:[,.]\d+)?\s*(?:stk|st|stück|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i.test(line);
+    const isLikelyPosition = starter && (hasQuantity || looksLikeArticle || line.length > 18);
+
+    if (isLikelyPosition) {
+      if (current) candidates.push(current);
+      current = parsePositionLine(starter[1], starter[2]);
+      return;
+    }
+
+    if (current && line.length < 160 && !/^(summe|gesamt|mwst|steuer|netto|brutto)\b/i.test(line)) {
+      current.description = [current.description, line].filter(Boolean).join(" ");
+    }
+  });
+
+  if (current) candidates.push(current);
+
+  return {
+    orderNumber: orderNumber || "",
+    customerName: customerName || "",
+    lines: candidates.map((line, index) => createLine({
+      ...line,
+      warehouseOrder: line.position || String(index + 1),
+      actualQty: line.targetQty
+    }))
+  };
+}
+
+function rebuildPageRows(items) {
+  const rows = [];
+
+  items
+    .filter((item) => item.str && item.str.trim())
+    .forEach((item) => {
+      const x = item.transform[4];
+      const y = item.transform[5];
+      let row = rows.find((entry) => Math.abs(entry.y - y) < 3);
+      if (!row) {
+        row = { y, cells: [] };
+        rows.push(row);
+      }
+      row.cells.push({ x, text: item.str.trim() });
+    });
+
+  return rows
+    .sort((a, b) => b.y - a.y)
+    .map((row) => row.cells.sort((a, b) => a.x - b.x).map((cell) => cell.text).join("\t"))
+    .join("\n");
+}
+
+function parseWarehouseLine(line) {
+  if (/lagerauftrag|produktbeschreibung|basis|nach-lagerplatz/i.test(line)) return null;
+
+  const tokens = line
+    .replace(/\|/g, " ")
+    .split(/\t+|\s{2,}/)
+    .flatMap((part) => part.trim().split(/\s+/))
+    .filter(Boolean);
+
+  const firstNumber = tokens.findIndex((token) => /^\d{6,}$/.test(token));
+  if (firstNumber === -1) return null;
+
+  const warehouseOrder = tokens[firstNumber];
+  let cursor = firstNumber + 1;
+  const fromHandlingUnit = /^\d{10,}$/.test(tokens[cursor] || "") ? tokens[cursor++] : "";
+  const fromBin = tokens[cursor] && /-/.test(tokens[cursor]) ? tokens[cursor++] : "";
+  const product = /^\d{4,}$/.test(tokens[cursor] || "") ? tokens[cursor++] : "";
+  const targetQty = /^[\d.,]+$/.test(tokens[cursor] || "") ? tokens[cursor++].replace(",", ".") : "";
+  const unit = /^[A-Za-zÄÖÜäöü]{1,5}$/.test(tokens[cursor] || "") ? normalizeUnit(tokens[cursor++]) : "Stk";
+  const remaining = tokens.slice(cursor);
+
+  if (!product || !targetQty || remaining.length === 0) return null;
+
+  let toBin = "";
+  if (remaining.length && /^\d{3,}[-A-Z0-9]+$/i.test(remaining[remaining.length - 1])) {
+    toBin = remaining.pop();
+  }
+
+  return {
+    warehouseOrder,
+    fromHandlingUnit,
+    fromBin,
+    product,
+    description: remaining.join(" "),
+    targetQty,
+    unit,
+    toBin
+  };
+}
+
+function parsePositionLine(position, content) {
+  const quantityMatch = content.match(/(\d+(?:[,.]\d+)?)\s*(stk|st|stück|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i);
+  const articleMatch = content.match(/\b([A-Z0-9][A-Z0-9/-]{3,})\b/);
+  const targetQty = quantityMatch ? quantityMatch[1].replace(",", ".") : "";
+  const unit = quantityMatch ? normalizeUnit(quantityMatch[2]) : "";
+  const product = articleMatch ? articleMatch[1] : "";
+  const description = content
+    .replace(quantityMatch?.[0] || "", "")
+    .replace(product, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  return { position, product, description, targetQty, unit };
+}
+
+function normalizeUnit(unit) {
+  const value = unit.toLowerCase();
+  if (["st", "stk", "stück"].includes(value)) return "Stk";
+  if (["pck", "pak"].includes(value)) return "Pck";
+  if (value === "ve") return "VE";
+  return unit;
+}
+
+function findFirst(text, patterns) {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[1].trim();
+  }
+  return "";
+}
+
+function createLine(overrides = {}) {
+  return {
+    id: createId(),
+    warehouseOrder: "",
+    fromHandlingUnit: "",
+    fromHandlingUnitEditable: true,
+    fromBin: "",
+    product: "",
+    description: "",
+    toBin: "",
+    targetQty: "",
+    actualQty: "",
+    unit: "Stk",
+    picked: false,
+    ...overrides
+  };
+}
+
+function createId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function setHandlingUnitEditMode(input, canEdit) {
+  input.readOnly = !canEdit;
+  input.classList.toggle("is-editable-hu", canEdit);
+
+  if (canEdit) {
+    input.removeAttribute("readonly");
+    input.placeholder = "HU eintragen";
+    return;
+  }
+
+  input.setAttribute("readonly", "");
+  input.placeholder = "Handling Unit";
+}
+
+function render() {
+  syncFields();
+  elements.pickList.innerHTML = "";
+  elements.emptyState.hidden = state.lines.length > 0;
+
+  state.lines.forEach((line) => {
+    const item = elements.lineTemplate.content.firstElementChild.cloneNode(true);
+    item.dataset.id = line.id;
+    item.classList.toggle("is-done", line.picked);
+    item.classList.toggle("is-collapsed", state.collapseDone && line.picked);
+
+    const map = {
+      picked: item.querySelector(".picked-input"),
+      warehouseOrder: item.querySelector(".warehouse-order-input"),
+      fromHandlingUnit: item.querySelector(".from-hu-input"),
+      fromBin: item.querySelector(".from-bin-input"),
+      product: item.querySelector(".product-input"),
+      description: item.querySelector(".description-input"),
+      toBin: item.querySelector(".to-bin-input"),
+      targetQty: item.querySelector(".target-qty-input"),
+      actualQty: item.querySelector(".actual-qty-input"),
+      unit: item.querySelector(".unit-input")
+    };
+
+    map.picked.checked = line.picked;
+    const isMissingHandlingUnit = !String(line.fromHandlingUnit || "").trim();
+    const canEditHandlingUnit = line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
+    map.warehouseOrder.value = line.warehouseOrder || "";
+    map.fromHandlingUnit.value = line.fromHandlingUnit || "";
+    map.fromBin.value = line.fromBin || "";
+    map.product.value = line.product || "";
+    map.description.value = line.description;
+    map.toBin.value = line.toBin || "";
+    map.targetQty.value = line.targetQty;
+    map.actualQty.value = line.actualQty;
+    map.unit.value = line.unit;
+    map.warehouseOrder.readOnly = true;
+    map.product.readOnly = true;
+    map.description.readOnly = true;
+    setHandlingUnitEditMode(map.fromHandlingUnit, canEditHandlingUnit);
+    map.fromBin.readOnly = true;
+    map.toBin.readOnly = true;
+    map.targetQty.readOnly = true;
+    map.unit.readOnly = true;
+
+    map.picked.addEventListener("change", () => updateLine(line.id, { picked: map.picked.checked }));
+    map.warehouseOrder.addEventListener("input", () => updateLine(line.id, { warehouseOrder: map.warehouseOrder.value }, false));
+    map.fromHandlingUnit.addEventListener("input", () => {
+      map.fromHandlingUnit.value = map.fromHandlingUnit.value.replace(/[^0-9,]/g, "");
+      updateLine(line.id, { fromHandlingUnit: map.fromHandlingUnit.value, fromHandlingUnitEditable: canEditHandlingUnit }, false);
+    });
+    map.fromBin.addEventListener("input", () => updateLine(line.id, { fromBin: map.fromBin.value }, false));
+    map.product.addEventListener("input", () => updateLine(line.id, { product: map.product.value }, false));
+    map.description.addEventListener("input", () => updateLine(line.id, { description: map.description.value }, false));
+    map.toBin.addEventListener("input", () => updateLine(line.id, { toBin: map.toBin.value }, false));
+    map.targetQty.addEventListener("input", () => updateLine(line.id, { targetQty: map.targetQty.value }, false));
+    map.actualQty.addEventListener("input", () => updateLine(line.id, { actualQty: map.actualQty.value }, false));
+    map.unit.addEventListener("input", () => updateLine(line.id, { unit: map.unit.value }, false));
+
+    elements.pickList.appendChild(item);
+  });
+
+  updateCounts();
+  elements.clearDoneButton.textContent = state.collapseDone ? "Erledigte anzeigen" : "Erledigte einklappen";
+}
+
+function syncFields() {
+  ["orderNumber", "customerName", "orderDate", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
+    if (elements[id].value !== state[id]) elements[id].value = state[id] || "";
+  });
+}
+
+function updateLine(id, patch, rerender = true) {
+  const line = state.lines.find((entry) => entry.id === id);
+  if (!line) return;
+  Object.assign(line, patch);
+  saveState();
+  updateCounts();
+  if (rerender) render();
+}
+
+function updateCounts() {
+  const picked = state.lines.filter((line) => line.picked).length;
+  const changed = state.lines.filter((line) => String(line.actualQty).trim() !== String(line.targetQty).trim()).length;
+  elements.pickedCount.textContent = picked;
+  elements.openCount.textContent = Math.max(state.lines.length - picked, 0);
+  elements.changedCount.textContent = changed;
+}
+
+async function initializeServer() {
+  try {
+    const response = await fetch(`${API_BASE}/api/health`);
+    if (!response.ok) throw new Error("Server antwortet nicht");
+    const info = await response.json();
+    serverOnline = true;
+    setServerStatus(`Server aktiv. PDFs: ${info.exportDir}`, "ok");
+    await loadOrderList();
+  } catch {
+    serverOnline = false;
+    setServerStatus("Server nicht verbunden. Daten bleiben nur auf diesem Geraet.", "error");
+  }
+}
+
+async function loadOrderList() {
+  if (!serverOnline) return;
+  try {
+    const orders = await apiJson("/api/orders");
+    elements.orderSelect.innerHTML = `<option value="">Kein gespeicherter Auftrag</option>`;
+    orders.forEach((order) => {
+      const option = document.createElement("option");
+      option.value = order.id;
+      option.textContent = `${order.orderNumber || order.id} - ${order.customerName || "ohne Kunde"} (${order.picked}/${order.total})`;
+      if (order.id === state.id) option.selected = true;
+      elements.orderSelect.appendChild(option);
+    });
+  } catch (error) {
+    setServerStatus(`Auftragsliste konnte nicht geladen werden: ${error.message}`, "error");
+  }
+}
+
+async function loadOrder(id) {
+  if (!id || !serverOnline) return;
+  try {
+    const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
+    Object.assign(state, order);
+    saveStateWithoutServer();
+    render();
+    setServerStatus("Auftrag geladen.", "ok");
+  } catch (error) {
+    setServerStatus(`Auftrag konnte nicht geladen werden: ${error.message}`, "error");
+  }
+}
+
+function scheduleServerSave() {
+  if (!serverOnline || saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveOrderNow(true);
+  }, 700);
+}
+
+async function saveOrderNow(silent = false) {
+  if (!serverOnline) {
+    if (!silent) setServerStatus("Server nicht verbunden. Auftrag nur lokal gespeichert.", "error");
+    return false;
+  }
+
+  try {
+    const payload = currentOrderPayload();
+    const endpoint = state.id ? `/api/orders/${encodeURIComponent(state.id)}` : "/api/orders";
+    const method = state.id ? "PUT" : "POST";
+    const result = await apiJson(endpoint, { method, body: JSON.stringify({ order: payload }) });
+    state.id = result.order.id;
+    saveStateWithoutServer();
+    if (!silent) setServerStatus("Auftrag gespeichert.", "ok");
+    await loadOrderList();
+    return true;
+  } catch (error) {
+    if (!silent) setServerStatus(`Speichern fehlgeschlagen: ${error.message}`, "error");
+    return false;
+  }
+}
+
+function currentOrderPayload() {
+  return {
+    id: state.id,
+    orderNumber: state.orderNumber,
+    customerName: state.customerName,
+    orderDate: state.orderDate,
+    euroPallets: state.euroPallets,
+    storageSpaces: state.storageSpaces,
+    orderNote: state.orderNote,
+    rawText: state.rawText,
+    collapseDone: state.collapseDone,
+    lines: state.lines
+  };
+}
+
+function saveStateWithoutServer() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+async function apiJson(url, options = {}) {
+  const response = await fetch(`${API_BASE}${url}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options
+  });
+  const data = await response.json();
+  if (!response.ok || data.ok === false) throw new Error(data.error || "Serverfehler");
+  return data;
+}
+
+function setServerStatus(message, type = "") {
+  if (!elements.serverStatus) return;
+  elements.serverStatus.textContent = message;
+  elements.serverStatus.classList.toggle("is-ok", type === "ok");
+  elements.serverStatus.classList.toggle("is-error", type === "error");
+}
+
+function saveAndRender() {
+  saveState();
+  render();
+}
+
+function saveState() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  scheduleServerSave();
+}
+
+function loadState() {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (!saved) return;
+  try {
+    Object.assign(state, JSON.parse(saved));
+    state.id = state.id || "";
+  } catch (error) {
+    console.warn("Gespeicherte Daten konnten nicht geladen werden.", error);
+  }
+}
+
+function clearCurrentOrder() {
+  Object.assign(state, {
+    id: "",
+    orderNumber: "",
+    customerName: "",
+    orderDate: new Date().toISOString().slice(0, 10),
+    euroPallets: "",
+    storageSpaces: "",
+    orderNote: "",
+    rawText: "",
+    collapseDone: false,
+    lines: []
+  });
+}
+
+function resetOrder() {
+  const hasData = state.lines.length || state.rawText || state.orderNumber || state.customerName;
+  if (hasData && !confirm("Aktuellen Auftrag leeren?")) return;
+
+  clearCurrentOrder();
+  elements.pdfInput.value = "";
+  saveAndRender();
+}
+
+function exportCsv() {
+  const rows = [
+    ["Auftrag", state.orderNumber],
+    ["Kunde", state.customerName],
+    ["Datum", state.orderDate],
+    ["Europaletten", state.euroPallets],
+    ["Stellplaetze", state.storageSpaces],
+    ["Notiz", state.orderNote],
+    [],
+    ["Erledigt", "Lagerauftrag", "Von-Handling-Unit", "Von-Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit", "Nach-Lagerplatz"]
+  ];
+
+  state.lines.forEach((line) => {
+    rows.push([
+      line.picked ? "ja" : "nein",
+      line.warehouseOrder,
+      line.fromHandlingUnit,
+      line.fromBin,
+      line.product,
+      line.description,
+      line.targetQty,
+      line.actualQty,
+      line.unit,
+      line.toBin
+    ]);
+  });
+
+  const csv = rows.map((row) => row.map(escapeCsv).join(";")).join("\n");
+  const blob = new Blob([`\ufeff${csv}`], { type: "text/csv;charset=utf-8" });
+  downloadBlob(blob, `kommissionierung-${state.orderNumber || "auftrag"}.csv`, "CSV");
+}
+
+async function exportPdf() {
+  const fileName = `kommissionierung-${state.orderNumber || "auftrag"}.pdf`;
+  if (serverOnline) {
+    const saved = await saveOrderNow(true);
+    if (!saved || !state.id) {
+      showExportMessage("PDF konnte nicht gespeichert werden, weil der Auftrag nicht auf dem Server gespeichert ist.");
+      return;
+    }
+
+    try {
+      showExportMessage("PDF wird auf dem Server erstellt...");
+      const result = await apiJson(`/api/orders/${encodeURIComponent(state.id)}/export-pdf`, {
+        method: "POST",
+        body: JSON.stringify({ order: currentOrderPayload() })
+      });
+      showServerPdfLink(result.url, result.file, result.path);
+      return;
+    } catch (error) {
+      showExportMessage(`Server-PDF fehlgeschlagen: ${error.message}. Druckdialog wird geoeffnet.`);
+    }
+  }
+
+  renderPrintReport(fileName);
+  showExportMessage(`Druckansicht geoeffnet. Im Druckdialog "${fileName}" als PDF speichern.`);
+
+  setTimeout(() => {
+    window.print();
+  }, 100);
+}
+
+function showServerPdfLink(url, fileName, fullPath) {
+  if (!elements.exportStatus) return;
+  elements.exportStatus.hidden = false;
+  elements.exportStatus.innerHTML = "";
+  const text = document.createTextNode(`PDF gespeichert: ${fullPath} `);
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = fileName;
+  elements.exportStatus.append(text, link);
+}
+
+function renderPrintReport(fileName) {
+  if (!elements.printReport) return;
+
+  const picked = state.lines.filter((line) => line.picked).length;
+  const rows = state.lines.map((line) => `
+    <tr>
+      <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
+      <td>${escapeHtml(line.warehouseOrder)}</td>
+      <td>${escapeHtml(line.fromHandlingUnit)}</td>
+      <td>${escapeHtml(line.fromBin)}</td>
+      <td>${escapeHtml(line.product)}</td>
+      <td class="num">${escapeHtml(line.targetQty)}</td>
+      <td class="num">${escapeHtml(line.actualQty)}</td>
+      <td>${escapeHtml(line.unit)}</td>
+      <td>${escapeHtml(line.description)}</td>
+      <td>${escapeHtml(line.toBin)}</td>
+    </tr>
+  `).join("");
+
+  elements.printReport.innerHTML = `
+    <header>
+      <div>
+        <h1>Kommissionierabschluss</h1>
+        <p><strong>Auftrag:</strong> ${escapeHtml(state.orderNumber || "-")}</p>
+        <p><strong>Kunde:</strong> ${escapeHtml(state.customerName || "-")}</p>
+      </div>
+      <div>
+        <p><strong>Datum:</strong> ${escapeHtml(formatDateForDisplay(state.orderDate))}</p>
+        <p><strong>Erledigt:</strong> ${picked}/${state.lines.length}</p>
+        <p><strong>Dateiname:</strong> ${escapeHtml(fileName)}</p>
+      </div>
+    </header>
+    <section class="report-meta">
+      <p><strong>Europaletten:</strong> ${escapeHtml(state.euroPallets || "0")}</p>
+      <p><strong>Stellplaetze:</strong> ${escapeHtml(state.storageSpaces || "0")}</p>
+      <p><strong>Korrigiert:</strong> ${escapeHtml(String(state.lines.filter((line) => String(line.actualQty).trim() !== String(line.targetQty).trim()).length))}</p>
+    </section>
+    <section class="report-note"><strong>Notiz:</strong> ${escapeHtml(state.orderNote || "-")}</section>
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 4%;">OK</th>
+          <th style="width: 9%;">Lagerauftrag</th>
+          <th style="width: 15%;">Von-HU</th>
+          <th style="width: 11%;">Von-Platz</th>
+          <th style="width: 8%;">Produkt</th>
+          <th style="width: 6%;">Soll</th>
+          <th style="width: 6%;">Ist</th>
+          <th style="width: 5%;">Einh.</th>
+          <th style="width: 24%;">Beschreibung</th>
+          <th style="width: 12%;">Nach-Platz</th>
+        </tr>
+      </thead>
+      <tbody>${rows || `<tr><td colspan="10">Keine Positionen vorhanden.</td></tr>`}</tbody>
+    </table>`;
+  elements.printReport.hidden = false;
+  elements.printReport.setAttribute("aria-hidden", "false");
+  document.body.classList.add("is-report-printing");
+}
+
+function cleanupPrintReport() {
+  document.body.classList.remove("is-report-printing");
+  if (!elements.printReport) return;
+  elements.printReport.hidden = true;
+  elements.printReport.setAttribute("aria-hidden", "true");
+}
+
+function createPdfDocument() {
+  const pageWidth = 842;
+  const pageHeight = 595;
+  const margin = 26;
+  const lineHeight = 14;
+  const columns = [
+    { title: "OK", x: 26, width: 28 },
+    { title: "Lagerauftrag", x: 58, width: 64 },
+    { title: "Von-HU", x: 126, width: 114 },
+    { title: "Von-Platz", x: 244, width: 92 },
+    { title: "Produkt", x: 340, width: 58 },
+    { title: "Soll", x: 402, width: 45 },
+    { title: "Ist", x: 451, width: 45 },
+    { title: "Einh.", x: 500, width: 38 },
+    { title: "Beschreibung", x: 542, width: 176 },
+    { title: "Nach-Platz", x: 722, width: 92 }
+  ];
+  const pages = [];
+  let ops = [];
+  let y = 552;
+
+  const addPage = () => {
+    if (ops.length) pages.push(ops);
+    ops = [];
+    y = 552;
+    text(ops, margin, y, "Kommissionierabschluss", 18);
+    y -= 22;
+    text(ops, margin, y, `Auftrag: ${state.orderNumber || "-"}`, 10);
+    text(ops, 220, y, `Kunde: ${state.customerName || "-"}`, 10);
+    text(ops, 430, y, `Datum: ${formatDateForDisplay(state.orderDate)}`, 10);
+    y -= 18;
+    text(ops, margin, y, `Europaletten: ${state.euroPallets || "0"}`, 10);
+    text(ops, 220, y, `Stellplaetze: ${state.storageSpaces || "0"}`, 10);
+    text(ops, 430, y, `Erledigt: ${state.lines.filter((line) => line.picked).length}/${state.lines.length}`, 10);
+    y -= 18;
+    text(ops, margin, y, `Notiz: ${state.orderNote || "-"}`, 9);
+    y -= 22;
+    drawTableHeader();
+  };
+
+  const drawTableHeader = () => {
+    rect(ops, margin, y - 5, pageWidth - margin * 2, 20, "0.92 0.95 0.93");
+    columns.forEach((column) => text(ops, column.x, y, column.title, 7));
+    y -= 20;
+  };
+
+  addPage();
+
+  state.lines.forEach((line) => {
+    if (y < 52) addPage();
+
+    const description = fitText(line.description, 38);
+    const row = [
+      line.picked ? "ja" : "nein",
+      line.warehouseOrder,
+      line.fromHandlingUnit,
+      line.fromBin,
+      line.product,
+      line.targetQty,
+      line.actualQty,
+      line.unit,
+      description,
+      line.toBin
+    ];
+
+    linePath(ops, margin, y + 6, pageWidth - margin, y + 6);
+    row.forEach((cell, index) => {
+      text(ops, columns[index].x, y - 7, fitText(cell, Math.floor(columns[index].width / 4.4)), 7);
+    });
+    y -= lineHeight;
+  });
+
+  pages.push(ops);
+  return buildPdf(pages, pageWidth, pageHeight);
+}
+
+function buildPdf(pages, pageWidth, pageHeight) {
+  const objects = [];
+  const pageRefs = [];
+  objects.push("<< /Type /Catalog /Pages 2 0 R >>");
+  objects.push(null);
+  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+
+  pages.forEach((pageOps) => {
+    const content = ["q", "1 1 1 rg 0 0 842 595 re f", "0 0 0 rg", "0 0 0 RG", "0.6 w", ...pageOps, "Q"].join("\n");
+    const pageObjectNumber = objects.length + 1;
+    const contentObjectNumber = pageObjectNumber + 1;
+    pageRefs.push(`${pageObjectNumber} 0 R`);
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentObjectNumber} 0 R >>`);
+    objects.push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+  });
+
+  objects[1] = `<< /Type /Pages /Kids [${pageRefs.join(" ")}] /Count ${pageRefs.length} >>`;
+
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(pdf.length);
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  offsets.slice(1).forEach((offset) => {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  });
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+
+  return {
+    blob: new Blob([pdf], { type: "application/pdf" }),
+    dataUrl: `data:application/pdf;base64,${btoa(pdf)}`
+  };
+}
+
+function text(ops, x, y, value, size = 9) {
+  ops.push(`BT /F1 ${size} Tf ${x} ${y} Td (${escapePdfText(value)}) Tj ET`);
+}
+
+function rect(ops, x, y, width, height, fillColor) {
+  ops.push(`${fillColor} rg ${x} ${y} ${width} ${height} re f 0 0 0 rg`);
+}
+
+function linePath(ops, x1, y1, x2, y2) {
+  ops.push(`${x1} ${y1} m ${x2} ${y2} l S`);
+}
+
+function escapePdfText(value) {
+  return normalizePdfText(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)");
+}
+
+function normalizePdfText(value) {
+  return String(value ?? "")
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/Ä/g, "Ae")
+    .replace(/Ö/g, "Oe")
+    .replace(/Ü/g, "Ue")
+    .replace(/ß/g, "ss")
+    .replace(/[^\x20-\x7E]/g, "")
+    .trim();
+}
+
+function fitText(value, maxLength) {
+  const textValue = normalizePdfText(value);
+  if (textValue.length <= maxLength) return textValue;
+  return `${textValue.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function formatDateForDisplay(value) {
+  if (!value) return "-";
+  const [year, month, day] = value.split("-");
+  return year && month && day ? `${day}.${month}.${year}` : value;
+}
+
+function downloadBlob(blob, fileName, label = "Datei") {
+  if (activeDownloadUrl) URL.revokeObjectURL(activeDownloadUrl);
+  const url = URL.createObjectURL(blob);
+  activeDownloadUrl = url;
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.style.display = "none";
+
+  if (label !== "PDF") {
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  showExportLink(url, fileName, label);
+  if (label === "PDF") showPdfPreview(url);
+}
+
+function showExportLink(url, fileName, label) {
+  if (!elements.exportStatus) return;
+  elements.exportStatus.hidden = false;
+  elements.exportStatus.innerHTML = "";
+  const text = document.createTextNode(`${label} erstellt. `);
+  const openLink = document.createElement("a");
+  openLink.href = url;
+  openLink.target = "_blank";
+  openLink.rel = "noopener";
+  openLink.textContent = "PDF oeffnen";
+  const spacer = document.createTextNode(" | ");
+  const downloadLink = document.createElement("a");
+  downloadLink.href = url;
+  downloadLink.download = fileName;
+  downloadLink.target = "_blank";
+  downloadLink.rel = "noopener";
+  downloadLink.textContent = fileName;
+  elements.exportStatus.append(text, openLink, spacer, downloadLink);
+}
+
+function showPdfExport(url, fileName) {
+  if (!elements.exportStatus) return;
+  elements.exportStatus.hidden = false;
+  elements.exportStatus.innerHTML = "";
+
+  const text = document.createTextNode("PDF erstellt. ");
+  const openLink = document.createElement("a");
+  openLink.href = url;
+  openLink.target = "_blank";
+  openLink.rel = "noopener";
+  openLink.textContent = "PDF oeffnen";
+
+  const spacer = document.createTextNode(" | ");
+  const downloadLink = document.createElement("a");
+  downloadLink.href = url;
+  downloadLink.download = fileName;
+  downloadLink.textContent = fileName;
+
+  elements.exportStatus.append(text, openLink, spacer, downloadLink);
+  showPdfPreview(url);
+}
+
+function showExportMessage(message) {
+  if (!elements.exportStatus) return;
+  elements.exportStatus.hidden = false;
+  elements.exportStatus.textContent = message;
+}
+
+async function saveBlobWithPicker(blob, fileName) {
+  if (!window.showSaveFilePicker) return false;
+
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: fileName,
+      types: [
+        {
+          description: "PDF-Datei",
+          accept: { "application/pdf": [".pdf"] }
+        }
+      ]
+    });
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return true;
+  } catch (error) {
+    if (!["AbortError", "SecurityError"].includes(error?.name)) console.error(error);
+    return false;
+  }
+}
+
+function showPdfPreview(url) {
+  if (!elements.pdfPreview) return;
+  elements.pdfPreview.hidden = false;
+  elements.pdfPreview.innerHTML = "";
+  const iframe = document.createElement("iframe");
+  iframe.title = "PDF-Vorschau";
+  iframe.src = url;
+  elements.pdfPreview.appendChild(iframe);
+}
+
+function escapeCsv(value) {
+  const stringValue = String(value ?? "");
+  return `"${stringValue.replace(/"/g, '""')}"`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}

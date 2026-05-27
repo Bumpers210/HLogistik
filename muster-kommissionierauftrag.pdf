@@ -1,0 +1,115 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Length 3166 >>
+stream
+q
+1 1 1 rg 0 0 842 595 re f
+0 0 0 rg
+0 0 0 RG
+0.8 w
+BT /F1 20 Tf 28 550 Td (Muster-Kommissionierauftrag) Tj ET
+BT /F1 10 Tf 28 528 Td (Auftragsnummer: TEST-240153) Tj ET
+BT /F1 10 Tf 230 528 Td (Kunde: Testkunde Lager) Tj ET
+BT /F1 10 Tf 420 528 Td (Datum: 26.05.2026) Tj ET
+BT /F1 9 Tf 28 505 Td (Diese PDF ist eine echte Text-PDF zum Testen des Imports in der Kommissionier-App.) Tj ET
+0.92 0.95 0.93 rg
+28 430 782 38 re f
+0 0 0 rg
+28 240 782 228 re S
+28 468 m 810 468 l S
+28 430 m 810 430 l S
+28 392 m 810 392 l S
+28 354 m 810 354 l S
+28 316 m 810 316 l S
+28 278 m 810 278 l S
+28 240 m 810 240 l S
+28 240 m 28 468 l S
+106 240 m 106 468 l S
+244 240 m 244 468 l S
+348 240 m 348 468 l S
+410 240 m 410 468 l S
+464 240 m 464 468 l S
+502 240 m 502 468 l S
+698 240 m 698 468 l S
+810 240 m 810 468 l S
+810 240 m 810 468 l S
+BT /F1 7 Tf 32 445 Td (Lagerauftrag) Tj ET
+BT /F1 7 Tf 110 445 Td (Von-Handling-Unit) Tj ET
+BT /F1 7 Tf 248 445 Td (Von-Lagerplatz) Tj ET
+BT /F1 7 Tf 352 445 Td (Produkt) Tj ET
+BT /F1 7 Tf 414 445 Td (HU Von-Z) Tj ET
+BT /F1 7 Tf 468 445 Td (Basis) Tj ET
+BT /F1 7 Tf 506 445 Td (Produktbeschreibung) Tj ET
+BT /F1 7 Tf 702 445 Td (Nach-Lagerplatz) Tj ET
+BT /F1 8 Tf 32 407 Td (101064078) Tj ET
+BT /F1 8 Tf 110 407 Td (340063810000095052) Tj ET
+BT /F1 8 Tf 248 407 Td (002-H4-SL5C1) Tj ET
+BT /F1 8 Tf 352 407 Td (1014777) Tj ET
+BT /F1 8 Tf 414 407 Td (1.200) Tj ET
+BT /F1 8 Tf 468 407 Td (ST) Tj ET
+BT /F1 7 Tf 506 407 Td (Kappe fuer BOSS MINI BOX 07/04) Tj ET
+BT /F1 8 Tf 702 407 Td (9020-TREUCHTLINGEN) Tj ET
+BT /F1 8 Tf 32 369 Td (101064079) Tj ET
+BT /F1 8 Tf 110 369 Td () Tj ET
+BT /F1 8 Tf 248 369 Td (022-H4-R14) Tj ET
+BT /F1 8 Tf 352 369 Td (1014807) Tj ET
+BT /F1 8 Tf 414 369 Td (300) Tj ET
+BT /F1 8 Tf 468 369 Td (ST) Tj ET
+BT /F1 7 Tf 506 369 Td (Schaft Big Bossbox7004-3 transparent) Tj ET
+BT /F1 8 Tf 702 369 Td (9020-TREUCHTLINGEN) Tj ET
+BT /F1 8 Tf 32 331 Td (101064080) Tj ET
+BT /F1 8 Tf 110 331 Td (340063810001772914) Tj ET
+BT /F1 8 Tf 248 331 Td (002-H4-S1TA2) Tj ET
+BT /F1 8 Tf 352 331 Td (1076602) Tj ET
+BT /F1 8 Tf 414 331 Td (20) Tj ET
+BT /F1 8 Tf 468 331 Td (ST) Tj ET
+BT /F1 7 Tf 506 331 Td (10er-FS 70/10-1 BOSS Mix: HL) Tj ET
+BT /F1 8 Tf 702 331 Td (9020-TREUCHTLINGEN) Tj ET
+BT /F1 8 Tf 32 293 Td (101064081) Tj ET
+BT /F1 8 Tf 110 293 Td (340063810001773102) Tj ET
+BT /F1 8 Tf 248 293 Td (003-B2-R08) Tj ET
+BT /F1 8 Tf 352 293 Td (1059912) Tj ET
+BT /F1 8 Tf 414 293 Td (48) Tj ET
+BT /F1 8 Tf 468 293 Td (ST) Tj ET
+BT /F1 7 Tf 506 293 Td (Deckelbox blau 600x400) Tj ET
+BT /F1 8 Tf 702 293 Td (9020-TREUCHTLINGEN) Tj ET
+BT /F1 8 Tf 32 255 Td (101064082) Tj ET
+BT /F1 8 Tf 110 255 Td () Tj ET
+BT /F1 8 Tf 248 255 Td (011-A1-L02) Tj ET
+BT /F1 8 Tf 352 255 Td (1092204) Tj ET
+BT /F1 8 Tf 414 255 Td (12) Tj ET
+BT /F1 8 Tf 468 255 Td (KAR) Tj ET
+BT /F1 7 Tf 506 255 Td (Etikettenrolle Lager Aussenbereich) Tj ET
+BT /F1 8 Tf 702 255 Td (9020-TREUCHTLINGEN) Tj ET
+BT /F1 11 Tf 28 178 Td (Handschriftliche Felder im Papierprozess:) Tj ET
+BT /F1 10 Tf 28 154 Td (Europaletten: ________) Tj ET
+BT /F1 10 Tf 210 154 Td (Stellplaetze: ________) Tj ET
+BT /F1 10 Tf 400 154 Td (Notiz: ____________________________________________) Tj ET
+Q
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000338 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+3556
+%%EOF
