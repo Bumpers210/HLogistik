@@ -255,7 +255,7 @@ h2 {
 }
 
 .file-drop-title {
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 700;
 }
 
@@ -303,8 +303,8 @@ textarea {
 }
 
 input {
-  min-height: 30px;
-  padding: 3px 8px;
+  min-height: 28px;
+  padding: 2px 7px;
 }
 
 select {
@@ -357,7 +357,7 @@ textarea[readonly] {
 }
 
 .status-strip strong {
-  font-size: 1.25rem;
+  font-size: 1.15rem;
 }
 
 .status-strip span {
@@ -374,7 +374,7 @@ textarea[readonly] {
 
 .list-panel,
 .summary-box {
-  padding: 16px;
+  padding: 12px;
 }
 
 .section-heading {
@@ -382,7 +382,7 @@ textarea[readonly] {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 8px;
 }
 
 .empty-state {
@@ -403,14 +403,14 @@ textarea[readonly] {
 
 .pick-list {
   display: grid;
-  gap: 7px;
+  gap: 5px;
 }
 
 .pick-column-header {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
-  gap: 8px;
-  padding: 0 10px 5px;
+  gap: 6px;
+  padding: 0 8px 4px;
   color: var(--muted);
   font-size: 0.7rem;
   font-weight: 700;
@@ -419,14 +419,14 @@ textarea[readonly] {
 .pick-column-grid {
   display: grid;
   grid-template-columns: minmax(100px, 0.28fr) minmax(150px, 0.42fr) minmax(180px, 1fr) minmax(68px, 0.15fr) minmax(68px, 0.15fr) minmax(58px, 0.12fr);
-  gap: 7px;
+  gap: 5px;
 }
 
 .pick-item {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
-  gap: 8px;
-  padding: 8px 10px;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 6px;
+  padding: 5px 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
@@ -460,8 +460,8 @@ textarea[readonly] {
 .checkmark {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   border: 2px solid var(--accent);
   border-radius: 8px;
   background: #fff;
@@ -474,19 +474,19 @@ textarea[readonly] {
 .picked-input:checked + .checkmark::after {
   content: "✓";
   color: #fff;
-  font-size: 1.35rem;
+  font-size: 1.1rem;
   font-weight: 700;
 }
 
 .line-body {
   display: grid;
-  gap: 6px;
+  gap: 4px;
 }
 
 .line-top {
   display: grid;
   grid-template-columns: minmax(100px, 0.28fr) minmax(150px, 0.42fr) minmax(180px, 1fr) minmax(68px, 0.15fr) minmax(68px, 0.15fr) minmax(58px, 0.12fr);
-  gap: 7px;
+  gap: 5px;
 }
 
 .short-input {
@@ -497,7 +497,7 @@ textarea[readonly] {
 .location-row {
   display: grid;
   grid-template-columns: minmax(150px, 260px);
-  gap: 7px;
+  gap: 5px;
 }
 
 .quantity-row {
@@ -561,13 +561,13 @@ textarea[readonly] {
   }
 
   .pick-item {
-    grid-template-columns: 40px minmax(0, 1fr);
-    padding: 8px;
+    grid-template-columns: 34px minmax(0, 1fr);
+    padding: 6px;
   }
 
   .checkmark {
-    width: 34px;
-    height: 34px;
+    width: 28px;
+    height: 28px;
   }
 
   .line-top {

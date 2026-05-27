@@ -12,7 +12,7 @@ const state = {
   storageSpaces: "",
   orderNote: "",
   rawText: "",
-  collapseDone: false,
+  collapseDone: true,
   lines: []
 };
 
@@ -76,7 +76,7 @@ function bindEvents() {
   window.addEventListener("afterprint", cleanupPrintReport);
   elements.clearDoneButton.addEventListener("click", () => {
     state.collapseDone = !state.collapseDone;
-    elements.clearDoneButton.textContent = state.collapseDone ? "Erledigte anzeigen" : "Erledigte einklappen";
+    updateCollapseButtonText();
     saveAndRender();
   });
 
@@ -644,7 +644,11 @@ function render() {
   });
 
   updateCounts();
-  elements.clearDoneButton.textContent = state.collapseDone ? "Erledigte anzeigen" : "Erledigte einklappen";
+  updateCollapseButtonText();
+}
+
+function updateCollapseButtonText() {
+  elements.clearDoneButton.textContent = state.collapseDone ? "HU bei erledigten anzeigen" : "HU bei erledigten ausblenden";
 }
 
 function getPickingLines(importOrder) {
@@ -726,6 +730,7 @@ async function loadOrder(id) {
   try {
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
     Object.assign(state, order);
+    state.collapseDone = true;
     saveStateWithoutServer();
     render();
     setServerStatus("Auftrag geladen.", "ok");
@@ -831,7 +836,7 @@ function clearCurrentOrder() {
     storageSpaces: "",
     orderNote: "",
     rawText: "",
-    collapseDone: false,
+    collapseDone: true,
     lines: []
   });
 }
