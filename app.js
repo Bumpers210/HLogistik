@@ -626,6 +626,8 @@ function render() {
     map.targetQty.readOnly = true;
     map.unit.readOnly = true;
 
+    item.querySelector(".line-top").append(map.description, map.targetQty, map.actualQty, map.unit);
+
     map.picked.addEventListener("change", () => updateLine(line.id, { picked: map.picked.checked }));
     map.fromHandlingUnit.addEventListener("input", () => {
       map.fromHandlingUnit.value = map.fromHandlingUnit.value.replace(/[^0-9,]/g, "");
