@@ -4,10 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Kommissionier-App</title>
-    <link rel="stylesheet" href="styles.css?v=20260527-1">
+    <link rel="stylesheet" href="styles.css?v=20260527-2">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
-    <script src="app.js?v=20260527-2" defer></script>
+    <script src="app.js?v=20260527-3" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -134,9 +134,8 @@
         </label>
         <div class="line-body">
           <div class="line-top">
-            <input class="warehouse-order-input short-input" aria-label="Lagerauftrag" placeholder="Lagerauftrag">
             <input class="product-input short-input" aria-label="Produkt" placeholder="Produkt">
-            <input class="description-input" aria-label="Produktbeschreibung" placeholder="Produktbeschreibung">
+            <input class="from-bin-input short-input" aria-label="Lagerplatz" placeholder="Lagerplatz">
           </div>
           <div class="location-row">
             <label>
@@ -144,12 +143,8 @@
               <input class="from-hu-input" type="text" inputmode="decimal" pattern="[0-9,]*" placeholder="Handling Unit">
             </label>
             <label>
-              Von Lagerplatz
-              <input class="from-bin-input" type="text" placeholder="002-H4-SL5C1">
-            </label>
-            <label>
-              Nach Lagerplatz
-              <input class="to-bin-input" type="text" placeholder="9020-TREUCHTLINGEN">
+              Produktbeschreibung
+              <input class="description-input" type="text" placeholder="Produktbeschreibung">
             </label>
           </div>
           <div class="quantity-row">

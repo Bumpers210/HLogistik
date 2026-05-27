@@ -470,7 +470,7 @@ textarea[readonly] {
 
 .line-top {
   display: grid;
-  grid-template-columns: 140px 120px minmax(220px, 1fr);
+  grid-template-columns: 140px minmax(170px, 1fr);
   gap: 10px;
 }
 
@@ -481,7 +481,7 @@ textarea[readonly] {
 
 .location-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  grid-template-columns: minmax(180px, 0.35fr) minmax(260px, 1fr);
   gap: 10px;
 }
 

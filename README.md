@@ -19,7 +19,7 @@ Spaeter dauerhaft:
 - PDF importieren und Text auslesen
 - Eingescannte PDFs per OCR auslesen
 - Lager-Tabelle aus dem PDF-Text erkennen
-- Spalten fuer Lagerauftrag, Von-HU, Von-Lagerplatz, Produkt, Menge, Beschreibung und Nach-Lagerplatz bearbeiten
+- Spalten fuer Von-HU, Lagerplatz, Produkt, Menge und Beschreibung bearbeiten
 - Positionen abhaken
 - Soll-/Ist-Mengen korrigieren
 - Europaletten, Stellplaetze und Notiz erfassen

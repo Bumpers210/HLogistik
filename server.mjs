@@ -148,7 +148,6 @@ function printableHtml(order, fileName) {
   const rows = order.lines.map((line) => `
     <tr>
       <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
-      <td>${escapeHtml(line.warehouseOrder)}</td>
       <td>${escapeHtml(line.fromHandlingUnit)}</td>
       <td>${escapeHtml(line.fromBin)}</td>
       <td>${escapeHtml(line.product)}</td>
@@ -156,7 +155,6 @@ function printableHtml(order, fileName) {
       <td class="num">${escapeHtml(line.actualQty)}</td>
       <td>${escapeHtml(line.unit)}</td>
       <td>${escapeHtml(line.description)}</td>
-      <td>${escapeHtml(line.toBin)}</td>
     </tr>`).join("");
 
   return `<!doctype html>
@@ -203,18 +201,16 @@ function printableHtml(order, fileName) {
       <thead>
         <tr>
           <th style="width:4%;">OK</th>
-          <th style="width:9%;">Lagerauftrag</th>
-          <th style="width:15%;">Von-HU</th>
-          <th style="width:11%;">Von-Platz</th>
-          <th style="width:8%;">Produkt</th>
-          <th style="width:6%;">Soll</th>
-          <th style="width:6%;">Ist</th>
-          <th style="width:5%;">Einh.</th>
-          <th style="width:24%;">Beschreibung</th>
-          <th style="width:12%;">Nach-Platz</th>
+          <th style="width:17%;">Von-HU</th>
+          <th style="width:14%;">Lagerplatz</th>
+          <th style="width:10%;">Produkt</th>
+          <th style="width:7%;">Soll</th>
+          <th style="width:7%;">Ist</th>
+          <th style="width:6%;">Einh.</th>
+          <th style="width:35%;">Beschreibung</th>
         </tr>
       </thead>
-      <tbody>${rows || `<tr><td colspan="10">Keine Positionen vorhanden.</td></tr>`}</tbody>
+      <tbody>${rows || `<tr><td colspan="8">Keine Positionen vorhanden.</td></tr>`}</tbody>
     </table>
   </body>
 </html>`;

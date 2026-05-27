@@ -230,7 +230,7 @@ async function renderPdfPageToCanvas(pdf, pageNumber) {
 function importText(text, fileName = "", parsed = parseOrderText(text)) {
   state.rawText = text;
 
-  if (parsed.orderNumber && !state.orderNumber) state.orderNumber = parsed.orderNumber;
+  if (parsed.orderNumber) state.orderNumber = parsed.orderNumber;
   if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
   if (!state.orderNumber && fileName) state.orderNumber = fileName.replace(/\.pdf$/i, "");
 
@@ -296,7 +296,7 @@ function parseOrderText(text) {
 
   if (tableRows.length) {
     return {
-      orderNumber: orderNumber || "",
+      orderNumber: destinationToOrderNumber(tableRows) || orderNumber || "",
       customerName: customerName || "",
       lines: tableRows.map((line) => createLine({
         ...line,
@@ -400,6 +400,16 @@ function parseWarehouseLine(line) {
     unit,
     toBin
   };
+}
+
+function destinationToOrderNumber(lines) {
+  const destination = lines
+    .map((line) => line.toBin)
+    .find((value) => String(value || "").trim());
+  if (!destination) return "";
+  return String(destination)
+    .replace(/^\s*\d+\s*[-/ ]\s*/, "")
+    .trim();
 }
 
 function collectWarehouseRows(lines) {
@@ -587,12 +597,10 @@ function render() {
 
     const map = {
       picked: item.querySelector(".picked-input"),
-      warehouseOrder: item.querySelector(".warehouse-order-input"),
       fromHandlingUnit: item.querySelector(".from-hu-input"),
       fromBin: item.querySelector(".from-bin-input"),
       product: item.querySelector(".product-input"),
       description: item.querySelector(".description-input"),
-      toBin: item.querySelector(".to-bin-input"),
       targetQty: item.querySelector(".target-qty-input"),
       actualQty: item.querySelector(".actual-qty-input"),
       unit: item.querySelector(".unit-input")
@@ -601,26 +609,21 @@ function render() {
     map.picked.checked = line.picked;
     const isMissingHandlingUnit = !String(line.fromHandlingUnit || "").trim();
     const canEditHandlingUnit = line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
-    map.warehouseOrder.value = line.warehouseOrder || "";
     map.fromHandlingUnit.value = line.fromHandlingUnit || "";
     map.fromBin.value = line.fromBin || "";
     map.product.value = line.product || "";
     map.description.value = line.description;
-    map.toBin.value = line.toBin || "";
     map.targetQty.value = line.targetQty;
     map.actualQty.value = line.actualQty;
     map.unit.value = line.unit;
-    map.warehouseOrder.readOnly = true;
     map.product.readOnly = true;
     map.description.readOnly = true;
     setHandlingUnitEditMode(map.fromHandlingUnit, canEditHandlingUnit);
     map.fromBin.readOnly = true;
-    map.toBin.readOnly = true;
     map.targetQty.readOnly = true;
     map.unit.readOnly = true;
 
     map.picked.addEventListener("change", () => updateLine(line.id, { picked: map.picked.checked }));
-    map.warehouseOrder.addEventListener("input", () => updateLine(line.id, { warehouseOrder: map.warehouseOrder.value }, false));
     map.fromHandlingUnit.addEventListener("input", () => {
       map.fromHandlingUnit.value = map.fromHandlingUnit.value.replace(/[^0-9,]/g, "");
       updateLine(line.id, { fromHandlingUnit: map.fromHandlingUnit.value, fromHandlingUnitEditable: canEditHandlingUnit }, false);
@@ -628,7 +631,6 @@ function render() {
     map.fromBin.addEventListener("input", () => updateLine(line.id, { fromBin: map.fromBin.value }, false));
     map.product.addEventListener("input", () => updateLine(line.id, { product: map.product.value }, false));
     map.description.addEventListener("input", () => updateLine(line.id, { description: map.description.value }, false));
-    map.toBin.addEventListener("input", () => updateLine(line.id, { toBin: map.toBin.value }, false));
     map.targetQty.addEventListener("input", () => updateLine(line.id, { targetQty: map.targetQty.value }, false));
     map.actualQty.addEventListener("input", () => updateLine(line.id, { actualQty: map.actualQty.value }, false));
     map.unit.addEventListener("input", () => updateLine(line.id, { unit: map.unit.value }, false));
@@ -827,21 +829,19 @@ function exportCsv() {
     ["Stellplaetze", state.storageSpaces],
     ["Notiz", state.orderNote],
     [],
-    ["Erledigt", "Lagerauftrag", "Von-Handling-Unit", "Von-Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit", "Nach-Lagerplatz"]
+    ["Erledigt", "Von-Handling-Unit", "Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit"]
   ];
 
   state.lines.forEach((line) => {
     rows.push([
       line.picked ? "ja" : "nein",
-      line.warehouseOrder,
       line.fromHandlingUnit,
       line.fromBin,
       line.product,
       line.description,
       line.targetQty,
       line.actualQty,
-      line.unit,
-      line.toBin
+      line.unit
     ]);
   });
 
@@ -900,7 +900,6 @@ function renderPrintReport(fileName) {
   const rows = state.lines.map((line) => `
     <tr>
       <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
-      <td>${escapeHtml(line.warehouseOrder)}</td>
       <td>${escapeHtml(line.fromHandlingUnit)}</td>
       <td>${escapeHtml(line.fromBin)}</td>
       <td>${escapeHtml(line.product)}</td>
@@ -908,7 +907,6 @@ function renderPrintReport(fileName) {
       <td class="num">${escapeHtml(line.actualQty)}</td>
       <td>${escapeHtml(line.unit)}</td>
       <td>${escapeHtml(line.description)}</td>
-      <td>${escapeHtml(line.toBin)}</td>
     </tr>
   `).join("");
 
@@ -935,18 +933,16 @@ function renderPrintReport(fileName) {
       <thead>
         <tr>
           <th style="width: 4%;">OK</th>
-          <th style="width: 9%;">Lagerauftrag</th>
-          <th style="width: 15%;">Von-HU</th>
-          <th style="width: 11%;">Von-Platz</th>
-          <th style="width: 8%;">Produkt</th>
-          <th style="width: 6%;">Soll</th>
-          <th style="width: 6%;">Ist</th>
-          <th style="width: 5%;">Einh.</th>
-          <th style="width: 24%;">Beschreibung</th>
-          <th style="width: 12%;">Nach-Platz</th>
+          <th style="width: 17%;">Von-HU</th>
+          <th style="width: 14%;">Lagerplatz</th>
+          <th style="width: 10%;">Produkt</th>
+          <th style="width: 7%;">Soll</th>
+          <th style="width: 7%;">Ist</th>
+          <th style="width: 6%;">Einh.</th>
+          <th style="width: 35%;">Beschreibung</th>
         </tr>
       </thead>
-      <tbody>${rows || `<tr><td colspan="10">Keine Positionen vorhanden.</td></tr>`}</tbody>
+      <tbody>${rows || `<tr><td colspan="8">Keine Positionen vorhanden.</td></tr>`}</tbody>
     </table>`;
   elements.printReport.hidden = false;
   elements.printReport.setAttribute("aria-hidden", "false");
@@ -967,15 +963,13 @@ function createPdfDocument() {
   const lineHeight = 14;
   const columns = [
     { title: "OK", x: 26, width: 28 },
-    { title: "Lagerauftrag", x: 58, width: 64 },
-    { title: "Von-HU", x: 126, width: 114 },
-    { title: "Von-Platz", x: 244, width: 92 },
-    { title: "Produkt", x: 340, width: 58 },
-    { title: "Soll", x: 402, width: 45 },
-    { title: "Ist", x: 451, width: 45 },
-    { title: "Einh.", x: 500, width: 38 },
-    { title: "Beschreibung", x: 542, width: 176 },
-    { title: "Nach-Platz", x: 722, width: 92 }
+    { title: "Von-HU", x: 58, width: 130 },
+    { title: "Lagerplatz", x: 192, width: 100 },
+    { title: "Produkt", x: 296, width: 70 },
+    { title: "Soll", x: 370, width: 48 },
+    { title: "Ist", x: 422, width: 48 },
+    { title: "Einh.", x: 474, width: 42 },
+    { title: "Beschreibung", x: 520, width: 292 }
   ];
   const pages = [];
   let ops = [];
@@ -1011,18 +1005,16 @@ function createPdfDocument() {
   state.lines.forEach((line) => {
     if (y < 52) addPage();
 
-    const description = fitText(line.description, 38);
+    const description = fitText(line.description, 62);
     const row = [
       line.picked ? "ja" : "nein",
-      line.warehouseOrder,
       line.fromHandlingUnit,
       line.fromBin,
       line.product,
       line.targetQty,
       line.actualQty,
       line.unit,
-      description,
-      line.toBin
+      description
     ];
 
     linePath(ops, margin, y + 6, pageWidth - margin, y + 6);
