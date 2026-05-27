@@ -589,7 +589,10 @@ function render() {
   elements.pickList.innerHTML = "";
   elements.emptyState.hidden = state.lines.length > 0;
 
-  state.lines.forEach((line) => {
+  const importOrder = new Map(state.lines.map((line, index) => [line.id, index]));
+
+  // The picking view is sorted by storage location. Exports keep state.lines in import order.
+  getPickingLines(importOrder).forEach((line) => {
     const item = elements.lineTemplate.content.firstElementChild.cloneNode(true);
     item.dataset.id = line.id;
     item.classList.toggle("is-done", line.picked);
@@ -640,6 +643,26 @@ function render() {
 
   updateCounts();
   elements.clearDoneButton.textContent = state.collapseDone ? "Erledigte anzeigen" : "Erledigte einklappen";
+}
+
+function getPickingLines(importOrder) {
+  return [...state.lines].sort((left, right) => compareStorageBins(left, right, importOrder));
+}
+
+function compareStorageBins(left, right, importOrder) {
+  const leftBin = String(left.fromBin || "").trim();
+  const rightBin = String(right.fromBin || "").trim();
+
+  if (!leftBin && rightBin) return 1;
+  if (leftBin && !rightBin) return -1;
+
+  const byBin = leftBin.localeCompare(rightBin, "de", {
+    numeric: true,
+    sensitivity: "base"
+  });
+  if (byBin !== 0) return byBin;
+
+  return (importOrder.get(left.id) ?? 0) - (importOrder.get(right.id) ?? 0);
 }
 
 function syncFields() {
