@@ -117,7 +117,7 @@ async function route(request, response) {
 }
 
 async function exportPdf(order) {
-  const fileBase = sanitizeFileName(`kommissionierung-${order.orderNumber || order.id || "auftrag"}`);
+  const fileBase = pdfFileBase(order);
   const htmlPath = path.join(tempDir, `${fileBase}.html`);
   const pdfPath = path.join(exportDir, `${fileBase}.pdf`);
   await writeFile(htmlPath, printableHtml(order, `${fileBase}.pdf`), "utf8");
@@ -339,6 +339,20 @@ function createId() {
 
 function sanitizeFileName(value) {
   return String(value).replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").slice(0, 140);
+}
+
+function pdfFileBase(order) {
+  const orderNumber = sanitizeFileNamePart(order.orderNumber || order.id || "auftrag");
+  const orderDate = sanitizeFileNamePart(order.orderDate || new Date().toISOString().slice(0, 10));
+  return sanitizeFileName(`kommissionierung-${orderNumber}-${orderDate}`);
+}
+
+function sanitizeFileNamePart(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .replace(/\s+/g, "_")
+    .slice(0, 80) || "auftrag";
 }
 
 function formatDate(value) {

@@ -908,7 +908,7 @@ function exportCsv() {
 }
 
 async function exportPdf() {
-  const fileName = `kommissionierung-${state.orderNumber || "auftrag"}.pdf`;
+  const fileName = buildPdfFileName(state);
   if (serverOnline) {
     const saved = await saveOrderNow(true);
     if (!saved || !state.id) {
@@ -1173,6 +1173,20 @@ function formatDateForDisplay(value) {
   if (!value) return "-";
   const [year, month, day] = value.split("-");
   return year && month && day ? `${day}.${month}.${year}` : value;
+}
+
+function buildPdfFileName(order) {
+  const orderNumber = sanitizeFileNamePart(order.orderNumber || order.id || "auftrag");
+  const orderDate = sanitizeFileNamePart(order.orderDate || new Date().toISOString().slice(0, 10));
+  return `kommissionierung-${orderNumber}-${orderDate}.pdf`;
+}
+
+function sanitizeFileNamePart(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .replace(/\s+/g, "_")
+    .slice(0, 80) || "auftrag";
 }
 
 function downloadBlob(blob, fileName, label = "Datei") {
