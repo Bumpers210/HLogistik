@@ -53,6 +53,7 @@ function bindElements() {
     "serverStatus",
     "clearDoneButton",
     "pickList",
+    "pickHeader",
     "emptyState",
     "pickedCount",
     "openCount",
@@ -588,6 +589,7 @@ function render() {
   syncFields();
   elements.pickList.innerHTML = "";
   elements.emptyState.hidden = state.lines.length > 0;
+  elements.pickHeader.hidden = state.lines.length === 0;
 
   const importOrder = new Map(state.lines.map((line, index) => [line.id, index]));
 
@@ -625,8 +627,6 @@ function render() {
     map.fromBin.readOnly = true;
     map.targetQty.readOnly = true;
     map.unit.readOnly = true;
-
-    item.querySelector(".line-top").append(map.description, map.targetQty, map.actualQty, map.unit);
 
     map.picked.addEventListener("change", () => updateLine(line.id, { picked: map.picked.checked }));
     map.fromHandlingUnit.addEventListener("input", () => {

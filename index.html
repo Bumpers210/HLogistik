@@ -4,10 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Kommissionier-App</title>
-    <link rel="stylesheet" href="styles.css?v=20260527-3">
+    <link rel="stylesheet" href="styles.css?v=20260527-4">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
-    <script src="app.js?v=20260527-5" defer></script>
+    <script src="app.js?v=20260527-6" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -89,6 +89,17 @@
             <h3>Noch kein Auftrag geladen</h3>
             <p>Importiere eine PDF oder füge Positionen manuell hinzu.</p>
           </div>
+          <div id="pickHeader" class="pick-column-header" hidden>
+            <span></span>
+            <div class="pick-column-grid">
+              <span>Produkt</span>
+              <span>Lagerplatz</span>
+              <span>Produktbeschreibung</span>
+              <span>Soll</span>
+              <span>Ist</span>
+              <span>Einheit</span>
+            </div>
+          </div>
           <div id="pickList" class="pick-list" aria-live="polite"></div>
         </div>
 
@@ -136,29 +147,15 @@
           <div class="line-top">
             <input class="product-input short-input" aria-label="Produkt" placeholder="Produkt">
             <input class="from-bin-input short-input" aria-label="Lagerplatz" placeholder="Lagerplatz">
+            <input class="description-input" aria-label="Produktbeschreibung" placeholder="Produktbeschreibung">
+            <input class="target-qty-input" type="text" inputmode="decimal" aria-label="Soll" placeholder="Soll">
+            <input class="actual-qty-input" type="text" inputmode="decimal" aria-label="Ist" placeholder="Ist">
+            <input class="unit-input" type="text" aria-label="Einheit" placeholder="Stk">
           </div>
           <div class="location-row">
             <label>
               Von HU
               <input class="from-hu-input" type="text" inputmode="decimal" pattern="[0-9,]*" placeholder="Handling Unit">
-            </label>
-            <label>
-              Produktbeschreibung
-              <input class="description-input" type="text" placeholder="Produktbeschreibung">
-            </label>
-          </div>
-          <div class="quantity-row">
-            <label>
-              Soll
-              <input class="target-qty-input" type="text" inputmode="decimal" placeholder="0">
-            </label>
-            <label>
-              Ist
-              <input class="actual-qty-input" type="text" inputmode="decimal" placeholder="0">
-            </label>
-            <label>
-              Einheit
-              <input class="unit-input" type="text" placeholder="Stk">
             </label>
           </div>
         </div>
