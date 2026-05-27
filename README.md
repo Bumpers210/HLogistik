@@ -17,6 +17,7 @@ Spaeter dauerhaft:
 ## Was schon geht
 
 - PDF importieren und Text auslesen
+- Eingescannte PDFs per OCR auslesen
 - Lager-Tabelle aus dem PDF-Text erkennen
 - Spalten fuer Lagerauftrag, Von-HU, Von-Lagerplatz, Produkt, Menge, Beschreibung und Nach-Lagerplatz bearbeiten
 - Positionen abhaken
@@ -28,7 +29,7 @@ Spaeter dauerhaft:
 
 ## Wichtig
 
-Der PDF-Import funktioniert direkt bei Text-PDFs. Eingescannte PDFs brauchen vorher OCR, sonst ist in der Datei kein lesbarer Text enthalten. Der Parser ist als Startpunkt gebaut und sollte spaeter an echte Beispielauftraege angepasst werden.
+Text-PDFs werden direkt ausgelesen. Wenn eine PDF nur aus eingescannten Bildern besteht, rendert die App die Seiten als Bild und liest sie per OCR aus. Fuer OCR wird beim ersten Lauf Tesseract.js mit deutscher und englischer Spracherkennung geladen; das kann je nach WLAN und PDF-Groesse etwas dauern.
 
 ## Ordner
 

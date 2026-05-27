@@ -1,5 +1,7 @@
 const STORAGE_KEY = "kommissionier-app-state-v1";
 const API_BASE = "";
+const OCR_LANGUAGE = "deu+eng";
+const OCR_RENDER_SCALE = 2.5;
 
 const state = {
   id: "",
@@ -105,23 +107,17 @@ async function handlePdfUpload(event) {
     setImportStatus(`Lese ${file.name} ...`);
     data = await file.arrayBuffer();
     const pdf = await window.pdfjsLib.getDocument({ data }).promise;
-    const pages = [];
+    const fullText = await readPdfText(pdf);
+    const imported = await chooseBestImportText(pdf, fullText);
+    const result = importText(imported.text, file.name, imported.parsed);
 
-    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-      const page = await pdf.getPage(pageNumber);
-      const content = await page.getTextContent();
-      pages.push(rebuildPageRows(content.items));
-    }
-
-    const fullText = pages.join("\n");
-    state.rawText = fullText;
-    const result = importText(fullText, file.name);
     if (result.lines > 0) {
-      setImportStatus(`${result.lines} Positionen importiert.`, "ok");
-    } else if (fullText.trim()) {
-      setImportStatus("PDF-Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
+      const suffix = imported.source === "ocr" ? " per OCR" : "";
+      setImportStatus(`${result.lines} Positionen${suffix} importiert.`, "ok");
+    } else if (imported.text.trim()) {
+      setImportStatus("Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
     } else {
-      setImportStatus("Keine lesbaren PDF-Texte gefunden. Ist es ein Scan?", "error");
+      setImportStatus("Keine lesbaren Inhalte gefunden.", "error");
     }
   } catch (error) {
     console.error(error);
@@ -130,15 +126,108 @@ async function handlePdfUpload(event) {
       const result = importText(fallbackText, file.name);
       setImportStatus(`Fallback genutzt: ${result.lines} Positionen importiert.`, result.lines ? "ok" : "error");
     } else {
-      setImportStatus("PDF konnte nicht ausgelesen werden. Bei Scan-PDFs ist OCR noetig.", "error");
+      setImportStatus(error.message || "PDF konnte nicht ausgelesen werden.", "error");
     }
   } finally {
     event.target.value = "";
   }
 }
 
-function importText(text, fileName = "") {
-  const parsed = parseOrderText(text);
+async function readPdfText(pdf) {
+  const pages = [];
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    pages.push(rebuildPageRows(content.items));
+  }
+
+  return pages.join("\n");
+}
+
+async function chooseBestImportText(pdf, fullText) {
+  let parsed = parseOrderText(fullText);
+  if (parsed.lines.length) return { text: fullText, parsed, source: "pdf-text" };
+
+  const reason = fullText.trim()
+    ? "PDF-Text erkannt, aber keine Tabellenzeilen. Starte OCR ..."
+    : "Scan erkannt. Starte OCR ...";
+  setImportStatus(reason);
+
+  const ocrText = await readPdfWithOcr(pdf);
+  if (!ocrText.trim()) return { text: fullText, parsed, source: "pdf-text" };
+
+  const combinedText = fullText.trim() ? `${fullText}\n${ocrText}` : ocrText;
+  parsed = parseOrderText(combinedText);
+  return { text: combinedText, parsed, source: "ocr" };
+}
+
+async function readPdfWithOcr(pdf) {
+  if (!window.Tesseract?.createWorker) {
+    throw new Error("OCR-Modul konnte nicht geladen werden. Internetverbindung pruefen und Seite neu laden.");
+  }
+
+  const worker = await createOcrWorker(pdf.numPages);
+  const pages = [];
+
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      setImportStatus(`OCR Seite ${pageNumber}/${pdf.numPages} vorbereiten ...`);
+      const canvas = await renderPdfPageToCanvas(pdf, pageNumber);
+      const result = await worker.recognize(canvas);
+      pages.push(result.data.text || "");
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+  } finally {
+    await worker.terminate();
+  }
+
+  return pages.join("\n");
+}
+
+async function createOcrWorker(totalPages) {
+  let currentPage = 1;
+  const worker = await window.Tesseract.createWorker(OCR_LANGUAGE, 1, {
+    workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/worker.min.js",
+    corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0",
+    langPath: "https://tessdata.projectnaptha.com/4.0.0",
+    logger: (message) => {
+      if (message.status === "recognizing text" && typeof message.progress === "number") {
+        const percent = Math.round(message.progress * 100);
+        setImportStatus(`OCR Seite ${currentPage}/${totalPages}: ${percent}%`);
+      }
+    }
+  });
+
+  await worker.setParameters({
+    preserve_interword_spaces: "1",
+    tessedit_pageseg_mode: window.Tesseract.PSM?.AUTO || "3",
+    user_defined_dpi: "300"
+  });
+
+  const originalRecognize = worker.recognize.bind(worker);
+  worker.recognize = async (...args) => {
+    const result = await originalRecognize(...args);
+    currentPage += 1;
+    return result;
+  };
+
+  return worker;
+}
+
+async function renderPdfPageToCanvas(pdf, pageNumber) {
+  const page = await pdf.getPage(pageNumber);
+  const viewport = page.getViewport({ scale: OCR_RENDER_SCALE });
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  await page.render({ canvasContext: context, viewport }).promise;
+  return canvas;
+}
+
+function importText(text, fileName = "", parsed = parseOrderText(text)) {
   state.rawText = text;
 
   if (parsed.orderNumber && !state.orderNumber) state.orderNumber = parsed.orderNumber;
@@ -200,12 +289,10 @@ function parseOrderText(text) {
     /(?:^|\n)\s*(?:auftrag|kommission|lieferschein)\s*[:#-]\s*([A-Z0-9-]{4,})/i
   ]);
   const customerName = findFirst(text, [
-    /(?:kunde|lieferadresse|empfänger)\s*[:#-]?\s*([^\n\t]{3,80})/i
+    /(?:kunde|lieferadresse|empfÃ¤nger)\s*[:#-]?\s*([^\n\t]{3,80})/i
   ]);
 
-  const tableRows = cleanedLines
-    .map(parseWarehouseLine)
-    .filter(Boolean);
+  const tableRows = collectWarehouseRows(cleanedLines);
 
   if (tableRows.length) {
     return {
@@ -225,7 +312,7 @@ function parseOrderText(text) {
   cleanedLines.forEach((line) => {
     const starter = line.match(/^(\d{1,4})(?:[.)\s-]+)(.+)$/);
     const looksLikeArticle = /\b[A-Z0-9][A-Z0-9/-]{3,}\b/.test(line);
-    const hasQuantity = /\b\d+(?:[,.]\d+)?\s*(?:stk|st|stück|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i.test(line);
+    const hasQuantity = /\b\d+(?:[,.]\d+)?\s*(?:stk|st|stÃ¼ck|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i.test(line);
     const isLikelyPosition = starter && (hasQuantity || looksLikeArticle || line.length > 18);
 
     if (isLikelyPosition) {
@@ -277,7 +364,8 @@ function rebuildPageRows(items) {
 function parseWarehouseLine(line) {
   if (/lagerauftrag|produktbeschreibung|basis|nach-lagerplatz/i.test(line)) return null;
 
-  const tokens = line
+  const normalizedLine = normalizeOcrWarehouseLine(line);
+  const tokens = normalizedLine
     .replace(/\|/g, " ")
     .split(/\t+|\s{2,}/)
     .flatMap((part) => part.trim().split(/\s+/))
@@ -292,10 +380,10 @@ function parseWarehouseLine(line) {
   const fromBin = tokens[cursor] && /-/.test(tokens[cursor]) ? tokens[cursor++] : "";
   const product = /^\d{4,}$/.test(tokens[cursor] || "") ? tokens[cursor++] : "";
   const targetQty = /^[\d.,]+$/.test(tokens[cursor] || "") ? tokens[cursor++].replace(",", ".") : "";
-  const unit = /^[A-Za-zÄÖÜäöü]{1,5}$/.test(tokens[cursor] || "") ? normalizeUnit(tokens[cursor++]) : "Stk";
+  const unit = /^[A-Za-zÃ„Ã–ÃœÃ¤Ã¶Ã¼]{1,5}$/.test(tokens[cursor] || "") ? normalizeUnit(tokens[cursor++]) : "Stk";
   const remaining = tokens.slice(cursor);
 
-  if (!product || !targetQty || remaining.length === 0) return null;
+  if (!product || !targetQty || remaining.length === 0) return parseWarehouseLineLoose(normalizedLine);
 
   let toBin = "";
   if (remaining.length && /^\d{3,}[-A-Z0-9]+$/i.test(remaining[remaining.length - 1])) {
@@ -314,8 +402,112 @@ function parseWarehouseLine(line) {
   };
 }
 
+function collectWarehouseRows(lines) {
+  const rows = [];
+  const seen = new Set();
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const windows = [
+      lines[index],
+      [lines[index], lines[index + 1]].filter(Boolean).join(" "),
+      [lines[index], lines[index + 1], lines[index + 2]].filter(Boolean).join(" ")
+    ];
+
+    for (const candidate of windows) {
+      const parsed = parseWarehouseLine(candidate);
+      if (!parsed || seen.has(parsed.warehouseOrder)) continue;
+      rows.push(parsed);
+      seen.add(parsed.warehouseOrder);
+      break;
+    }
+  }
+
+  return rows;
+}
+
+function normalizeOcrWarehouseLine(line) {
+  return line
+    .replace(/[|Â¦]/g, " ")
+    .replace(/[(){}\[\]]/g, " ")
+    .replace(/[Â¢Â©]/g, "C")
+    .replace(/[â€”â€“]/g, "-")
+    .replace(/[â€š]/g, ",")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseWarehouseLineLoose(line) {
+  const normalizedLine = normalizeOcrWarehouseLine(line);
+  const warehouseMatch = normalizedLine.match(/\b\d{6,}\b/);
+  if (!warehouseMatch) return null;
+
+  const warehouseOrder = warehouseMatch[0];
+  const afterOrder = normalizedLine.slice(warehouseMatch.index + warehouseOrder.length);
+  const productMatch = findProductQuantityMatch(afterOrder);
+  if (!productMatch) return null;
+
+  const beforeProduct = afterOrder.slice(0, productMatch.index);
+  const afterUnit = afterOrder.slice(productMatch.index + productMatch.text.length);
+  const fromHandlingUnit = extractHandlingUnit(beforeProduct);
+  const fromBin = extractBin(beforeProduct);
+  const toBin = extractDestinationBin(afterUnit);
+  const description = afterUnit.replace(toBin, "").replace(/\s+/g, " ").trim();
+
+  return {
+    warehouseOrder,
+    fromHandlingUnit,
+    fromBin,
+    product: productMatch.product,
+    description,
+    targetQty: normalizeQuantity(productMatch.quantity),
+    unit: normalizeUnit(productMatch.unit),
+    toBin
+  };
+}
+
+function findProductQuantityMatch(text) {
+  const unitPattern = "ST|SI|S1|5T|STK|KAR|PCK|PAK|VE|KG|G|M|L|PAL";
+  const matches = [...text.matchAll(new RegExp(`(?:^|\\D)(\\d{4,8})\\D{0,12}(\\d{1,4}(?:[,.]\\d{3})*|\\d+(?:[,.]\\d+)?)\\s*(${unitPattern})\\b`, "gi"))];
+  const match = matches.find((entry) => entry[1].length <= 8) || matches.at(-1);
+  if (!match) return null;
+  const productOffset = match[0].indexOf(match[1]);
+  const index = match.index + productOffset;
+
+  return {
+    index,
+    text: text.slice(index, match.index + match[0].length),
+    product: match[1],
+    quantity: match[2],
+    unit: match[3]
+  };
+}
+
+function extractHandlingUnit(text) {
+  const match = text.match(/[0-9OoQD]{10,}/);
+  if (!match) return "";
+  const value = match[0].replace(/[OoQD]/g, "0").replace(/\D/g, "");
+  return value.length >= 10 ? value : "";
+}
+
+function extractBin(text) {
+  const match = text.match(/\b[0OQD]{0,2}\d{1,3}-[A-Z0-9]{1,4}-[A-Z0-9C]{2,8}\b/i);
+  if (!match) return "";
+  return match[0].replace(/^[OQD]/i, "0").toUpperCase();
+}
+
+function extractDestinationBin(text) {
+  const match = text.match(/\b\d{3,5}-[A-Z0-9-]{4,}\b/i);
+  return match ? match[0].toUpperCase() : "";
+}
+
+function normalizeQuantity(value) {
+  const normalized = String(value || "").replace(",", ".");
+  if (/^\d{1,3}\.\d{3}$/.test(normalized)) return normalized.replace(".", "");
+  return normalized;
+}
+
 function parsePositionLine(position, content) {
-  const quantityMatch = content.match(/(\d+(?:[,.]\d+)?)\s*(stk|st|stück|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i);
+  const quantityMatch = content.match(/(\d+(?:[,.]\d+)?)\s*(stk|st|stÃ¼ck|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i);
   const articleMatch = content.match(/\b([A-Z0-9][A-Z0-9/-]{3,})\b/);
   const targetQty = quantityMatch ? quantityMatch[1].replace(",", ".") : "";
   const unit = quantityMatch ? normalizeUnit(quantityMatch[2]) : "";
@@ -331,7 +523,7 @@ function parsePositionLine(position, content) {
 
 function normalizeUnit(unit) {
   const value = unit.toLowerCase();
-  if (["st", "stk", "stück"].includes(value)) return "Stk";
+  if (["st", "si", "s1", "5t", "stk", "stÃ¼ck"].includes(value)) return "Stk";
   if (["pck", "pak"].includes(value)) return "Pck";
   if (value === "ve") return "VE";
   return unit;
@@ -903,13 +1095,13 @@ function escapePdfText(value) {
 
 function normalizePdfText(value) {
   return String(value ?? "")
-    .replace(/ä/g, "ae")
-    .replace(/ö/g, "oe")
-    .replace(/ü/g, "ue")
-    .replace(/Ä/g, "Ae")
-    .replace(/Ö/g, "Oe")
-    .replace(/Ü/g, "Ue")
-    .replace(/ß/g, "ss")
+    .replace(/Ã¤/g, "ae")
+    .replace(/Ã¶/g, "oe")
+    .replace(/Ã¼/g, "ue")
+    .replace(/Ã„/g, "Ae")
+    .replace(/Ã–/g, "Oe")
+    .replace(/Ãœ/g, "Ue")
+    .replace(/ÃŸ/g, "ss")
     .replace(/[^\x20-\x7E]/g, "")
     .trim();
 }
