@@ -829,19 +829,21 @@ function exportCsv() {
     ["Stellplaetze", state.storageSpaces],
     ["Notiz", state.orderNote],
     [],
-    ["Erledigt", "Von-Handling-Unit", "Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit"]
+    ["Erledigt", "Lagerauftrag", "Von-Handling-Unit", "Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit", "Nach-Lagerplatz"]
   ];
 
   state.lines.forEach((line) => {
     rows.push([
       line.picked ? "ja" : "nein",
+      line.warehouseOrder,
       line.fromHandlingUnit,
       line.fromBin,
       line.product,
       line.description,
       line.targetQty,
       line.actualQty,
-      line.unit
+      line.unit,
+      line.toBin
     ]);
   });
 
@@ -900,6 +902,7 @@ function renderPrintReport(fileName) {
   const rows = state.lines.map((line) => `
     <tr>
       <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
+      <td>${escapeHtml(line.warehouseOrder)}</td>
       <td>${escapeHtml(line.fromHandlingUnit)}</td>
       <td>${escapeHtml(line.fromBin)}</td>
       <td>${escapeHtml(line.product)}</td>
@@ -907,6 +910,7 @@ function renderPrintReport(fileName) {
       <td class="num">${escapeHtml(line.actualQty)}</td>
       <td>${escapeHtml(line.unit)}</td>
       <td>${escapeHtml(line.description)}</td>
+      <td>${escapeHtml(line.toBin)}</td>
     </tr>
   `).join("");
 
@@ -933,16 +937,18 @@ function renderPrintReport(fileName) {
       <thead>
         <tr>
           <th style="width: 4%;">OK</th>
-          <th style="width: 17%;">Von-HU</th>
-          <th style="width: 14%;">Lagerplatz</th>
-          <th style="width: 10%;">Produkt</th>
-          <th style="width: 7%;">Soll</th>
-          <th style="width: 7%;">Ist</th>
-          <th style="width: 6%;">Einh.</th>
-          <th style="width: 35%;">Beschreibung</th>
+          <th style="width: 9%;">Lagerauftrag</th>
+          <th style="width: 15%;">Von-HU</th>
+          <th style="width: 11%;">Lagerplatz</th>
+          <th style="width: 8%;">Produkt</th>
+          <th style="width: 6%;">Soll</th>
+          <th style="width: 6%;">Ist</th>
+          <th style="width: 5%;">Einh.</th>
+          <th style="width: 24%;">Beschreibung</th>
+          <th style="width: 12%;">Nach-Lagerplatz</th>
         </tr>
       </thead>
-      <tbody>${rows || `<tr><td colspan="8">Keine Positionen vorhanden.</td></tr>`}</tbody>
+      <tbody>${rows || `<tr><td colspan="10">Keine Positionen vorhanden.</td></tr>`}</tbody>
     </table>`;
   elements.printReport.hidden = false;
   elements.printReport.setAttribute("aria-hidden", "false");
@@ -963,13 +969,15 @@ function createPdfDocument() {
   const lineHeight = 14;
   const columns = [
     { title: "OK", x: 26, width: 28 },
-    { title: "Von-HU", x: 58, width: 130 },
-    { title: "Lagerplatz", x: 192, width: 100 },
-    { title: "Produkt", x: 296, width: 70 },
-    { title: "Soll", x: 370, width: 48 },
-    { title: "Ist", x: 422, width: 48 },
-    { title: "Einh.", x: 474, width: 42 },
-    { title: "Beschreibung", x: 520, width: 292 }
+    { title: "Lagerauftrag", x: 58, width: 62 },
+    { title: "Von-HU", x: 124, width: 112 },
+    { title: "Lagerplatz", x: 240, width: 86 },
+    { title: "Produkt", x: 330, width: 58 },
+    { title: "Soll", x: 392, width: 44 },
+    { title: "Ist", x: 440, width: 44 },
+    { title: "Einh.", x: 488, width: 36 },
+    { title: "Beschreibung", x: 528, width: 184 },
+    { title: "Nach-Platz", x: 716, width: 100 }
   ];
   const pages = [];
   let ops = [];
@@ -1005,16 +1013,18 @@ function createPdfDocument() {
   state.lines.forEach((line) => {
     if (y < 52) addPage();
 
-    const description = fitText(line.description, 62);
+    const description = fitText(line.description, 40);
     const row = [
       line.picked ? "ja" : "nein",
+      line.warehouseOrder,
       line.fromHandlingUnit,
       line.fromBin,
       line.product,
       line.targetQty,
       line.actualQty,
       line.unit,
-      description
+      description,
+      line.toBin
     ];
 
     linePath(ops, margin, y + 6, pageWidth - margin, y + 6);

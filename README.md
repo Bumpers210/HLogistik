@@ -26,6 +26,7 @@ Spaeter dauerhaft:
 - Auftraege zentral auf dem Server speichern
 - CSV exportieren
 - PDF automatisch in `Exporte` speichern
+- Export enthaelt auch intern gelesene Werte wie Lagerauftrag und Nach-Lagerplatz
 
 ## Wichtig
 
