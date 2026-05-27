@@ -20,6 +20,7 @@ const elements = {};
 let activeDownloadUrl = "";
 let saveTimer = null;
 let serverOnline = false;
+let topControlsCollapsed = false;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -40,6 +41,8 @@ function bindElements() {
     "storageSpaces",
     "orderNote",
     "importStatus",
+    "topControls",
+    "topToggleButton",
     "newOrderButton",
     "printButton",
     "exportButton",
@@ -66,6 +69,9 @@ function bindElements() {
 
 function bindEvents() {
   elements.pdfInput.addEventListener("change", handlePdfUpload);
+  elements.topToggleButton.addEventListener("click", () => {
+    setTopControlsCollapsed(!topControlsCollapsed);
+  });
   elements.newOrderButton.addEventListener("click", resetOrder);
   elements.printButton.addEventListener("click", () => window.print());
   elements.exportButton.addEventListener("click", exportCsv);
@@ -236,6 +242,7 @@ function importText(text, fileName = "", parsed = parseOrderText(text)) {
   if (!state.orderNumber && fileName) state.orderNumber = fileName.replace(/\.pdf$/i, "");
 
   state.lines = parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })];
+  topControlsCollapsed = state.lines.length > 0;
   saveAndRender();
   return { lines: parsed.lines.length };
 }
@@ -587,6 +594,7 @@ function setHandlingUnitEditMode(input, canEdit) {
 
 function render() {
   syncFields();
+  renderTopControls();
   elements.pickList.innerHTML = "";
   elements.emptyState.hidden = state.lines.length > 0;
   elements.pickHeader.hidden = state.lines.length === 0;
@@ -645,6 +653,21 @@ function render() {
 
   updateCounts();
   updateCollapseButtonText();
+}
+
+function renderTopControls() {
+  const canCollapse = state.lines.length > 0;
+  topControlsCollapsed = canCollapse && topControlsCollapsed;
+  elements.topControls.classList.toggle("is-collapsed", topControlsCollapsed);
+  elements.topToggleButton.hidden = !canCollapse;
+  elements.topToggleButton.querySelector("span").textContent = topControlsCollapsed ? "v" : "^";
+  elements.topToggleButton.title = topControlsCollapsed ? "Kopfleiste anzeigen" : "Kopfleiste einklappen";
+  elements.topToggleButton.setAttribute("aria-label", elements.topToggleButton.title);
+}
+
+function setTopControlsCollapsed(collapsed) {
+  topControlsCollapsed = collapsed;
+  render();
 }
 
 function updateCollapseButtonText() {
@@ -731,6 +754,7 @@ async function loadOrder(id) {
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
     Object.assign(state, order);
     state.collapseDone = true;
+    topControlsCollapsed = state.lines.length > 0;
     saveStateWithoutServer();
     render();
     setServerStatus("Auftrag geladen.", "ok");
@@ -846,6 +870,7 @@ function resetOrder() {
   if (hasData && !confirm("Aktuellen Auftrag leeren?")) return;
 
   clearCurrentOrder();
+  topControlsCollapsed = false;
   elements.pdfInput.value = "";
   saveAndRender();
 }

@@ -4,10 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Kommissionier-App</title>
-    <link rel="stylesheet" href="styles.css?v=20260527-5">
+    <link rel="stylesheet" href="styles.css?v=20260527-6">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
-    <script src="app.js?v=20260527-7" defer></script>
+    <script src="app.js?v=20260527-8" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -16,6 +16,9 @@
         <h1>Kommissionierliste</h1>
       </div>
       <div class="header-actions">
+        <button class="icon-button" id="topToggleButton" type="button" title="Kopfleiste ein- oder ausklappen" aria-label="Kopfleiste ein- oder ausklappen" hidden>
+          <span aria-hidden="true">K</span>
+        </button>
         <button class="icon-button" id="newOrderButton" type="button" title="Neuen Auftrag starten" aria-label="Neuen Auftrag starten">
           <span aria-hidden="true">+</span>
         </button>
@@ -26,7 +29,7 @@
     </header>
 
     <main class="app-shell">
-      <section class="toolbar" aria-label="Auftrag importieren">
+      <section id="topControls" class="toolbar" aria-label="Auftrag importieren">
         <label class="file-drop" for="pdfInput">
           <span class="file-drop-title">PDF importieren</span>
           <span class="file-drop-copy">Auftrag auswählen, Positionen prüfen und digital abhaken.</span>

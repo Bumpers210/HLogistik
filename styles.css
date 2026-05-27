@@ -146,6 +146,10 @@ h2 {
   align-items: stretch;
 }
 
+.toolbar.is-collapsed {
+  display: none;
+}
+
 .file-drop {
   display: flex;
   flex-direction: column;
