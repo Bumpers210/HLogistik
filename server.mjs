@@ -57,7 +57,10 @@ async function route(request, response) {
 
   if (pathname === "/api/orders" && request.method === "GET") {
     const orders = await readOrders();
-    sendJson(response, 200, orders.map(orderSummary).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+    sendJson(response, 200, orders
+      .filter((order) => !order.exportedAt)
+      .map(orderSummary)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
     return;
   }
 
@@ -103,7 +106,8 @@ async function route(request, response) {
     const savedOrder = await findOrder(exportMatch[1]);
     const order = normalizeOrder({ ...(savedOrder || {}), ...(body.order || {}) });
     order.id = exportMatch[1];
-    const result = await exportPdf(order);
+    const result = await exportPdf(order, requestOrigin(request));
+    await markOrderExported(order.id, result);
     sendJson(response, 200, { ok: true, ...result });
     return;
   }
@@ -116,7 +120,7 @@ async function route(request, response) {
   await sendStatic(response, pathname === "/" ? "/index.html" : pathname);
 }
 
-async function exportPdf(order) {
+async function exportPdf(order, origin = "") {
   const fileBase = pdfFileBase(order);
   const htmlPath = path.join(tempDir, `${fileBase}.html`);
   const pdfPath = path.join(exportDir, `${fileBase}.pdf`);
@@ -138,8 +142,22 @@ async function exportPdf(order) {
   return {
     file: `${fileBase}.pdf`,
     path: pdfPath,
-    url: `/exports/${encodeURIComponent(`${fileBase}.pdf`)}`
+    url: absoluteUrl(origin, `/exports/${encodeURIComponent(`${fileBase}.pdf`)}`)
   };
+}
+
+function requestOrigin(request) {
+  const host = request.headers.host || `localhost:${port}`;
+  const protocol = request.headers["x-forwarded-proto"] || "http";
+  return `${protocol}://${host}`;
+}
+
+function absoluteUrl(origin, pathname) {
+  try {
+    return new URL(pathname, origin).href;
+  } catch {
+    return pathname;
+  }
 }
 
 function printableHtml(order, fileName) {
@@ -150,6 +168,7 @@ function printableHtml(order, fileName) {
       <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
       <td>${escapeHtml(line.warehouseOrder)}</td>
       <td>${escapeHtml(line.fromHandlingUnit)}</td>
+      <td>${escapeHtml(line.positionNote)}</td>
       <td>${escapeHtml(line.fromBin)}</td>
       <td>${escapeHtml(line.product)}</td>
       <td class="num">${escapeHtml(line.targetQty)}</td>
@@ -203,18 +222,19 @@ function printableHtml(order, fileName) {
       <thead>
         <tr>
           <th style="width:4%;">OK</th>
-          <th style="width:9%;">Lagerauftrag</th>
-          <th style="width:15%;">Von-HU</th>
-          <th style="width:11%;">Lagerplatz</th>
-          <th style="width:8%;">Produkt</th>
-          <th style="width:6%;">Soll</th>
-          <th style="width:6%;">Ist</th>
-          <th style="width:5%;">Einh.</th>
-          <th style="width:24%;">Beschreibung</th>
-          <th style="width:12%;">Nach-Lagerplatz</th>
+          <th style="width:8%;">Lagerauftrag</th>
+          <th style="width:11%;">Von-HU</th>
+          <th style="width:13%;">Bemerkung</th>
+          <th style="width:9%;">Lagerplatz</th>
+          <th style="width:7%;">Produkt</th>
+          <th style="width:5%;">Soll</th>
+          <th style="width:5%;">Ist</th>
+          <th style="width:4%;">Einh.</th>
+          <th style="width:23%;">Beschreibung</th>
+          <th style="width:11%;">Nach-Lagerplatz</th>
         </tr>
       </thead>
-      <tbody>${rows || `<tr><td colspan="10">Keine Positionen vorhanden.</td></tr>`}</tbody>
+      <tbody>${rows || `<tr><td colspan="11">Keine Positionen vorhanden.</td></tr>`}</tbody>
     </table>
   </body>
 </html>`;
@@ -233,6 +253,21 @@ async function findOrder(id) {
   return orders.find((order) => order.id === id);
 }
 
+async function markOrderExported(id, exportResult) {
+  const orders = await readOrders();
+  const index = orders.findIndex((order) => order.id === id);
+  if (index === -1) return;
+
+  orders[index] = normalizeOrder({
+    ...orders[index],
+    exportedAt: new Date().toISOString(),
+    exportedPdfFile: exportResult.file || "",
+    exportedPdfPath: exportResult.path || "",
+    updatedAt: new Date().toISOString()
+  });
+  await writeOrders(orders);
+}
+
 function normalizeOrder(order) {
   return {
     id: order.id || "",
@@ -245,6 +280,9 @@ function normalizeOrder(order) {
     rawText: String(order.rawText || ""),
     collapseDone: Boolean(order.collapseDone),
     lines: Array.isArray(order.lines) ? order.lines : [],
+    exportedAt: String(order.exportedAt || ""),
+    exportedPdfFile: String(order.exportedPdfFile || ""),
+    exportedPdfPath: String(order.exportedPdfPath || ""),
     createdAt: order.createdAt || "",
     updatedAt: order.updatedAt || ""
   };
@@ -258,6 +296,7 @@ function orderSummary(order) {
     orderDate: order.orderDate || "",
     total: order.lines.length,
     picked: order.lines.filter((line) => line.picked).length,
+    exportedAt: order.exportedAt || "",
     updatedAt: order.updatedAt || ""
   };
 }

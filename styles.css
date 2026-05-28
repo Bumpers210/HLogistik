@@ -500,7 +500,7 @@ textarea[readonly] {
 
 .location-row {
   display: grid;
-  grid-template-columns: minmax(150px, 260px);
+  grid-template-columns: minmax(150px, 260px) minmax(180px, 1fr);
   gap: 5px;
 }
 

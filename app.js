@@ -235,6 +235,7 @@ async function renderPdfPageToCanvas(pdf, pageNumber) {
 }
 
 function importText(text, fileName = "", parsed = parseOrderText(text)) {
+  clearCurrentOrder();
   state.rawText = text;
 
   if (parsed.orderNumber) state.orderNumber = parsed.orderNumber;
@@ -387,23 +388,26 @@ function parseWarehouseLine(line) {
   const fromHandlingUnit = /^\d{10,}$/.test(tokens[cursor] || "") ? tokens[cursor++] : "";
   const fromBin = tokens[cursor] && /-/.test(tokens[cursor]) ? tokens[cursor++] : "";
   const product = /^\d{4,}$/.test(tokens[cursor] || "") ? tokens[cursor++] : "";
-  const targetQty = /^[\d.,]+$/.test(tokens[cursor] || "") ? tokens[cursor++].replace(",", ".") : "";
+  if (/^x$/i.test(tokens[cursor] || "")) cursor += 1;
+  const quantity = parseQuantityToken(tokens[cursor] || "");
+  const targetQty = quantity ? quantity.value : "";
+  if (quantity) cursor += 1;
   const unit = /^[A-Za-zÃ„Ã–ÃœÃ¤Ã¶Ã¼]{1,5}$/.test(tokens[cursor] || "") ? normalizeUnit(tokens[cursor++]) : "Stk";
   const remaining = tokens.slice(cursor);
 
   if (!product || !targetQty || remaining.length === 0) return parseWarehouseLineLoose(normalizedLine);
+  if (isSuspiciousMultiplierQuantity(targetQty)) return null;
 
-  let toBin = "";
-  if (remaining.length && /^\d{3,}[-A-Z0-9]+$/i.test(remaining[remaining.length - 1])) {
-    toBin = remaining.pop();
-  }
+  const remainingText = remaining.join(" ");
+  const toBin = extractDestinationBin(remainingText);
+  const description = toBin ? remainingText.slice(0, -toBin.length).trim() : remainingText;
 
   return {
     warehouseOrder,
     fromHandlingUnit,
     fromBin,
     product,
-    description: remaining.join(" "),
+    description,
     targetQty,
     unit,
     toBin
@@ -463,6 +467,7 @@ function parseWarehouseLineLoose(line) {
   const afterOrder = normalizedLine.slice(warehouseMatch.index + warehouseOrder.length);
   const productMatch = findProductQuantityMatch(afterOrder);
   if (!productMatch) return null;
+  if (isSuspiciousMultiplierQuantity(productMatch.quantity)) return null;
 
   const beforeProduct = afterOrder.slice(0, productMatch.index);
   const afterUnit = afterOrder.slice(productMatch.index + productMatch.text.length);
@@ -485,7 +490,13 @@ function parseWarehouseLineLoose(line) {
 
 function findProductQuantityMatch(text) {
   const unitPattern = "ST|SI|S1|5T|STK|KAR|PCK|PAK|VE|KG|G|M|L|PAL";
-  const matches = [...text.matchAll(new RegExp(`(?:^|\\D)(\\d{4,8})\\D{0,12}(\\d{1,4}(?:[,.]\\d{3})*|\\d+(?:[,.]\\d+)?)\\s*(${unitPattern})\\b`, "gi"))];
+  const quantityPattern = `(?:\\d+\\s*[xX]\\s*(?:\\d{1,4}(?:[,.]\\d{3})*|\\d+(?:[,.]\\d+)?)|\\d{1,4}(?:[,.]\\d{3})*|\\d+(?:[,.]\\d+)?)`;
+  const matches = [...text.matchAll(new RegExp(`(?:^|\\D)(\\d{4,8})[^\\d]{0,12}(${quantityPattern})\\s*\\|?\\s*(${unitPattern})\\b`, "gi"))]
+    .filter((entry) => {
+      const productOffset = entry[0].indexOf(entry[1]);
+      const productIndex = entry.index + productOffset;
+      return !/[A-Za-z]/.test(text[productIndex - 1] || "");
+    });
   const match = matches.find((entry) => entry[1].length <= 8) || matches.at(-1);
   if (!match) return null;
   const productOffset = match[0].indexOf(match[1]);
@@ -498,6 +509,24 @@ function findProductQuantityMatch(text) {
     quantity: match[2],
     unit: match[3]
   };
+}
+
+function parseQuantityToken(value) {
+  const compact = String(value || "").replace(/\s+/g, "");
+  if (!compact) return null;
+
+  if (/^\d+[xX]\d+(?:[,.]\d+)?$/.test(compact)) {
+    const [multiplier, quantity] = compact.split(/[xX]/);
+    return { value: `${multiplier}x${normalizeQuantity(quantity)}` };
+  }
+
+  if (/^[\d.,]+$/.test(compact)) return { value: compact.replace(",", ".") };
+  return null;
+}
+
+function isSuspiciousMultiplierQuantity(value) {
+  const match = String(value || "").replace(/\s+/g, "").match(/^\d+x(\d+)$/i);
+  return Boolean(match && match[1].length > 5);
 }
 
 function extractHandlingUnit(text) {
@@ -514,7 +543,7 @@ function extractBin(text) {
 }
 
 function extractDestinationBin(text) {
-  const match = text.match(/\b\d{3,5}-[A-Z0-9-]{4,}\b/i);
+  const match = text.match(/\b\d{3,5}-[A-Z0-9]+(?:[ -][A-Z0-9]+)*\s*$/i);
   return match ? match[0].toUpperCase() : "";
 }
 
@@ -561,6 +590,7 @@ function createLine(overrides = {}) {
     warehouseOrder: "",
     fromHandlingUnit: "",
     fromHandlingUnitEditable: true,
+    positionNote: "",
     fromBin: "",
     product: "",
     description: "",
@@ -611,6 +641,7 @@ function render() {
     const map = {
       picked: item.querySelector(".picked-input"),
       fromHandlingUnit: item.querySelector(".from-hu-input"),
+      positionNote: item.querySelector(".position-note-input"),
       fromBin: item.querySelector(".from-bin-input"),
       product: item.querySelector(".product-input"),
       description: item.querySelector(".description-input"),
@@ -623,6 +654,7 @@ function render() {
     const isMissingHandlingUnit = !String(line.fromHandlingUnit || "").trim();
     const canEditHandlingUnit = line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
     map.fromHandlingUnit.value = line.fromHandlingUnit || "";
+    map.positionNote.value = line.positionNote || "";
     map.fromBin.value = line.fromBin || "";
     map.product.value = line.product || "";
     map.description.value = line.description;
@@ -641,6 +673,7 @@ function render() {
       map.fromHandlingUnit.value = map.fromHandlingUnit.value.replace(/[^0-9,]/g, "");
       updateLine(line.id, { fromHandlingUnit: map.fromHandlingUnit.value, fromHandlingUnitEditable: canEditHandlingUnit }, false);
     });
+    map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
     map.fromBin.addEventListener("input", () => updateLine(line.id, { fromBin: map.fromBin.value }, false));
     map.product.addEventListener("input", () => updateLine(line.id, { product: map.product.value }, false));
     map.description.addEventListener("input", () => updateLine(line.id, { description: map.description.value }, false));
@@ -804,6 +837,7 @@ function currentOrderPayload() {
     orderNote: state.orderNote,
     rawText: state.rawText,
     collapseDone: state.collapseDone,
+    exportedAt: "",
     lines: state.lines
   };
 }
@@ -884,7 +918,7 @@ function exportCsv() {
     ["Stellplaetze", state.storageSpaces],
     ["Notiz", state.orderNote],
     [],
-    ["Erledigt", "Lagerauftrag", "Von-Handling-Unit", "Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit", "Nach-Lagerplatz"]
+    ["Erledigt", "Lagerauftrag", "Von-Handling-Unit", "Zusatzbemerkung", "Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit", "Nach-Lagerplatz"]
   ];
 
   state.lines.forEach((line) => {
@@ -892,6 +926,7 @@ function exportCsv() {
       line.picked ? "ja" : "nein",
       line.warehouseOrder,
       line.fromHandlingUnit,
+      line.positionNote,
       line.fromBin,
       line.product,
       line.description,
@@ -908,33 +943,28 @@ function exportCsv() {
 }
 
 async function exportPdf() {
-  const fileName = buildPdfFileName(state);
-  if (serverOnline) {
-    const saved = await saveOrderNow(true);
-    if (!saved || !state.id) {
-      showExportMessage("PDF konnte nicht gespeichert werden, weil der Auftrag nicht auf dem Server gespeichert ist.");
-      return;
-    }
-
-    try {
-      showExportMessage("PDF wird auf dem Server erstellt...");
-      const result = await apiJson(`/api/orders/${encodeURIComponent(state.id)}/export-pdf`, {
-        method: "POST",
-        body: JSON.stringify({ order: currentOrderPayload() })
-      });
-      showServerPdfLink(result.url, result.file, result.path);
-      return;
-    } catch (error) {
-      showExportMessage(`Server-PDF fehlgeschlagen: ${error.message}. Druckdialog wird geoeffnet.`);
-    }
+  if (!serverOnline) {
+    showExportMessage("PDF kann nur am Server ausgegeben werden. Bitte Verbindung zum Laptop-Server pruefen.");
+    return;
   }
 
-  renderPrintReport(fileName);
-  showExportMessage(`Druckansicht geoeffnet. Im Druckdialog "${fileName}" als PDF speichern.`);
+  const saved = await saveOrderNow(true);
+  if (!saved || !state.id) {
+    showExportMessage("PDF konnte nicht gespeichert werden, weil der Auftrag nicht auf dem Server gespeichert ist.");
+    return;
+  }
 
-  setTimeout(() => {
-    window.print();
-  }, 100);
+  try {
+    showExportMessage("PDF wird auf dem Server erstellt...");
+    const result = await apiJson(`/api/orders/${encodeURIComponent(state.id)}/export-pdf`, {
+      method: "POST",
+      body: JSON.stringify({ order: currentOrderPayload() })
+    });
+    showServerPdfLink(result.url, result.file, result.path);
+    await loadOrderList();
+  } catch (error) {
+    showExportMessage(`Server-PDF fehlgeschlagen: ${error.message}`);
+  }
 }
 
 function showServerPdfLink(url, fileName, fullPath) {
@@ -943,7 +973,7 @@ function showServerPdfLink(url, fileName, fullPath) {
   elements.exportStatus.innerHTML = "";
   const text = document.createTextNode(`PDF gespeichert: ${fullPath} `);
   const link = document.createElement("a");
-  link.href = url;
+  link.href = new URL(url, window.location.origin).href;
   link.target = "_blank";
   link.rel = "noopener";
   link.textContent = fileName;
@@ -959,6 +989,7 @@ function renderPrintReport(fileName) {
       <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
       <td>${escapeHtml(line.warehouseOrder)}</td>
       <td>${escapeHtml(line.fromHandlingUnit)}</td>
+      <td>${escapeHtml(line.positionNote)}</td>
       <td>${escapeHtml(line.fromBin)}</td>
       <td>${escapeHtml(line.product)}</td>
       <td class="num">${escapeHtml(line.targetQty)}</td>
@@ -992,18 +1023,19 @@ function renderPrintReport(fileName) {
       <thead>
         <tr>
           <th style="width: 4%;">OK</th>
-          <th style="width: 9%;">Lagerauftrag</th>
-          <th style="width: 15%;">Von-HU</th>
-          <th style="width: 11%;">Lagerplatz</th>
-          <th style="width: 8%;">Produkt</th>
-          <th style="width: 6%;">Soll</th>
-          <th style="width: 6%;">Ist</th>
-          <th style="width: 5%;">Einh.</th>
-          <th style="width: 24%;">Beschreibung</th>
-          <th style="width: 12%;">Nach-Lagerplatz</th>
+          <th style="width: 8%;">Lagerauftrag</th>
+          <th style="width: 11%;">Von-HU</th>
+          <th style="width: 13%;">Bemerkung</th>
+          <th style="width: 9%;">Lagerplatz</th>
+          <th style="width: 7%;">Produkt</th>
+          <th style="width: 5%;">Soll</th>
+          <th style="width: 5%;">Ist</th>
+          <th style="width: 4%;">Einh.</th>
+          <th style="width: 23%;">Beschreibung</th>
+          <th style="width: 11%;">Nach-Lagerplatz</th>
         </tr>
       </thead>
-      <tbody>${rows || `<tr><td colspan="10">Keine Positionen vorhanden.</td></tr>`}</tbody>
+      <tbody>${rows || `<tr><td colspan="11">Keine Positionen vorhanden.</td></tr>`}</tbody>
     </table>`;
   elements.printReport.hidden = false;
   elements.printReport.setAttribute("aria-hidden", "false");
@@ -1025,14 +1057,15 @@ function createPdfDocument() {
   const columns = [
     { title: "OK", x: 26, width: 28 },
     { title: "Lagerauftrag", x: 58, width: 62 },
-    { title: "Von-HU", x: 124, width: 112 },
-    { title: "Lagerplatz", x: 240, width: 86 },
-    { title: "Produkt", x: 330, width: 58 },
-    { title: "Soll", x: 392, width: 44 },
-    { title: "Ist", x: 440, width: 44 },
-    { title: "Einh.", x: 488, width: 36 },
-    { title: "Beschreibung", x: 528, width: 184 },
-    { title: "Nach-Platz", x: 716, width: 100 }
+    { title: "Von-HU", x: 124, width: 86 },
+    { title: "Bemerkung", x: 214, width: 92 },
+    { title: "Lagerplatz", x: 310, width: 74 },
+    { title: "Produkt", x: 388, width: 52 },
+    { title: "Soll", x: 444, width: 38 },
+    { title: "Ist", x: 486, width: 38 },
+    { title: "Einh.", x: 528, width: 32 },
+    { title: "Beschreibung", x: 564, width: 142 },
+    { title: "Nach-Platz", x: 710, width: 106 }
   ];
   const pages = [];
   let ops = [];
@@ -1073,6 +1106,7 @@ function createPdfDocument() {
       line.picked ? "ja" : "nein",
       line.warehouseOrder,
       line.fromHandlingUnit,
+      line.positionNote,
       line.fromBin,
       line.product,
       line.targetQty,
