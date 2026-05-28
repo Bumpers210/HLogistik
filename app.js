@@ -1,4 +1,5 @@
 const STORAGE_KEY = "kommissionier-app-state-v1";
+const USER_KEY = "kommissionier-app-user-v1";
 const API_BASE = "";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 2.5;
@@ -14,10 +15,16 @@ const state = {
   orderNote: "",
   rawText: "",
   collapseDone: true,
+  createdBy: "",
+  lastEditedBy: "",
+  activeUser: "",
+  completedBy: "",
+  completedAt: "",
   lines: []
 };
 
 const elements = {};
+const currentUser = { name: "" };
 let activeDownloadUrl = "";
 let saveTimer = null;
 let serverOnline = false;
@@ -25,11 +32,14 @@ let topControlsCollapsed = false;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
+  loadCurrentUser();
   clearCurrentOrder();
   bindEvents();
   configurePdfJs();
+  updateCurrentUserUi();
   render();
   initializeServer();
+  showLoginIfNeeded();
 });
 
 function bindElements() {
@@ -62,7 +72,13 @@ function bindElements() {
     "pickedCount",
     "openCount",
     "changedCount",
-    "lineTemplate"
+    "lineTemplate",
+    "currentUserName",
+    "switchUserButton",
+    "loginOverlay",
+    "loginForm",
+    "loginNameInput",
+    "loginSubmitButton"
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
   });
@@ -80,6 +96,11 @@ function bindEvents() {
   elements.saveOrderButton.addEventListener("click", saveOrderNow);
   elements.refreshOrdersButton.addEventListener("click", loadOrderList);
   elements.orderSelect.addEventListener("change", () => loadOrder(elements.orderSelect.value));
+  elements.switchUserButton.addEventListener("click", () => showLogin(true));
+  elements.loginForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    setCurrentUser(elements.loginNameInput.value);
+  });
   window.addEventListener("afterprint", cleanupPrintReport);
   elements.clearDoneButton.addEventListener("click", () => {
     state.collapseDone = !state.collapseDone;
@@ -90,6 +111,7 @@ function bindEvents() {
   ["orderNumber", "customerName", "orderDate", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
     elements[id].addEventListener("input", () => {
       state[id] = elements[id].value;
+      markOrderTouched();
       saveState();
       updateCounts();
     });
@@ -101,7 +123,54 @@ function configurePdfJs() {
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.min.js";
 }
 
+function loadCurrentUser() {
+  currentUser.name = localStorage.getItem(USER_KEY) || "";
+}
+
+function setCurrentUser(value) {
+  const name = String(value || "").trim();
+  if (!name) return;
+
+  currentUser.name = name;
+  localStorage.setItem(USER_KEY, name);
+  elements.loginOverlay.hidden = true;
+  updateCurrentUserUi();
+
+  if (state.lines.length || state.id) {
+    markOrderTouched();
+    saveAndRender();
+  }
+}
+
+function showLogin(force = false) {
+  elements.loginNameInput.value = force ? currentUser.name : "";
+  elements.loginOverlay.hidden = false;
+  elements.loginNameInput.focus();
+  elements.loginNameInput.select();
+}
+
+function showLoginIfNeeded() {
+  if (!currentUser.name) showLogin(false);
+}
+
+function requireCurrentUser() {
+  if (currentUser.name) return true;
+  showLogin(false);
+  setServerStatus("Bitte zuerst mit Namen anmelden.", "error");
+  return false;
+}
+
+function updateCurrentUserUi() {
+  if (!elements.currentUserName) return;
+  elements.currentUserName.textContent = currentUser.name || "Nicht angemeldet";
+}
+
 async function handlePdfUpload(event) {
+  if (!requireCurrentUser()) {
+    event.target.value = "";
+    return;
+  }
+
   const file = event.target.files[0];
   if (!file) return;
   let data;
@@ -287,6 +356,9 @@ function scoreOcrCandidate(text, parsed) {
 function importText(text, fileName = "", parsed = parseOrderText(text)) {
   clearCurrentOrder();
   state.rawText = text;
+  state.createdBy = currentUser.name;
+  state.lastEditedBy = currentUser.name;
+  state.activeUser = currentUser.name;
 
   if (parsed.orderNumber) state.orderNumber = parsed.orderNumber;
   if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
@@ -998,9 +1070,30 @@ function updateLine(id, patch, rerender = true) {
   const line = state.lines.find((entry) => entry.id === id);
   if (!line) return;
   Object.assign(line, patch);
+  markOrderTouched();
   saveState();
   updateCounts();
   if (rerender) render();
+}
+
+function markOrderTouched() {
+  if (!currentUser.name) return;
+  state.createdBy = state.createdBy || currentUser.name;
+  state.lastEditedBy = currentUser.name;
+  state.activeUser = currentUser.name;
+  updateCompletionFields();
+}
+
+function updateCompletionFields() {
+  const isComplete = state.lines.length > 0 && state.lines.every((line) => line.picked);
+  if (isComplete) {
+    state.completedBy = state.completedBy || currentUser.name;
+    state.completedAt = state.completedAt || new Date().toISOString();
+    return;
+  }
+
+  state.completedBy = "";
+  state.completedAt = "";
 }
 
 function updateCounts() {
@@ -1033,7 +1126,8 @@ async function loadOrderList() {
     orders.forEach((order) => {
       const option = document.createElement("option");
       option.value = order.id;
-      option.textContent = `${order.orderNumber || order.id} - ${order.customerName || "ohne Kunde"} (${order.picked}/${order.total})`;
+      const worker = order.activeUser || order.lastEditedBy || order.createdBy || "ohne Bearbeiter";
+      option.textContent = `${order.orderNumber || order.id} - ${order.customerName || "ohne Kunde"} (${order.picked}/${order.total}) - ${worker}`;
       if (order.id === state.id) option.selected = true;
       elements.orderSelect.appendChild(option);
     });
@@ -1044,14 +1138,18 @@ async function loadOrderList() {
 
 async function loadOrder(id) {
   if (!id || !serverOnline) return;
+  if (!requireCurrentUser()) return;
   try {
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
     Object.assign(state, order);
+    state.activeUser = currentUser.name;
+    state.lastEditedBy = currentUser.name;
     state.collapseDone = true;
     topControlsCollapsed = state.lines.length > 0;
     saveStateWithoutServer();
     render();
     setServerStatus("Auftrag geladen.", "ok");
+    await saveOrderNow(true);
   } catch (error) {
     setServerStatus(`Auftrag konnte nicht geladen werden: ${error.message}`, "error");
   }
@@ -1066,6 +1164,8 @@ function scheduleServerSave() {
 }
 
 async function saveOrderNow(silent = false) {
+  if (!requireCurrentUser()) return false;
+
   if (!serverOnline) {
     if (!silent) setServerStatus("Server nicht verbunden. Auftrag nur lokal gespeichert.", "error");
     return false;
@@ -1088,6 +1188,8 @@ async function saveOrderNow(silent = false) {
 }
 
 function currentOrderPayload() {
+  markOrderTouched();
+
   return {
     id: state.id,
     orderNumber: state.orderNumber,
@@ -1098,6 +1200,11 @@ function currentOrderPayload() {
     orderNote: state.orderNote,
     rawText: state.rawText,
     collapseDone: state.collapseDone,
+    createdBy: state.createdBy,
+    lastEditedBy: state.lastEditedBy,
+    activeUser: state.activeUser,
+    completedBy: state.completedBy,
+    completedAt: state.completedAt,
     exportedAt: "",
     lines: state.lines
   };
@@ -1156,11 +1263,17 @@ function clearCurrentOrder() {
     orderNote: "",
     rawText: "",
     collapseDone: true,
+    createdBy: "",
+    lastEditedBy: "",
+    activeUser: "",
+    completedBy: "",
+    completedAt: "",
     lines: []
   });
 }
 
 function resetOrder() {
+  if (!requireCurrentUser()) return;
   const hasData = state.lines.length || state.rawText || state.orderNumber || state.customerName;
   if (hasData && !confirm("Aktuellen Auftrag leeren?")) return;
 
@@ -1171,10 +1284,16 @@ function resetOrder() {
 }
 
 function exportCsv() {
+  if (!requireCurrentUser()) return;
+  markOrderTouched();
+
   const rows = [
     ["Auftrag", state.orderNumber],
     ["Kunde", state.customerName],
     ["Datum", state.orderDate],
+    ["Erstellt von", state.createdBy],
+    ["Zuletzt bearbeitet von", state.lastEditedBy],
+    ["Abgeschlossen von", state.completedBy],
     ["Europaletten", state.euroPallets],
     ["Stellplaetze", state.storageSpaces],
     ["Notiz", state.orderNote],
@@ -1204,6 +1323,8 @@ function exportCsv() {
 }
 
 async function exportPdf() {
+  if (!requireCurrentUser()) return;
+
   if (!serverOnline) {
     showExportMessage("PDF kann nur am Server ausgegeben werden. Bitte Verbindung zum Laptop-Server pruefen.");
     return;
@@ -1267,10 +1388,12 @@ function renderPrintReport(fileName) {
         <h1>Kommissionierabschluss</h1>
         <p><strong>Auftrag:</strong> ${escapeHtml(state.orderNumber || "-")}</p>
         <p><strong>Kunde:</strong> ${escapeHtml(state.customerName || "-")}</p>
+        <p><strong>Bearbeiter:</strong> ${escapeHtml(state.lastEditedBy || "-")}</p>
       </div>
       <div>
         <p><strong>Datum:</strong> ${escapeHtml(formatDateForDisplay(state.orderDate))}</p>
         <p><strong>Erledigt:</strong> ${picked}/${state.lines.length}</p>
+        <p><strong>Abgeschlossen:</strong> ${escapeHtml(state.completedBy || "-")}</p>
         <p><strong>Dateiname:</strong> ${escapeHtml(fileName)}</p>
       </div>
     </header>

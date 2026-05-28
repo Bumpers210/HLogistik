@@ -205,10 +205,12 @@ function printableHtml(order, fileName) {
         <h1>Kommissionierabschluss</h1>
         <p><strong>Auftrag:</strong> ${escapeHtml(order.orderNumber || "-")}</p>
         <p><strong>Kunde:</strong> ${escapeHtml(order.customerName || "-")}</p>
+        <p><strong>Bearbeiter:</strong> ${escapeHtml(order.lastEditedBy || "-")}</p>
       </div>
       <div>
         <p><strong>Datum:</strong> ${escapeHtml(formatDate(order.orderDate))}</p>
         <p><strong>Erledigt:</strong> ${picked}/${order.lines.length}</p>
+        <p><strong>Abgeschlossen:</strong> ${escapeHtml(order.completedBy || "-")}</p>
         <p><strong>Dateiname:</strong> ${escapeHtml(fileName)}</p>
       </div>
     </header>
@@ -283,6 +285,11 @@ function normalizeOrder(order) {
     exportedAt: String(order.exportedAt || ""),
     exportedPdfFile: String(order.exportedPdfFile || ""),
     exportedPdfPath: String(order.exportedPdfPath || ""),
+    createdBy: String(order.createdBy || ""),
+    lastEditedBy: String(order.lastEditedBy || ""),
+    activeUser: String(order.activeUser || ""),
+    completedBy: String(order.completedBy || ""),
+    completedAt: String(order.completedAt || ""),
     createdAt: order.createdAt || "",
     updatedAt: order.updatedAt || ""
   };
@@ -296,6 +303,11 @@ function orderSummary(order) {
     orderDate: order.orderDate || "",
     total: order.lines.length,
     picked: order.lines.filter((line) => line.picked).length,
+    createdBy: order.createdBy || "",
+    lastEditedBy: order.lastEditedBy || "",
+    activeUser: order.activeUser || "",
+    completedBy: order.completedBy || "",
+    completedAt: order.completedAt || "",
     exportedAt: order.exportedAt || "",
     updatedAt: order.updatedAt || ""
   };

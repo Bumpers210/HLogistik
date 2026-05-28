@@ -4,10 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Kommissionier-App</title>
-    <link rel="stylesheet" href="styles.css?v=20260527-6">
+    <link rel="stylesheet" href="styles.css?v=20260528-1">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
-    <script src="app.js?v=20260528-4" defer></script>
+    <script src="app.js?v=20260528-5" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -16,6 +16,10 @@
         <h1>Kommissionierliste</h1>
       </div>
       <div class="header-actions">
+        <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">
+          <span id="currentUserName">Nicht angemeldet</span>
+          <button id="switchUserButton" class="secondary-button" type="button">Wechseln</button>
+        </div>
         <button class="icon-button" id="topToggleButton" type="button" title="Kopfleiste ein- oder ausklappen" aria-label="Kopfleiste ein- oder ausklappen" hidden>
           <span aria-hidden="true">K</span>
         </button>
@@ -139,6 +143,18 @@
     </main>
 
     <section id="printReport" class="print-report" aria-hidden="true" hidden></section>
+
+    <section id="loginOverlay" class="login-overlay" hidden>
+      <form id="loginForm" class="login-panel">
+        <p class="eyebrow">Mitarbeiter</p>
+        <h2>Anmelden</h2>
+        <label>
+          Name
+          <input id="loginNameInput" type="text" autocomplete="name" placeholder="z. B. Jens" required>
+        </label>
+        <button id="loginSubmitButton" class="primary-button" type="submit">Anmelden</button>
+      </form>
+    </section>
 
     <template id="lineTemplate">
       <article class="pick-item">
