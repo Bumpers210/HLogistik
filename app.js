@@ -767,9 +767,9 @@ function extractDestinationBin(text) {
   const source = String(text || "");
   const matches = [...source.matchAll(/9\d{3,4}-[A-Z0-9]+/gi)];
   const match = matches.at(-1);
-  if (match) return match[0].toUpperCase();
+  if (match) return normalizeDestinationName(match[0]);
   const fallback = source.match(/(\d{3,5}-[A-Z0-9]+(?:[ -][A-Z0-9]+)*)\s*$/i);
-  return fallback ? fallback[1].toUpperCase() : "";
+  return fallback ? normalizeDestinationName(fallback[1]) : "";
 }
 
 function cleanProductDescription(value, toBin = "") {
@@ -777,12 +777,14 @@ function cleanProductDescription(value, toBin = "") {
   if (toBin) {
     description = description.replace(new RegExp(`[A-Z]?${escapeRegExp(toBin)}[\\s\\S]*$`, "i"), "");
   }
+  description = description.replace(/[A-Z]?9\d{3,4}-[A-Z0-9]+[\s\S]*$/i, "");
 
   return description
     .replace(/^\s*[_|.-]+\s*/, "")
     .replace(/\(\s*-/g, "-")
     .replace(/[(){}\[\]|_]+/g, " ")
     .replace(/^\s*(?:STK?|SI|S1|5T|KAR|PCK|PAK|VE)\b\s*/i, "")
+    .replace(/^\s*(?:[\\/]+|[IVLJX17][\\/]+|[IVLJX])\s+(?=\d|[A-ZÃƒâ€žÃƒâ€“ÃƒÅ“])/i, "")
     .replace(/\s+/g, " ")
     .trim();
 }
