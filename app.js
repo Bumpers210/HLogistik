@@ -4,6 +4,9 @@ const API_BASE = "";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 2.5;
 const OCR_ROTATIONS = [0, 90, 270];
+const ACTIVE_ORDER_TIMEOUT_MS = 10 * 60 * 1000;
+const ORDER_LIST_REFRESH_MS = 30 * 1000;
+const ACTIVITY_HEARTBEAT_MS = 60 * 1000;
 
 const state = {
   id: "",
@@ -18,8 +21,12 @@ const state = {
   createdBy: "",
   lastEditedBy: "",
   activeUser: "",
+  activeUserAt: "",
   completedBy: "",
   completedAt: "",
+  exportedAt: "",
+  exportedPdfFile: "",
+  exportedPdfPath: "",
   lines: []
 };
 
@@ -29,6 +36,8 @@ let activeDownloadUrl = "";
 let saveTimer = null;
 let serverOnline = false;
 let topControlsCollapsed = false;
+let orderListTimer = null;
+let activityTimer = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -359,6 +368,7 @@ function importText(text, fileName = "", parsed = parseOrderText(text)) {
   state.createdBy = currentUser.name;
   state.lastEditedBy = currentUser.name;
   state.activeUser = currentUser.name;
+  state.activeUserAt = new Date().toISOString();
 
   if (parsed.orderNumber) state.orderNumber = parsed.orderNumber;
   if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
@@ -1081,6 +1091,7 @@ function markOrderTouched() {
   state.createdBy = state.createdBy || currentUser.name;
   state.lastEditedBy = currentUser.name;
   state.activeUser = currentUser.name;
+  state.activeUserAt = new Date().toISOString();
   updateCompletionFields();
 }
 
@@ -1112,10 +1123,31 @@ async function initializeServer() {
     serverOnline = true;
     setServerStatus(`Server aktiv. PDFs: ${info.exportDir}`, "ok");
     await loadOrderList();
+    startOrderListRefresh();
+    startActivityHeartbeat();
   } catch {
     serverOnline = false;
     setServerStatus("Server nicht verbunden. Daten bleiben nur auf diesem Geraet.", "error");
   }
+}
+
+function startOrderListRefresh() {
+  if (orderListTimer) return;
+  orderListTimer = setInterval(() => {
+    if (serverOnline) loadOrderList();
+  }, ORDER_LIST_REFRESH_MS);
+}
+
+function startActivityHeartbeat() {
+  if (activityTimer) return;
+  activityTimer = setInterval(() => {
+    if (!serverOnline || !currentUser.name) return;
+    if (state.id && state.lines.length) {
+      saveOrderNow(true);
+      return;
+    }
+    loadOrderList();
+  }, ACTIVITY_HEARTBEAT_MS);
 }
 
 async function loadOrderList() {
@@ -1126,8 +1158,8 @@ async function loadOrderList() {
     orders.forEach((order) => {
       const option = document.createElement("option");
       option.value = order.id;
-      const worker = order.activeUser || order.lastEditedBy || order.createdBy || "ohne Bearbeiter";
-      option.textContent = `${order.orderNumber || order.id} - ${order.customerName || "ohne Kunde"} (${order.picked}/${order.total}) - ${worker}`;
+      const activity = orderActivityLabel(order);
+      option.textContent = `${order.orderNumber || order.id} - ${order.customerName || "ohne Kunde"} (${order.picked}/${order.total}) - ${activity}`;
       if (order.id === state.id) option.selected = true;
       elements.orderSelect.appendChild(option);
     });
@@ -1136,14 +1168,31 @@ async function loadOrderList() {
   }
 }
 
+function orderActivityLabel(order) {
+  if (isOrderRecentlyActive(order)) {
+    if (order.id === state.id && order.activeUser === currentUser.name) return "bei dir geoeffnet";
+    return `in Bearbeitung: ${order.activeUser}`;
+  }
+
+  return "frei";
+}
+
+function isOrderRecentlyActive(order) {
+  if (!order.activeUser || !order.activeUserAt) return false;
+  const activeAt = Date.parse(order.activeUserAt);
+  return Number.isFinite(activeAt) && Date.now() - activeAt < ACTIVE_ORDER_TIMEOUT_MS;
+}
+
 async function loadOrder(id) {
   if (!id || !serverOnline) return;
   if (!requireCurrentUser()) return;
   try {
+    if (state.id && state.id !== id) await releaseCurrentOrderActivity();
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
     Object.assign(state, order);
     state.activeUser = currentUser.name;
     state.lastEditedBy = currentUser.name;
+    state.activeUserAt = new Date().toISOString();
     state.collapseDone = true;
     topControlsCollapsed = state.lines.length > 0;
     saveStateWithoutServer();
@@ -1187,8 +1236,24 @@ async function saveOrderNow(silent = false) {
   }
 }
 
-function currentOrderPayload() {
-  markOrderTouched();
+async function releaseCurrentOrderActivity() {
+  if (!serverOnline || !state.id || state.activeUser !== currentUser.name) return;
+
+  try {
+    const payload = currentOrderPayload({ touch: false });
+    payload.activeUser = "";
+    payload.activeUserAt = "";
+    await apiJson(`/api/orders/${encodeURIComponent(state.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ order: payload })
+    });
+  } catch {
+    // If release fails, the activity timeout will make the order free again.
+  }
+}
+
+function currentOrderPayload({ touch = true } = {}) {
+  if (touch) markOrderTouched();
 
   return {
     id: state.id,
@@ -1203,9 +1268,12 @@ function currentOrderPayload() {
     createdBy: state.createdBy,
     lastEditedBy: state.lastEditedBy,
     activeUser: state.activeUser,
+    activeUserAt: state.activeUserAt,
     completedBy: state.completedBy,
     completedAt: state.completedAt,
-    exportedAt: "",
+    exportedAt: state.exportedAt || "",
+    exportedPdfFile: state.exportedPdfFile || "",
+    exportedPdfPath: state.exportedPdfPath || "",
     lines: state.lines
   };
 }
@@ -1266,17 +1334,22 @@ function clearCurrentOrder() {
     createdBy: "",
     lastEditedBy: "",
     activeUser: "",
+    activeUserAt: "",
     completedBy: "",
     completedAt: "",
+    exportedAt: "",
+    exportedPdfFile: "",
+    exportedPdfPath: "",
     lines: []
   });
 }
 
-function resetOrder() {
+async function resetOrder() {
   if (!requireCurrentUser()) return;
   const hasData = state.lines.length || state.rawText || state.orderNumber || state.customerName;
   if (hasData && !confirm("Aktuellen Auftrag leeren?")) return;
 
+  await releaseCurrentOrderActivity();
   clearCurrentOrder();
   topControlsCollapsed = false;
   elements.pdfInput.value = "";
