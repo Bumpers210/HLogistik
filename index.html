@@ -4,10 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Kommissionier-App</title>
-    <link rel="stylesheet" href="styles.css?v=20260528-1">
+    <link rel="stylesheet" href="styles.css?v=20260528-3">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
-    <script src="app.js?v=20260528-6" defer></script>
+    <script src="app.js?v=20260528-7" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -31,6 +31,17 @@
         </button>
       </div>
     </header>
+
+    <div id="orderNotice" class="order-notice" role="status" aria-live="polite" hidden>
+      <div>
+        <strong>Neuer Auftrag</strong>
+        <span id="orderNoticeText">Ein neuer Auftrag wurde eingelesen.</span>
+      </div>
+      <div class="order-notice-actions">
+        <button id="openNotifiedOrderButton" class="primary-button" type="button">Oeffnen</button>
+        <button id="dismissOrderNoticeButton" class="secondary-button" type="button">OK</button>
+      </div>
+    </div>
 
     <main class="app-shell">
       <section id="topControls" class="toolbar" aria-label="Auftrag importieren">

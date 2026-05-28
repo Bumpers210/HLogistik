@@ -174,6 +174,43 @@ h2 {
   font-size: 1.35rem;
 }
 
+.order-notice {
+  position: sticky;
+  top: 61px;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: min(1420px, calc(100% - 20px));
+  margin: 8px auto 0;
+  padding: 10px 12px;
+  background: #fffaf0;
+  border: 1px solid #e4b15b;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.order-notice div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.order-notice strong {
+  color: #8a4a08;
+}
+
+.order-notice span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.order-notice-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .primary-button:active,
 .icon-button:active {
   background: var(--accent-dark);
@@ -597,6 +634,20 @@ textarea[readonly] {
 @media (max-width: 680px) {
   .app-header {
     align-items: flex-start;
+  }
+
+  .order-notice {
+    top: 76px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .order-notice-actions {
+    width: 100%;
+  }
+
+  .order-notice-actions button {
+    flex: 1 1 0;
   }
 
   .order-meta,

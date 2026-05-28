@@ -1,5 +1,6 @@
 const STORAGE_KEY = "kommissionier-app-state-v1";
 const USER_KEY = "kommissionier-app-user-v1";
+const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const API_BASE = "";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 2.5;
@@ -7,6 +8,7 @@ const OCR_ROTATIONS = [0, 90, 270];
 const ACTIVE_ORDER_TIMEOUT_MS = 10 * 60 * 1000;
 const ORDER_LIST_REFRESH_MS = 30 * 1000;
 const ACTIVITY_HEARTBEAT_MS = 60 * 1000;
+const ORDER_NOTICE_DURATION_MS = 12000;
 
 const state = {
   id: "",
@@ -38,10 +40,15 @@ let serverOnline = false;
 let topControlsCollapsed = false;
 let orderListTimer = null;
 let activityTimer = null;
+let orderListInitialized = false;
+let knownOrderIds = new Set();
+let orderNoticeTimer = null;
+let notifiedOrderId = "";
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
   loadCurrentUser();
+  loadKnownOrderIds();
   clearCurrentOrder();
   bindEvents();
   configurePdfJs();
@@ -87,7 +94,11 @@ function bindElements() {
     "loginOverlay",
     "loginForm",
     "loginNameInput",
-    "loginSubmitButton"
+    "loginSubmitButton",
+    "orderNotice",
+    "orderNoticeText",
+    "openNotifiedOrderButton",
+    "dismissOrderNoticeButton"
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
   });
@@ -106,6 +117,12 @@ function bindEvents() {
   elements.refreshOrdersButton.addEventListener("click", loadOrderList);
   elements.orderSelect.addEventListener("change", () => loadOrder(elements.orderSelect.value));
   elements.switchUserButton.addEventListener("click", () => showLogin(true));
+  elements.openNotifiedOrderButton.addEventListener("click", () => {
+    const id = notifiedOrderId;
+    hideOrderNotice();
+    if (id) loadOrder(id);
+  });
+  elements.dismissOrderNoticeButton.addEventListener("click", hideOrderNotice);
   elements.loginForm.addEventListener("submit", (event) => {
     event.preventDefault();
     setCurrentUser(elements.loginNameInput.value);
@@ -1154,6 +1171,8 @@ async function loadOrderList() {
   if (!serverOnline) return;
   try {
     const orders = await apiJson("/api/orders");
+    const newOrders = findNewOrders(orders);
+    rememberKnownOrders(orders);
     elements.orderSelect.innerHTML = `<option value="">Kein gespeicherter Auftrag</option>`;
     orders.forEach((order) => {
       const option = document.createElement("option");
@@ -1163,9 +1182,63 @@ async function loadOrderList() {
       if (order.id === state.id) option.selected = true;
       elements.orderSelect.appendChild(option);
     });
+    if (newOrders.length) showNewOrderNotice(newOrders);
   } catch (error) {
     setServerStatus(`Auftragsliste konnte nicht geladen werden: ${error.message}`, "error");
   }
+}
+
+function findNewOrders(orders) {
+  if (!orderListInitialized) {
+    orderListInitialized = true;
+    return [];
+  }
+
+  return orders.filter((order) => order.id && !knownOrderIds.has(order.id));
+}
+
+function rememberKnownOrders(orders) {
+  orders.forEach((order) => {
+    if (order.id) knownOrderIds.add(order.id);
+  });
+  localStorage.setItem(KNOWN_ORDERS_KEY, JSON.stringify([...knownOrderIds]));
+}
+
+function loadKnownOrderIds() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(KNOWN_ORDERS_KEY) || "[]");
+    knownOrderIds = new Set(Array.isArray(saved) ? saved.filter(Boolean) : []);
+  } catch {
+    knownOrderIds = new Set();
+  }
+}
+
+function showNewOrderNotice(newOrders) {
+  const firstOrder = newOrders[0];
+  if (!firstOrder || !elements.orderNotice) return;
+
+  notifiedOrderId = firstOrder.id;
+  const label = orderNoticeLabel(firstOrder);
+  const message = newOrders.length === 1
+    ? `Ein neuer Auftrag wurde eingelesen: ${label}.`
+    : `${newOrders.length} neue Auftraege wurden eingelesen. Neuester Auftrag: ${label}.`;
+
+  elements.orderNoticeText.textContent = message;
+  elements.orderNotice.hidden = false;
+  window.clearTimeout(orderNoticeTimer);
+  orderNoticeTimer = window.setTimeout(hideOrderNotice, ORDER_NOTICE_DURATION_MS);
+}
+
+function orderNoticeLabel(order) {
+  return [order.orderNumber, order.customerName]
+    .filter(Boolean)
+    .join(" - ") || order.id || "ohne Nummer";
+}
+
+function hideOrderNotice() {
+  notifiedOrderId = "";
+  if (elements.orderNotice) elements.orderNotice.hidden = true;
+  window.clearTimeout(orderNoticeTimer);
 }
 
 function orderActivityLabel(order) {
