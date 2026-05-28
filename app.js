@@ -297,15 +297,16 @@ function parseOrderText(text) {
     /(?:^|\n)\s*(?:auftragsnr\.?|auftragsnummer|belegnr\.?)\s*[:#-]?\s*([A-Z0-9-]{4,})/i,
     /(?:^|\n)\s*(?:auftrag|kommission|lieferschein)\s*[:#-]\s*([A-Z0-9-]{4,})/i
   ]);
-  const customerName = findFirst(text, [
+  const explicitCustomerName = findFirst(text, [
     /(?:kunde|lieferadresse|empfÃ¤nger)\s*[:#-]?\s*([^\n\t]{3,80})/i
   ]);
 
+  const customerName = cleanCustomerName(explicitCustomerName || findCustomerFromHeader(cleanedLines));
   const tableRows = collectWarehouseRows(cleanedLines);
 
   if (tableRows.length) {
     return {
-      orderNumber: destinationToOrderNumber(tableRows) || orderNumber || "",
+      orderNumber: customerName || destinationToOrderNumber(tableRows) || orderNumber || "",
       customerName: customerName || "",
       lines: tableRows.map((line) => createLine({
         ...line,
@@ -400,7 +401,7 @@ function parseWarehouseLine(line) {
 
   const remainingText = remaining.join(" ");
   const toBin = extractDestinationBin(remainingText);
-  const description = toBin ? remainingText.slice(0, -toBin.length).trim() : remainingText;
+  const description = cleanProductDescription(remainingText, toBin);
 
   return {
     warehouseOrder,
@@ -427,24 +428,48 @@ function destinationToOrderNumber(lines) {
 function collectWarehouseRows(lines) {
   const rows = [];
   const seen = new Set();
+  const rowTexts = [];
+  let current = "";
 
-  for (let index = 0; index < lines.length; index += 1) {
-    const windows = [
-      lines[index],
-      [lines[index], lines[index + 1]].filter(Boolean).join(" "),
-      [lines[index], lines[index + 1], lines[index + 2]].filter(Boolean).join(" ")
-    ];
+  lines.forEach((line) => {
+    if (isWarehouseRowStart(line)) {
+      if (current) rowTexts.push(current);
+      current = line;
+      return;
+    }
 
-    for (const candidate of windows) {
+    if (current) current = `${current} ${line}`;
+  });
+
+  if (current) rowTexts.push(current);
+
+  rowTexts.forEach((rowText) => {
+    const candidates = [rowText, ...splitPossibleMergedWarehouseRows(rowText)];
+
+    candidates.forEach((candidate) => {
       const parsed = parseWarehouseLine(candidate);
-      if (!parsed || seen.has(parsed.warehouseOrder)) continue;
+      if (!parsed || seen.has(parsed.warehouseOrder)) return;
       rows.push(parsed);
       seen.add(parsed.warehouseOrder);
-      break;
-    }
-  }
+    });
+  });
 
   return rows;
+}
+
+function isWarehouseRowStart(line) {
+  const normalizedLine = normalizeOcrWarehouseLine(line);
+  const match = normalizedLine.match(/^\d{6,}\b/);
+  if (!match) return false;
+
+  const rest = normalizedLine.slice(match[0].length);
+  return /\b\d{10,}\b/.test(rest) || /\b\d{3}-[A-Z0-9]+-[A-Z0-9]+\b/i.test(rest);
+}
+
+function splitPossibleMergedWarehouseRows(text) {
+  return normalizeOcrWarehouseLine(text)
+    .split(/\s+(?=\d{6,}\b)/)
+    .filter((part) => part !== text);
 }
 
 function normalizeOcrWarehouseLine(line) {
@@ -474,7 +499,7 @@ function parseWarehouseLineLoose(line) {
   const fromHandlingUnit = extractHandlingUnit(beforeProduct);
   const fromBin = extractBin(beforeProduct);
   const toBin = extractDestinationBin(afterUnit);
-  const description = afterUnit.replace(toBin, "").replace(/\s+/g, " ").trim();
+  const description = cleanProductDescription(afterUnit, toBin);
 
   return {
     warehouseOrder,
@@ -529,6 +554,12 @@ function isSuspiciousMultiplierQuantity(value) {
   return Boolean(match && match[1].length > 5);
 }
 
+function parseUnitToken(value) {
+  const cleaned = String(value || "").replace(/[^A-Za-z]/g, "");
+  if (!cleaned) return null;
+  return { value: normalizeUnit(cleaned) };
+}
+
 function extractHandlingUnit(text) {
   const match = text.match(/[0-9OoQD]{10,}/);
   if (!match) return "";
@@ -543,8 +574,31 @@ function extractBin(text) {
 }
 
 function extractDestinationBin(text) {
-  const match = text.match(/\b\d{3,5}-[A-Z0-9]+(?:[ -][A-Z0-9]+)*\s*$/i);
-  return match ? match[0].toUpperCase() : "";
+  const source = String(text || "");
+  const matches = [...source.matchAll(/9\d{3,4}-[A-Z0-9]+/gi)];
+  const match = matches.at(-1);
+  if (match) return match[0].toUpperCase();
+  const fallback = source.match(/(\d{3,5}-[A-Z0-9]+(?:[ -][A-Z0-9]+)*)\s*$/i);
+  return fallback ? fallback[1].toUpperCase() : "";
+}
+
+function cleanProductDescription(value, toBin = "") {
+  let description = String(value || "");
+  if (toBin) {
+    description = description.replace(new RegExp(`[A-Z]?${escapeRegExp(toBin)}[\\s\\S]*$`, "i"), "");
+  }
+
+  return description
+    .replace(/^\s*[_|.-]+\s*/, "")
+    .replace(/\(\s*-/g, "-")
+    .replace(/[(){}\[\]|_]+/g, " ")
+    .replace(/^\s*(?:STK?|SI|S1|5T|KAR|PCK|PAK|VE)\b\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeQuantity(value) {
@@ -574,6 +628,21 @@ function normalizeUnit(unit) {
   if (["pck", "pak"].includes(value)) return "Pck";
   if (value === "ve") return "VE";
   return unit;
+}
+
+function findCustomerFromHeader(lines) {
+  const stopIndex = lines.findIndex((line) => /lagerauf/i.test(line));
+  const headerLines = (stopIndex === -1 ? lines : lines.slice(0, stopIndex))
+    .map((line) => line.trim())
+    .filter((line) => line && !/^(seite|datum|druck|pdf)/i.test(line));
+  return headerLines[0] || "";
+}
+
+function cleanCustomerName(value) {
+  return String(value || "")
+    .replace(/\s*datum\s*:.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function findFirst(text, patterns) {
