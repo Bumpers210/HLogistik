@@ -86,6 +86,35 @@ h2 {
   gap: 10px;
 }
 
+.header-actions {
+  align-items: center;
+}
+
+.user-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 3px 4px 3px 10px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.user-chip span {
+  max-width: 180px;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-chip .secondary-button {
+  min-height: 28px;
+  padding: 0 10px;
+}
+
 .stacked-actions {
   flex-wrap: wrap;
 }
@@ -117,6 +146,69 @@ h2 {
 .primary-button {
   background: var(--accent);
   color: #fff;
+}
+
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(23, 33, 27, 0.45);
+}
+
+.login-panel {
+  display: grid;
+  gap: 12px;
+  width: min(100%, 360px);
+  padding: 20px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.login-panel h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.order-notice {
+  position: sticky;
+  top: 61px;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: min(1420px, calc(100% - 20px));
+  margin: 8px auto 0;
+  padding: 10px 12px;
+  background: #fffaf0;
+  border: 1px solid #e4b15b;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.order-notice div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.order-notice strong {
+  color: #8a4a08;
+}
+
+.order-notice span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.order-notice-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 .primary-button:active,
@@ -500,7 +592,7 @@ textarea[readonly] {
 
 .location-row {
   display: grid;
-  grid-template-columns: minmax(150px, 260px);
+  grid-template-columns: minmax(150px, 260px) minmax(180px, 1fr);
   gap: 5px;
 }
 
@@ -542,6 +634,20 @@ textarea[readonly] {
 @media (max-width: 680px) {
   .app-header {
     align-items: flex-start;
+  }
+
+  .order-notice {
+    top: 76px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .order-notice-actions {
+    width: 100%;
+  }
+
+  .order-notice-actions button {
+    flex: 1 1 0;
   }
 
   .order-meta,
