@@ -2,6 +2,7 @@ const STORAGE_KEY = "kommissionier-app-state-v1";
 const API_BASE = "";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 2.5;
+const OCR_ROTATIONS = [0, 90, 270];
 
 const state = {
   id: "",
@@ -174,17 +175,34 @@ async function readPdfWithOcr(pdf) {
     throw new Error("OCR-Modul konnte nicht geladen werden. Internetverbindung pruefen und Seite neu laden.");
   }
 
-  const worker = await createOcrWorker(pdf.numPages);
+  const worker = await createOcrWorker(pdf.numPages * OCR_ROTATIONS.length);
   const pages = [];
 
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       setImportStatus(`OCR Seite ${pageNumber}/${pdf.numPages} vorbereiten ...`);
-      const canvas = await renderPdfPageToCanvas(pdf, pageNumber);
-      const result = await worker.recognize(canvas);
-      pages.push(result.data.text || "");
-      canvas.width = 0;
-      canvas.height = 0;
+      const baseCanvas = await renderPdfPageToCanvas(pdf, pageNumber);
+      const candidates = [];
+
+      for (const rotation of OCR_ROTATIONS) {
+        const canvas = rotation ? rotateCanvas(baseCanvas, rotation) : baseCanvas;
+        const rotationLabel = rotation ? `, Drehung ${rotation} Grad` : "";
+        setImportStatus(`OCR Seite ${pageNumber}/${pdf.numPages}${rotationLabel} ...`);
+        const result = await worker.recognize(canvas);
+        const text = result.data.text || "";
+        const parsed = parseOrderText(text);
+        candidates.push({ text, parsed, score: scoreOcrCandidate(text, parsed) });
+
+        if (canvas !== baseCanvas) {
+          canvas.width = 0;
+          canvas.height = 0;
+        }
+      }
+
+      const best = candidates.sort((a, b) => b.score - a.score)[0] || { text: "" };
+      pages.push(best.text);
+      baseCanvas.width = 0;
+      baseCanvas.height = 0;
     }
   } finally {
     await worker.terminate();
@@ -193,8 +211,8 @@ async function readPdfWithOcr(pdf) {
   return pages.join("\n");
 }
 
-async function createOcrWorker(totalPages) {
-  let currentPage = 1;
+async function createOcrWorker(totalSteps) {
+  let currentStep = 1;
   const worker = await window.Tesseract.createWorker(OCR_LANGUAGE, 1, {
     workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/worker.min.js",
     corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0",
@@ -202,7 +220,7 @@ async function createOcrWorker(totalPages) {
     logger: (message) => {
       if (message.status === "recognizing text" && typeof message.progress === "number") {
         const percent = Math.round(message.progress * 100);
-        setImportStatus(`OCR Seite ${currentPage}/${totalPages}: ${percent}%`);
+        setImportStatus(`OCR ${currentStep}/${totalSteps}: ${percent}%`);
       }
     }
   });
@@ -216,7 +234,7 @@ async function createOcrWorker(totalPages) {
   const originalRecognize = worker.recognize.bind(worker);
   worker.recognize = async (...args) => {
     const result = await originalRecognize(...args);
-    currentPage += 1;
+    currentStep += 1;
     return result;
   };
 
@@ -232,6 +250,38 @@ async function renderPdfPageToCanvas(pdf, pageNumber) {
   canvas.height = Math.ceil(viewport.height);
   await page.render({ canvasContext: context, viewport }).promise;
   return canvas;
+}
+
+function rotateCanvas(sourceCanvas, degrees) {
+  const rotation = ((degrees % 360) + 360) % 360;
+  if (!rotation) return sourceCanvas;
+
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const quarterTurn = rotation === 90 || rotation === 270;
+  canvas.width = quarterTurn ? sourceCanvas.height : sourceCanvas.width;
+  canvas.height = quarterTurn ? sourceCanvas.width : sourceCanvas.height;
+
+  if (rotation === 90) {
+    context.translate(canvas.width, 0);
+    context.rotate(Math.PI / 2);
+  } else if (rotation === 180) {
+    context.translate(canvas.width, canvas.height);
+    context.rotate(Math.PI);
+  } else if (rotation === 270) {
+    context.translate(0, canvas.height);
+    context.rotate(-Math.PI / 2);
+  }
+
+  context.drawImage(sourceCanvas, 0, 0);
+  return canvas;
+}
+
+function scoreOcrCandidate(text, parsed) {
+  const warehouseHits = (text.match(/\b\d{6,}\b/g) || []).length;
+  const handlingUnitHits = (text.match(/\b\d{10,}\b/g) || []).length;
+  const binHits = (text.match(/\b\d{3}-[A-Z0-9]+-[A-Z0-9]+\b/gi) || []).length;
+  return parsed.lines.length * 1000 + warehouseHits * 20 + handlingUnitHits * 10 + binHits * 10 + Math.min(text.length, 500);
 }
 
 function importText(text, fileName = "", parsed = parseOrderText(text)) {
@@ -375,22 +425,25 @@ function parseWarehouseLine(line) {
   if (/lagerauftrag|produktbeschreibung|basis|nach-lagerplatz/i.test(line)) return null;
 
   const normalizedLine = normalizeOcrWarehouseLine(line);
-  const tokens = normalizedLine
-    .replace(/\|/g, " ")
-    .split(/\t+|\s{2,}/)
-    .flatMap((part) => part.trim().split(/\s+/))
-    .filter(Boolean);
+  const tokens = warehouseTokens(normalizedLine);
 
   const firstNumber = tokens.findIndex((token) => /^\d{6,}$/.test(token));
   if (firstNumber === -1) return null;
 
   const warehouseOrder = tokens[firstNumber];
   let cursor = firstNumber + 1;
-  const fromHandlingUnit = /^\d{10,}$/.test(tokens[cursor] || "") ? tokens[cursor++] : "";
+  const handlingUnitInfo = parseHandlingUnitTokens(tokens, cursor);
+  const fromHandlingUnit = handlingUnitInfo.value;
+  cursor = handlingUnitInfo.next;
   const fromBin = tokens[cursor] && /-/.test(tokens[cursor]) ? tokens[cursor++] : "";
-  const product = /^\d{4,}$/.test(tokens[cursor] || "") ? tokens[cursor++] : "";
-  if (/^x$/i.test(tokens[cursor] || "")) cursor += 1;
-  const quantity = parseQuantityToken(tokens[cursor] || "");
+  const productInfo = parseProductTokens(tokens, cursor);
+  const product = productInfo.value;
+  cursor = productInfo.next;
+
+  while (isOcrQuantityMarker(tokens[cursor]) && canReadQuantityFrom(tokens[cursor + 1])) cursor += 1;
+
+  const combinedQuantity = parseQuantityWithUnitToken(tokens[cursor] || "");
+  const quantity = combinedQuantity || parseQuantityToken(tokens[cursor] || "");
   const targetQty = quantity ? quantity.value : "";
   if (quantity) cursor += 1;
   const unit = /^[A-Za-zÃ„Ã–ÃœÃ¤Ã¶Ã¼]{1,5}$/.test(tokens[cursor] || "") ? normalizeUnit(tokens[cursor++]) : "Stk";
@@ -429,6 +482,8 @@ function collectWarehouseRows(lines) {
   const rows = [];
   const seen = new Set();
   const rowTexts = [];
+  const pendingHeaders = [];
+  const pendingContinuations = [];
   let current = "";
 
   lines.forEach((line) => {
@@ -448,9 +503,36 @@ function collectWarehouseRows(lines) {
 
     candidates.forEach((candidate) => {
       const parsed = parseWarehouseLine(candidate);
-      if (!parsed || seen.has(parsed.warehouseOrder)) return;
-      rows.push(parsed);
-      seen.add(parsed.warehouseOrder);
+      const header = parseWarehouseHeader(candidate);
+      const continuations = extractWarehouseContinuations(candidate);
+
+      if (parsed && !seen.has(parsed.warehouseOrder) && (!pendingHeaders.length || continuations.length <= 1)) {
+        rows.push(parsed);
+        seen.add(parsed.warehouseOrder);
+        return;
+      }
+
+      if (header && !seen.has(header.warehouseOrder)) pendingHeaders.push(header);
+
+      continuations.forEach((continuation) => {
+        if (pendingHeaders.length) {
+          const line = { ...pendingHeaders.shift(), ...continuation };
+          if (!seen.has(line.warehouseOrder)) {
+            rows.push(line);
+            seen.add(line.warehouseOrder);
+          }
+        } else {
+          pendingContinuations.push(continuation);
+        }
+      });
+
+      while (pendingHeaders.length && pendingContinuations.length) {
+        const line = { ...pendingHeaders.shift(), ...pendingContinuations.shift() };
+        if (!seen.has(line.warehouseOrder)) {
+          rows.push(line);
+          seen.add(line.warehouseOrder);
+        }
+      }
     });
   });
 
@@ -459,7 +541,7 @@ function collectWarehouseRows(lines) {
 
 function isWarehouseRowStart(line) {
   const normalizedLine = normalizeOcrWarehouseLine(line);
-  const match = normalizedLine.match(/^\d{6,}\b/);
+  const match = normalizedLine.match(/^[^\d]{0,12}(\d{6,})\b/);
   if (!match) return false;
 
   const rest = normalizedLine.slice(match[0].length);
@@ -468,7 +550,7 @@ function isWarehouseRowStart(line) {
 
 function splitPossibleMergedWarehouseRows(text) {
   return normalizeOcrWarehouseLine(text)
-    .split(/\s+(?=\d{6,}\b)/)
+    .split(/\s+(?=[^\d]{0,12}\d{6,}\s+\d{10,})/)
     .filter((part) => part !== text);
 }
 
@@ -476,6 +558,7 @@ function normalizeOcrWarehouseLine(line) {
   return line
     .replace(/[|Â¦]/g, " ")
     .replace(/[(){}\[\]]/g, " ")
+    .replace(/_+/g, " ")
     .replace(/[Â¢Â©]/g, "C")
     .replace(/[â€”â€“]/g, "-")
     .replace(/[â€š]/g, ",")
@@ -513,6 +596,88 @@ function parseWarehouseLineLoose(line) {
   };
 }
 
+function warehouseTokens(line) {
+  return String(line || "")
+    .replace(/\|/g, " ")
+    .split(/\t+|\s{2,}/)
+    .flatMap((part) => part.trim().split(/\s+/))
+    .map((token) => token.replace(/^[,;]+|[,;]+$/g, ""))
+    .filter(Boolean);
+}
+
+function parseWarehouseHeader(line) {
+  const tokens = warehouseTokens(normalizeOcrWarehouseLine(line));
+  const firstNumber = tokens.findIndex((token) => /^\d{6,}$/.test(token));
+  if (firstNumber === -1) return null;
+
+  const warehouseOrder = tokens[firstNumber];
+  let cursor = firstNumber + 1;
+  const handlingUnitInfo = parseHandlingUnitTokens(tokens, cursor);
+  const fromHandlingUnit = handlingUnitInfo.value;
+  cursor = handlingUnitInfo.next;
+  const fromBin = tokens[cursor] && /-/.test(tokens[cursor]) ? tokens[cursor++] : "";
+  const productInfo = parseProductTokens(tokens, cursor);
+
+  if (!fromHandlingUnit || !fromBin || !productInfo.value) return null;
+
+  return {
+    warehouseOrder,
+    fromHandlingUnit,
+    fromBin,
+    product: productInfo.value
+  };
+}
+
+function parseHandlingUnitTokens(tokens, cursor) {
+  const current = normalizeHandlingUnitToken(tokens[cursor] || "");
+  const next = normalizeHandlingUnitToken(tokens[cursor + 1] || "");
+
+  if (current.length >= 8 && next && `${current}${next}`.length <= 20) {
+    return { value: `${current}${next}`, next: cursor + 2 };
+  }
+  if (current.length >= 10) return { value: current, next: cursor + 1 };
+
+  return { value: "", next: cursor };
+}
+
+function normalizeHandlingUnitToken(value) {
+  return String(value || "").replace(/[OoQD]/g, "0").replace(/\D/g, "");
+}
+
+function parseProductTokens(tokens, cursor) {
+  const current = tokens[cursor] || "";
+  const next = tokens[cursor + 1] || "";
+
+  if (/^\d{4}$/.test(current) && /^\d{3,4}$/.test(next)) {
+    return { value: `${current}${next}`, next: cursor + 2 };
+  }
+
+  if (/^\d{4,}$/.test(current)) return { value: current, next: cursor + 1 };
+  return { value: "", next: cursor };
+}
+
+function extractWarehouseContinuations(line) {
+  const normalizedLine = normalizeOcrWarehouseLine(line);
+  const unitPattern = "STK?|SI|S1|5T|KAR|PCK|PAK|VE|KG|G|M|L|PAL";
+  const pattern = new RegExp(`(?:^|\\s)(?:[XVJ/\\\\]|7|71)?\\s*(\\d+(?:[,.]\\d+)?)\\s*(?:/|\\s)+\\s*(${unitPattern})\\b`, "gi");
+  const matches = [...normalizedLine.matchAll(pattern)];
+
+  return matches
+    .map((match, index) => {
+      const nextMatch = matches[index + 1];
+      const descriptionText = normalizedLine.slice(match.index + match[0].length, nextMatch ? nextMatch.index : undefined);
+      const toBin = extractDestinationBin(descriptionText);
+      const description = cleanProductDescription(descriptionText, toBin);
+      return {
+        targetQty: match[1].replace(",", "."),
+        unit: normalizeUnit(match[2]),
+        description,
+        toBin
+      };
+    })
+    .filter((continuation) => continuation.targetQty && (continuation.description || continuation.toBin));
+}
+
 function findProductQuantityMatch(text) {
   const unitPattern = "ST|SI|S1|5T|STK|KAR|PCK|PAK|VE|KG|G|M|L|PAL";
   const quantityPattern = `(?:\\d+\\s*[xX]\\s*(?:\\d{1,4}(?:[,.]\\d{3})*|\\d+(?:[,.]\\d+)?)|\\d{1,4}(?:[,.]\\d{3})*|\\d+(?:[,.]\\d+)?)`;
@@ -547,6 +712,25 @@ function parseQuantityToken(value) {
 
   if (/^[\d.,]+$/.test(compact)) return { value: compact.replace(",", ".") };
   return null;
+}
+
+function parseQuantityWithUnitToken(value) {
+  const compact = String(value || "").replace(/[_|]/g, "").trim();
+  const match = compact.match(/^(\d+(?:[,.]\d+)?)[/ ]?([A-Za-zÃƒâ€žÃƒâ€“ÃƒÅ“ÃƒÂ¤ÃƒÂ¶ÃƒÂ¼]{1,5})$/);
+  if (!match) return null;
+
+  return {
+    value: match[1].replace(",", "."),
+    unit: normalizeUnit(match[2])
+  };
+}
+
+function canReadQuantityFrom(value) {
+  return Boolean(parseQuantityWithUnitToken(value) || parseQuantityToken(value));
+}
+
+function isOcrQuantityMarker(value) {
+  return /^(?:x|v|j|\/|\\|7|71)$/i.test(String(value || ""));
 }
 
 function isSuspiciousMultiplierQuantity(value) {
