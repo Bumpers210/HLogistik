@@ -290,7 +290,6 @@ function importText(text, fileName = "", parsed = parseOrderText(text)) {
 
   if (parsed.orderNumber) state.orderNumber = parsed.orderNumber;
   if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
-  if (!state.orderNumber && fileName) state.orderNumber = fileName.replace(/\.pdf$/i, "");
 
   state.lines = parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })];
   topControlsCollapsed = state.lines.length > 0;
@@ -351,12 +350,13 @@ function parseOrderText(text) {
     /(?:kunde|lieferadresse|empfÃ¤nger)\s*[:#-]?\s*([^\n\t]{3,80})/i
   ]);
 
-  const customerName = cleanCustomerName(explicitCustomerName || findCustomerFromHeader(cleanedLines));
   const tableRows = collectWarehouseRows(cleanedLines);
+  const destinationCustomerName = destinationToCustomerName(tableRows);
+  const customerName = destinationCustomerName || cleanCustomerName(explicitCustomerName || findCustomerFromHeader(cleanedLines));
 
   if (tableRows.length) {
     return {
-      orderNumber: customerName || destinationToOrderNumber(tableRows) || orderNumber || "",
+      orderNumber: "",
       customerName: customerName || "",
       lines: tableRows.map((line) => createLine({
         ...line,
@@ -468,14 +468,20 @@ function parseWarehouseLine(line) {
   };
 }
 
-function destinationToOrderNumber(lines) {
-  const destination = lines
+function destinationToCustomerName(lines) {
+  const destinations = lines
     .map((line) => line.toBin)
-    .find((value) => String(value || "").trim());
-  if (!destination) return "";
-  return String(destination)
-    .replace(/^\s*\d+\s*[-/ ]\s*/, "")
-    .trim();
+    .map(normalizeDestinationName)
+    .filter(Boolean);
+
+  return destinations.find((value) => value === "9021-0OUT") || destinations[0] || "";
+}
+
+function normalizeDestinationName(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/^9021-00UT$/, "9021-0OUT");
 }
 
 function collectWarehouseRows(lines) {
