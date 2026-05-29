@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#167a58">
+    <title>Tablet Pickliste</title>
+    <link rel="icon" href="app-icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="tablet.css?v=20260529-6">
+    <script src="tablet.js?v=20260529-6"></script>
+  </head>
+  <body>
+    <header class="tablet-header">
+      <div>
+        <p>Lager</p>
+        <h1>Tablet Pickliste</h1>
+      </div>
+      <div id="connectionStatus" class="connection-status">Prüfe Verbindung</div>
+    </header>
+
+    <main class="tablet-shell">
+      <section class="tablet-controls">
+        <label>
+          Mitarbeiter
+          <input id="userNameInput" type="text" autocomplete="name" placeholder="Name">
+        </label>
+        <label>
+          Auftrag
+          <select id="orderSelect">
+            <option value="">Auftrag wählen</option>
+          </select>
+        </label>
+        <button id="refreshButton" type="button">Aktualisieren</button>
+        <button id="takeOverButton" type="button" hidden>Bearbeitung übernehmen</button>
+        <button id="saveButton" type="button">Jetzt speichern</button>
+        <button id="exportPdfButton" type="button">PDF exportieren</button>
+        <label class="check-row">
+          <input id="collapseDoneInput" type="checkbox" checked>
+          <span>Erledigte einklappen</span>
+        </label>
+      </section>
+
+      <section class="tablet-status">
+        <div><strong id="doneCount">0</strong><span>erledigt</span></div>
+        <div><strong id="openCount">0</strong><span>offen</span></div>
+        <div><strong id="changedCount">0</strong><span>korrigiert</span></div>
+      </section>
+
+      <p id="message" class="message">Bitte Auftrag laden.</p>
+      <section class="tablet-list-panel">
+        <div id="pickHeader" class="pick-column-header" hidden>
+          <span></span>
+          <div class="pick-column-grid">
+            <span>Produkt</span>
+            <span>Lagerplatz</span>
+            <span>Produktbeschreibung</span>
+            <span>Soll</span>
+            <span>Ist</span>
+            <span>Einheit</span>
+          </div>
+        </div>
+        <section id="lineList" class="line-list"></section>
+      </section>
+    </main>
+  </body>
+</html>

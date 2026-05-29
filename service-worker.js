@@ -1,9 +1,16 @@
-const CACHE_NAME = "hlogistik-offline-v2";
+const CACHE_NAME = "hlogistik-offline-v9";
 const APP_SHELL = [
   "/",
   "/index.html",
+  "/tablet.html",
+  "/artikel.html",
+  "/lager.html",
   "/app.js",
+  "/tablet.js",
+  "/artikel.js",
+  "/lager.js",
   "/styles.css",
+  "/tablet.css",
   "/manifest.webmanifest",
   "/app-icon.svg",
   "/pdf.min.js",
@@ -34,6 +41,10 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/exports/")) return;
 
   if (request.mode === "navigate") {
+    if (url.pathname === "/tablet.html") {
+      event.respondWith(fetch(request).catch(() => caches.match("/tablet.html")));
+      return;
+    }
     event.respondWith(fetch(request).catch(() => caches.match("/index.html")));
     return;
   }

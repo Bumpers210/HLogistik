@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#167a58">
+    <title>Artikelstamm</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="app-icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css?v=20260529-5">
+    <script src="artikel.js?v=20260529-6" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Lager</p>
+        <h1>Artikelstamm</h1>
+      </div>
+      <div class="header-actions">
+        <div id="connectionBadge" class="connection-badge is-checking" role="status" aria-live="polite">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connectionText">Prüfe Verbindung</span>
+        </div>
+        <nav class="mode-nav" aria-label="Arbeitsbereich">
+          <a class="mode-button" href="/">Kommissionierung</a>
+          <a id="storageAppLink" class="mode-button" href="/lager.html">Einlagern</a>
+          <span class="mode-button is-active">Artikelstamm</span>
+        </nav>
+        <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">
+          <span id="currentUserName">Nicht angemeldet</span>
+          <button id="switchUserButton" class="secondary-button" type="button">Wechseln</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="app-shell article-shell">
+      <section class="toolbar article-toolbar" aria-label="Artikel suchen und importieren">
+        <label>
+          Suche
+          <input id="searchInput" type="search" autocomplete="off" placeholder="Materialnummer oder Bezeichnung">
+        </label>
+        <label class="inline-check">
+          <input id="includeInactiveInput" type="checkbox">
+          <span>Inaktive anzeigen</span>
+        </label>
+        <div class="stacked-actions">
+          <button id="newArticleButton" class="primary-button" type="button">Neuer Artikel</button>
+          <label class="secondary-button file-button">
+            CSV importieren
+            <input id="csvInput" type="file" accept=".csv,text/csv">
+          </label>
+          <a id="exportLink" class="secondary-button link-button" href="/api/articles/export">CSV exportieren</a>
+        </div>
+        <p id="articleStatus" class="export-status" role="status">Artikel werden geladen...</p>
+      </section>
+
+      <section class="article-layout">
+        <div class="list-panel">
+          <div class="section-heading">
+            <h2>Artikelliste</h2>
+            <span id="articleCount" class="muted-count">0 Artikel</span>
+          </div>
+          <div class="article-table-wrap">
+            <table class="article-table">
+              <thead>
+                <tr>
+                  <th>Material</th>
+                  <th>Bezeichnung</th>
+                  <th>Gebinde</th>
+                  <th>KRT</th>
+                  <th>Palette</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="articleTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside class="summary-box article-editor">
+          <h2 id="editorTitle">Artikel bearbeiten</h2>
+          <form id="articleForm" class="article-form">
+            <label>
+              Materialnummer
+              <input id="materialnummerInput" name="materialnummer" type="text" autocomplete="off" required>
+            </label>
+            <label>
+              Materialbezeichnung
+              <input id="materialbezeichnungInput" name="materialbezeichnung" type="text" autocomplete="off" required>
+            </label>
+            <label>
+              Gebinde
+              <select id="gebindeArtInput" name="gebindeArt" required>
+                <option value="C1">C1</option>
+                <option value="C2">C2</option>
+                <option value="KRT">KRT</option>
+                <option value="STK">STK</option>
+              </select>
+            </label>
+            <div class="two-columns">
+              <label id="mengeProKartonField" hidden>
+                Menge pro KRT
+                <input id="mengeProKartonInput" name="mengeProKarton" type="number" inputmode="numeric" min="1" step="1">
+              </label>
+              <label>
+                Menge pro Palette
+                <input id="mengeProPaletteInput" name="mengeProPalette" type="number" inputmode="numeric" min="1" step="1" required>
+              </label>
+            </div>
+            <label>
+              Artikelgruppe
+              <input id="artikelgruppeInput" name="artikelgruppe" type="text" autocomplete="off">
+            </label>
+            <label>
+              Bemerkung
+              <textarea id="bemerkungInput" name="bemerkung" rows="3"></textarea>
+            </label>
+            <label class="inline-check">
+              <input id="aktivInput" name="aktiv" type="checkbox" checked>
+              <span>Aktiv</span>
+            </label>
+            <div class="stacked-actions">
+              <button class="primary-button" type="submit">Speichern</button>
+              <button id="deactivateButton" class="danger-button" type="button">Deaktivieren</button>
+            </div>
+          </form>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>

@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createReadStream, existsSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -11,6 +12,8 @@ const dataDir = path.join(root, "data");
 const exportDir = path.join(root, "Exporte");
 const tempDir = path.join(root, "tmp");
 const ordersFile = path.join(dataDir, "orders.json");
+const legacyArticlesFile = path.join(dataDir, "articles.json");
+const databaseFile = path.join(dataDir, "logistik.sqlite");
 const port = Number(globalThis.process?.env?.PORT || 4174);
 
 const mimeTypes = new Map([
@@ -31,6 +34,10 @@ await mkdir(dataDir, { recursive: true });
 await mkdir(exportDir, { recursive: true });
 await mkdir(tempDir, { recursive: true });
 if (!existsSync(ordersFile)) await writeJson(ordersFile, []);
+
+const db = new DatabaseSync(databaseFile);
+initializeDatabase();
+await migrateLegacyArticles();
 
 const server = createServer(async (request, response) => {
   try {
@@ -54,6 +61,115 @@ async function route(request, response) {
 
   if (pathname === "/api/health") {
     sendJson(response, 200, { ok: true, host: hostname(), exportDir });
+    return;
+  }
+
+  if (pathname === "/api/storage/locations" && request.method === "GET") {
+    const query = url.searchParams.get("q") || "";
+    const materialnummer = url.searchParams.get("materialnummer") || "";
+    sendJson(response, 200, readStorageLocations({ query, materialnummer }));
+    return;
+  }
+
+  if (pathname === "/api/storage/receipts" && request.method === "POST") {
+    const body = await readBody(request);
+    const result = bookStorageReceipt(body.receipt || body);
+    sendJson(response, 200, { ok: true, ...result });
+    return;
+  }
+
+  if (pathname === "/api/articles" && request.method === "GET") {
+    const articles = await readArticles();
+    const query = url.searchParams.get("q") || "";
+    const includeInactive = url.searchParams.get("includeInactive") === "1";
+    sendJson(response, 200, searchArticles(articles, query, includeInactive).map(articleSummary));
+    return;
+  }
+
+  if (pathname === "/api/articles" && request.method === "POST") {
+    const body = await readBody(request);
+    const articles = await readArticles();
+    const article = normalizeArticle(body.article || body);
+    validateArticle(article);
+    article.id = article.id || createArticleId();
+    article.erstelltAm = article.erstelltAm || new Date().toISOString();
+    article.geaendertAm = new Date().toISOString();
+    if (articles.some((entry) => entry.materialnummer === article.materialnummer)) {
+      sendJson(response, 409, { ok: false, error: "Materialnummer ist bereits vorhanden" });
+      return;
+    }
+    articles.push(article);
+    await writeArticles(articles);
+    sendJson(response, 200, { ok: true, article });
+    return;
+  }
+
+  if (pathname === "/api/articles/import" && request.method === "POST") {
+    const body = await readBody(request);
+    const incoming = Array.isArray(body.articles) ? body.articles : [];
+    const result = await importArticles(incoming);
+    sendJson(response, 200, { ok: true, ...result });
+    return;
+  }
+
+  if (pathname === "/api/articles/export" && request.method === "GET") {
+    const articles = await readArticles();
+    sendCsv(response, 200, "artikelstamm.csv", articlesToCsv(articles));
+    return;
+  }
+
+  const articleLookupMatch = pathname.match(/^\/api\/articles\/lookup\/([^/]+)$/);
+  if (articleLookupMatch && request.method === "GET") {
+    const code = articleLookupMatch[1];
+    const article = findArticleByCode(await readArticles(), code);
+    if (!article) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
+    sendJson(response, 200, article);
+    return;
+  }
+
+  if (pathname === "/api/articles/calculate-package" && request.method === "POST") {
+    const body = await readBody(request);
+    const articles = await readArticles();
+    const article = findArticleByCode(articles, body.materialnummer || body.barcode || body.code);
+    if (!article) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
+    sendJson(response, 200, { ok: true, article: articleSummary(article), packaging: calculatePackaging(article, body.menge_stueck ?? body.mengeStueck ?? body.quantity) });
+    return;
+  }
+
+  const articleMatch = pathname.match(/^\/api\/articles\/([^/]+)$/);
+  if (articleMatch && request.method === "GET") {
+    const article = await findArticle(articleMatch[1]);
+    if (!article) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
+    sendJson(response, 200, article);
+    return;
+  }
+
+  if (articleMatch && request.method === "PUT") {
+    const body = await readBody(request);
+    const articles = await readArticles();
+    const index = articles.findIndex((article) => article.id === articleMatch[1]);
+    if (index < 0) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
+    const article = normalizeArticle({ ...articles[index], ...(body.article || body), id: articleMatch[1] });
+    validateArticle(article);
+    if (articles.some((entry) => entry.id !== article.id && entry.materialnummer === article.materialnummer)) {
+      sendJson(response, 409, { ok: false, error: "Materialnummer ist bereits vorhanden" });
+      return;
+    }
+    article.erstelltAm = articles[index].erstelltAm || article.erstelltAm || new Date().toISOString();
+    article.geaendertAm = new Date().toISOString();
+    articles[index] = article;
+    await writeArticles(articles);
+    sendJson(response, 200, { ok: true, article });
+    return;
+  }
+
+  if (articleMatch && request.method === "DELETE") {
+    const articles = await readArticles();
+    const index = articles.findIndex((article) => article.id === articleMatch[1]);
+    if (index < 0) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
+    articles[index] = normalizeArticle({ ...articles[index], aktiv: false, geaendertAm: new Date().toISOString() });
+    await writeArticles(articles);
+    sendJson(response, 200, { ok: true, article: articles[index] });
     return;
   }
 
@@ -162,6 +278,79 @@ async function exportPdf(order, origin = "") {
   };
 }
 
+function initializeDatabase() {
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE IF NOT EXISTS artikel (
+      id TEXT PRIMARY KEY,
+      materialnummer TEXT NOT NULL UNIQUE,
+      materialbezeichnung TEXT NOT NULL,
+      gebinde_art TEXT NOT NULL DEFAULT 'STK',
+      menge_pro_karton INTEGER NOT NULL,
+      menge_pro_palette INTEGER NOT NULL,
+      barcode TEXT,
+      lagerplatz TEXT,
+      artikelgruppe TEXT,
+      bemerkung TEXT,
+      aktiv INTEGER NOT NULL DEFAULT 1,
+      erstellt_am TEXT NOT NULL,
+      geaendert_am TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_artikel_suche
+      ON artikel(materialnummer, materialbezeichnung, barcode);
+
+    CREATE TABLE IF NOT EXISTS lagerbestand (
+      id TEXT PRIMARY KEY,
+      artikel_id TEXT NOT NULL,
+      materialnummer TEXT NOT NULL,
+      lagerplatz TEXT NOT NULL,
+      le_nummer TEXT NOT NULL,
+      menge_stueck INTEGER NOT NULL DEFAULT 0,
+      aktualisiert_am TEXT NOT NULL,
+      UNIQUE(materialnummer, lagerplatz, le_nummer)
+    );
+    CREATE INDEX IF NOT EXISTS idx_lagerbestand_artikel
+      ON lagerbestand(materialnummer, lagerplatz, le_nummer);
+
+    CREATE TABLE IF NOT EXISTS lagerbewegung (
+      id TEXT PRIMARY KEY,
+      artikel_id TEXT NOT NULL,
+      materialnummer TEXT NOT NULL,
+      bewegungsart TEXT NOT NULL,
+      menge_stueck INTEGER NOT NULL,
+      lagerplatz TEXT NOT NULL,
+      le_nummer TEXT NOT NULL,
+      referenz TEXT,
+      erstellt_am TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_lagerbewegung_artikel
+      ON lagerbewegung(materialnummer, erstellt_am);
+  `);
+  if (ensureArticleColumn("gebinde_art", "TEXT NOT NULL DEFAULT 'STK'")) {
+    db.prepare("UPDATE artikel SET gebinde_art = 'KRT' WHERE menge_pro_karton > 0").run();
+  }
+}
+
+function ensureArticleColumn(name, definition) {
+  const columns = db.prepare("PRAGMA table_info(artikel)").all().map((column) => column.name);
+  if (columns.includes(name)) return false;
+  db.exec(`ALTER TABLE artikel ADD COLUMN ${name} ${definition}`);
+  return true;
+}
+
+async function migrateLegacyArticles() {
+  if (!existsSync(legacyArticlesFile)) return;
+  const count = db.prepare("SELECT COUNT(*) AS count FROM artikel").get().count;
+  if (count > 0) return;
+
+  try {
+    const legacy = JSON.parse(await readFile(legacyArticlesFile, "utf8"));
+    if (Array.isArray(legacy) && legacy.length) await importArticles(legacy);
+  } catch {
+    // A broken legacy import file should not block the server start.
+  }
+}
+
 function requestOrigin(request) {
   const host = request.headers.host || `localhost:${port}`;
   const protocol = request.headers["x-forwarded-proto"] || "http";
@@ -232,7 +421,7 @@ function printableHtml(order, fileName) {
     </header>
     <section class="meta">
       <p><strong>Europaletten:</strong> ${escapeHtml(order.euroPallets || "0")}</p>
-      <p><strong>Stellplaetze:</strong> ${escapeHtml(order.storageSpaces || "0")}</p>
+      <p><strong>Stellplätze:</strong> ${escapeHtml(order.storageSpaces || "0")}</p>
       <p><strong>Korrigiert:</strong> ${changed}</p>
     </section>
     <section class="note"><strong>Notiz:</strong> ${escapeHtml(order.orderNote || "-")}</section>
@@ -269,6 +458,267 @@ async function writeOrders(orders) {
 async function findOrder(id) {
   const orders = await readOrders();
   return orders.find((order) => order.id === id);
+}
+
+async function readArticles() {
+  return db.prepare(`
+    SELECT
+      id,
+      materialnummer,
+      materialbezeichnung,
+      gebinde_art,
+      menge_pro_karton,
+      menge_pro_palette,
+      barcode,
+      lagerplatz,
+      artikelgruppe,
+      bemerkung,
+      aktiv,
+      erstellt_am,
+      geaendert_am
+    FROM artikel
+  `).all().map(articleFromRow);
+}
+
+async function writeArticles(articles) {
+  const insert = db.prepare(`
+    INSERT INTO artikel (
+      id,
+      materialnummer,
+      materialbezeichnung,
+      gebinde_art,
+      menge_pro_karton,
+      menge_pro_palette,
+      barcode,
+      lagerplatz,
+      artikelgruppe,
+      bemerkung,
+      aktiv,
+      erstellt_am,
+      geaendert_am
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  db.exec("BEGIN");
+  try {
+    db.prepare("DELETE FROM artikel").run();
+    sortArticles(articles).forEach((article) => {
+      insert.run(
+        article.id,
+        article.materialnummer,
+        article.materialbezeichnung,
+        article.gebindeArt,
+        article.mengeProKarton,
+        article.mengeProPalette,
+        article.barcode,
+        article.lagerplatz,
+        article.artikelgruppe,
+        article.bemerkung,
+        article.aktiv ? 1 : 0,
+        article.erstelltAm,
+        article.geaendertAm
+      );
+    });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+async function findArticle(id) {
+  const row = db.prepare(`
+    SELECT
+      id,
+      materialnummer,
+      materialbezeichnung,
+      gebinde_art,
+      menge_pro_karton,
+      menge_pro_palette,
+      barcode,
+      lagerplatz,
+      artikelgruppe,
+      bemerkung,
+      aktiv,
+      erstellt_am,
+      geaendert_am
+    FROM artikel
+    WHERE id = ?
+  `).get(id);
+  return row ? articleFromRow(row) : null;
+}
+
+function readStorageLocations({ query = "", materialnummer = "" } = {}) {
+  const rows = db.prepare(`
+    SELECT
+      lagerbestand.id,
+      lagerbestand.materialnummer,
+      artikel.materialbezeichnung,
+      lagerbestand.lagerplatz,
+      lagerbestand.le_nummer,
+      lagerbestand.menge_stueck,
+      lagerbestand.aktualisiert_am
+    FROM lagerbestand
+    LEFT JOIN artikel ON artikel.id = lagerbestand.artikel_id
+    WHERE lagerbestand.menge_stueck > 0
+    ORDER BY lagerbestand.lagerplatz COLLATE NOCASE, lagerbestand.materialnummer COLLATE NOCASE, lagerbestand.le_nummer COLLATE NOCASE
+  `).all().map(storageLocationFromRow);
+
+  const materialFilter = String(materialnummer || "").trim().toLowerCase();
+  const terms = normalizeSearch(query).split(" ").filter(Boolean);
+
+  return rows.filter((row) => {
+    if (materialFilter && row.materialnummer.toLowerCase() !== materialFilter) return false;
+    if (!terms.length) return true;
+    const haystack = normalizeSearch([row.materialnummer, row.materialbezeichnung, row.lagerplatz, row.leNummer].join(" "));
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+function bookStorageReceipt(receipt) {
+  const normalized = normalizeStorageReceipt(receipt);
+  const article = findArticleByCode(readArticlesSync(), normalized.materialnummer);
+  if (!article) throw new Error("Artikelnummer ist nicht im Artikelstamm vorhanden");
+
+  const now = new Date().toISOString();
+  const existing = db.prepare(`
+    SELECT id, menge_stueck
+    FROM lagerbestand
+    WHERE materialnummer = ? AND lagerplatz = ? AND le_nummer = ?
+  `).get(article.materialnummer, normalized.lagerplatz, normalized.leNummer);
+
+  const bestandId = existing?.id || createStorageId();
+  const bewegungId = createStorageMovementId();
+
+  db.exec("BEGIN");
+  try {
+    if (existing) {
+      db.prepare(`
+        UPDATE lagerbestand
+        SET menge_stueck = menge_stueck + ?, aktualisiert_am = ?
+        WHERE id = ?
+      `).run(normalized.mengeStueck, now, existing.id);
+    } else {
+      db.prepare(`
+        INSERT INTO lagerbestand (
+          id,
+          artikel_id,
+          materialnummer,
+          lagerplatz,
+          le_nummer,
+          menge_stueck,
+          aktualisiert_am
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(bestandId, article.id, article.materialnummer, normalized.lagerplatz, normalized.leNummer, normalized.mengeStueck, now);
+    }
+
+    db.prepare(`
+      INSERT INTO lagerbewegung (
+        id,
+        artikel_id,
+        materialnummer,
+        bewegungsart,
+        menge_stueck,
+        lagerplatz,
+        le_nummer,
+        referenz,
+        erstellt_am
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(bewegungId, article.id, article.materialnummer, "Wareneingang", normalized.mengeStueck, normalized.lagerplatz, normalized.leNummer, normalized.referenz, now);
+
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  const location = db.prepare(`
+    SELECT
+      lagerbestand.id,
+      lagerbestand.materialnummer,
+      artikel.materialbezeichnung,
+      lagerbestand.lagerplatz,
+      lagerbestand.le_nummer,
+      lagerbestand.menge_stueck,
+      lagerbestand.aktualisiert_am
+    FROM lagerbestand
+    LEFT JOIN artikel ON artikel.id = lagerbestand.artikel_id
+    WHERE lagerbestand.id = ?
+  `).get(bestandId);
+
+  return {
+    movement: {
+      id: bewegungId,
+      bewegungsart: "Wareneingang",
+      materialnummer: article.materialnummer,
+      mengeStueck: normalized.mengeStueck,
+      lagerplatz: normalized.lagerplatz,
+      leNummer: normalized.leNummer,
+      erstelltAm: now
+    },
+    location: storageLocationFromRow(location)
+  };
+}
+
+function readArticlesSync() {
+  return db.prepare(`
+    SELECT
+      id,
+      materialnummer,
+      materialbezeichnung,
+      gebinde_art,
+      menge_pro_karton,
+      menge_pro_palette,
+      barcode,
+      lagerplatz,
+      artikelgruppe,
+      bemerkung,
+      aktiv,
+      erstellt_am,
+      geaendert_am
+    FROM artikel
+  `).all().map(articleFromRow);
+}
+
+async function importArticles(incoming) {
+  const articles = await readArticles();
+  const byMaterialnummer = new Map(articles.map((article, index) => [article.materialnummer, { article, index }]));
+  let created = 0;
+  let updated = 0;
+  const errors = [];
+
+  incoming.forEach((entry, index) => {
+    try {
+      const article = normalizeArticle(entry);
+      validateArticle(article);
+      const existing = byMaterialnummer.get(article.materialnummer);
+      if (existing) {
+        const merged = normalizeArticle({
+          ...existing.article,
+          ...article,
+          id: existing.article.id,
+          erstelltAm: existing.article.erstelltAm,
+          geaendertAm: new Date().toISOString()
+        });
+        articles[existing.index] = merged;
+        byMaterialnummer.set(merged.materialnummer, { article: merged, index: existing.index });
+        updated += 1;
+        return;
+      }
+
+      article.id = createArticleId();
+      article.erstelltAm = new Date().toISOString();
+      article.geaendertAm = article.erstelltAm;
+      articles.push(article);
+      byMaterialnummer.set(article.materialnummer, { article, index: articles.length - 1 });
+      created += 1;
+    } catch (error) {
+      errors.push({ row: index + 1, error: error.message || "Ungültiger Artikel" });
+    }
+  });
+
+  if (created || updated) await writeArticles(sortArticles(articles));
+  return { created, updated, errors };
 }
 
 async function markOrderExported(id, exportResult) {
@@ -335,6 +785,189 @@ function orderSummary(order) {
   };
 }
 
+function normalizeArticle(article) {
+  const gebindeArt = normalizeGebindeArt(article.gebindeArt ?? article.gebinde_art ?? article.Gebinde ?? article.Gebindeart);
+  const mengeProKarton = readInteger(article.mengeProKarton ?? article.menge_pro_karton ?? article["Menge pro KRT"] ?? article["Menge pro Karton"]);
+  const mengeProPalette = readInteger(article.mengeProPalette ?? article.menge_pro_palette ?? article["Menge pro Palette"]);
+
+  return {
+    id: String(article.id || ""),
+    materialnummer: String(article.materialnummer ?? article.materialNumber ?? article.Materialnummer ?? "").trim(),
+    materialbezeichnung: String(article.materialbezeichnung ?? article.materialDescription ?? article.Materialbezeichnung ?? "").trim(),
+    gebindeArt,
+    mengeProKarton: gebindeArt === "KRT" ? mengeProKarton : 0,
+    mengeProPalette,
+    barcode: String(article.barcode ?? article.Barcode ?? "").trim(),
+    lagerplatz: String(article.lagerplatz ?? article.Lagerplatz ?? "").trim(),
+    artikelgruppe: String(article.artikelgruppe ?? article.Artikelgruppe ?? "").trim(),
+    bemerkung: String(article.bemerkung ?? article.Bemerkung ?? "").trim(),
+    aktiv: readBoolean(article.aktiv ?? article.Aktiv, true),
+    erstelltAm: String(article.erstelltAm ?? article.erstellt_am ?? article.createdAt ?? ""),
+    geaendertAm: String(article.geaendertAm ?? article.geaendert_am ?? article.updatedAt ?? "")
+  };
+}
+
+function validateArticle(article) {
+  if (!article.materialnummer) throw new Error("Materialnummer fehlt");
+  if (!article.materialbezeichnung) throw new Error("Materialbezeichnung fehlt");
+  if (!["C1", "C2", "KRT", "STK"].includes(article.gebindeArt)) throw new Error("Gebindeart ist ungültig");
+  if (article.gebindeArt === "KRT" && (!Number.isInteger(article.mengeProKarton) || article.mengeProKarton <= 0)) throw new Error("Menge pro KRT muss größer 0 sein");
+  if (!Number.isInteger(article.mengeProPalette) || article.mengeProPalette <= 0) throw new Error("Menge pro Palette muss größer 0 sein");
+}
+
+function articleSummary(article) {
+  return {
+    id: article.id,
+    materialnummer: article.materialnummer,
+    materialbezeichnung: article.materialbezeichnung,
+    gebindeArt: article.gebindeArt,
+    mengeProKarton: article.mengeProKarton,
+    mengeProPalette: article.mengeProPalette,
+    barcode: article.barcode,
+    lagerplatz: article.lagerplatz,
+    artikelgruppe: article.artikelgruppe,
+    bemerkung: article.bemerkung,
+    aktiv: article.aktiv,
+    erstelltAm: article.erstelltAm,
+    geaendertAm: article.geaendertAm
+  };
+}
+
+function articleFromRow(row) {
+  return {
+    id: String(row.id || ""),
+    materialnummer: String(row.materialnummer || ""),
+    materialbezeichnung: String(row.materialbezeichnung || ""),
+    gebindeArt: normalizeGebindeArt(row.gebinde_art),
+    mengeProKarton: Number(row.menge_pro_karton || 0),
+    mengeProPalette: Number(row.menge_pro_palette || 0),
+    barcode: String(row.barcode || ""),
+    lagerplatz: String(row.lagerplatz || ""),
+    artikelgruppe: String(row.artikelgruppe || ""),
+    bemerkung: String(row.bemerkung || ""),
+    aktiv: Boolean(row.aktiv),
+    erstelltAm: String(row.erstellt_am || ""),
+    geaendertAm: String(row.geaendert_am || "")
+  };
+}
+
+function normalizeStorageReceipt(receipt) {
+  const normalized = {
+    materialnummer: String(receipt.materialnummer ?? receipt.artikelnummer ?? receipt.articleNumber ?? "").trim(),
+    lagerplatz: String(receipt.lagerplatz ?? receipt.storageBin ?? "").trim().toUpperCase(),
+    leNummer: String(receipt.leNummer ?? receipt.le_nummer ?? receipt.LE ?? receipt.handlingUnit ?? "").trim(),
+    mengeStueck: readInteger(receipt.mengeStueck ?? receipt.menge_stueck ?? receipt.stueckzahl ?? receipt.quantity),
+    referenz: String(receipt.referenz ?? receipt.reference ?? "").trim()
+  };
+
+  if (!normalized.materialnummer) throw new Error("Artikelnummer fehlt");
+  if (!normalized.lagerplatz) throw new Error("Lagerplatz fehlt");
+  if (!normalized.leNummer) throw new Error("LE-Nummer fehlt");
+  if (!Number.isInteger(normalized.mengeStueck) || normalized.mengeStueck <= 0) throw new Error("Stückzahl muss größer 0 sein");
+  return normalized;
+}
+
+function storageLocationFromRow(row) {
+  return {
+    id: String(row.id || ""),
+    materialnummer: String(row.materialnummer || ""),
+    materialbezeichnung: String(row.materialbezeichnung || ""),
+    lagerplatz: String(row.lagerplatz || ""),
+    leNummer: String(row.le_nummer || ""),
+    mengeStueck: Number(row.menge_stueck || 0),
+    aktualisiertAm: String(row.aktualisiert_am || "")
+  };
+}
+
+function searchArticles(articles, query, includeInactive = false) {
+  const terms = normalizeSearch(query).split(" ").filter(Boolean);
+  return sortArticles(articles)
+    .filter((article) => includeInactive || article.aktiv)
+    .filter((article) => {
+      if (!terms.length) return true;
+      const haystack = normalizeSearch([article.materialnummer, article.materialbezeichnung, article.gebindeArt, article.barcode, article.lagerplatz, article.artikelgruppe].join(" "));
+      return terms.every((term) => haystack.includes(term));
+    });
+}
+
+function findArticleByCode(articles, code) {
+  const needle = String(code || "").trim().toLowerCase();
+  if (!needle) return null;
+  return articles.find((article) => article.aktiv && (
+    article.materialnummer.toLowerCase() === needle ||
+    String(article.barcode || "").toLowerCase() === needle
+  )) || null;
+}
+
+function calculatePackaging(article, quantity) {
+  const mengeStueck = readInteger(quantity);
+  if (!Number.isInteger(mengeStueck) || mengeStueck < 0) throw new Error("Menge muss eine Zahl ab 0 sein");
+  return {
+    mengeStueck,
+    kartons: article.mengeProKarton > 0 ? mengeStueck / article.mengeProKarton : 0,
+    paletten: article.mengeProPalette > 0 ? mengeStueck / article.mengeProPalette : 0,
+    volleKartons: article.mengeProKarton > 0 ? Math.floor(mengeStueck / article.mengeProKarton) : 0,
+    restStueckNachKartons: article.mengeProKarton > 0 ? mengeStueck % article.mengeProKarton : mengeStueck,
+    vollePaletten: article.mengeProPalette > 0 ? Math.floor(mengeStueck / article.mengeProPalette) : 0,
+    restStueckNachPaletten: article.mengeProPalette > 0 ? mengeStueck % article.mengeProPalette : mengeStueck
+  };
+}
+
+function articlesToCsv(articles) {
+  const header = ["Materialnummer", "Materialbezeichnung", "Gebinde", "Menge pro KRT", "Menge pro Palette", "Barcode", "Lagerplatz", "Artikelgruppe", "Bemerkung", "Aktiv"];
+  const rows = sortArticles(articles).map((article) => [
+    article.materialnummer,
+    article.materialbezeichnung,
+    article.gebindeArt,
+    article.gebindeArt === "KRT" ? article.mengeProKarton : "",
+    article.mengeProPalette,
+    article.barcode,
+    article.lagerplatz,
+    article.artikelgruppe,
+    article.bemerkung,
+    article.aktiv ? "1" : "0"
+  ]);
+  return [header, ...rows].map((row) => row.map(csvCell).join(";")).join("\r\n");
+}
+
+function sortArticles(articles) {
+  return [...articles].sort((a, b) => String(a.materialnummer).localeCompare(String(b.materialnummer), "de", { numeric: true }));
+}
+
+function normalizeGebindeArt(value) {
+  const text = String(value || "STK").trim().toUpperCase();
+  return ["C1", "C2", "KRT", "STK"].includes(text) ? text : "STK";
+}
+
+function readInteger(value) {
+  if (value === "" || value === null || value === undefined) return 0;
+  const number = Number(String(value).replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(number) ? Math.trunc(number) : 0;
+}
+
+function readBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  const text = String(value).trim().toLowerCase();
+  if (["0", "false", "nein", "no", "inaktiv"].includes(text)) return false;
+  return true;
+}
+
+function normalizeSearch(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  if (!/[;"\r\n]/.test(text)) return text;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 async function sendStatic(response, requestPath) {
   const safe = path.normalize(requestPath).replace(/^([/\\])+/, "");
   const filePath = path.join(root, safe);
@@ -377,6 +1010,14 @@ function sendText(response, status, value) {
   response.end(value);
 }
 
+function sendCsv(response, status, fileName, value) {
+  response.writeHead(status, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": `attachment; filename="${sanitizeFileName(fileName)}"`
+  });
+  response.end(value);
+}
+
 function run(command, args) {
   return new Promise((resolve, reject) => {
     execFile(command, args, { windowsHide: true }, (error, stdout, stderr) => {
@@ -408,6 +1049,18 @@ function localAddresses() {
 
 function createId() {
   return `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createArticleId() {
+  return `article-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createStorageId() {
+  return `stock-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createStorageMovementId() {
+  return `move-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function sanitizeFileName(value) {

@@ -1,5 +1,6 @@
 const STORAGE_KEY = "kommissionier-app-state-v1";
 const USER_KEY = "kommissionier-app-user-v1";
+const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
@@ -38,7 +39,7 @@ const state = {
 };
 
 const elements = {};
-const currentUser = { name: "" };
+const currentUser = { name: "", group: "" };
 let currentMode = "picking";
 let activeDownloadUrl = "";
 let saveTimer = null;
@@ -81,6 +82,8 @@ function bindElements() {
     "connectionText",
     "pickingModeButton",
     "storageModeButton",
+    "storageAppLink",
+    "articleNavLink",
     "orderNumber",
     "customerName",
     "orderDate",
@@ -118,6 +121,7 @@ function bindElements() {
     "loginOverlay",
     "loginForm",
     "loginNameInput",
+    "loginGroupInput",
     "loginSubmitButton",
     "orderNotice",
     "orderNoticeText",
@@ -156,7 +160,7 @@ function bindEvents() {
   window.addEventListener("offline", () => setConnectionStatus(false));
   elements.loginForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    setCurrentUser(elements.loginNameInput.value);
+    setCurrentUser(elements.loginNameInput.value, elements.loginGroupInput.value);
   });
   window.addEventListener("afterprint", cleanupPrintReport);
   elements.clearDoneButton.addEventListener("click", () => {
@@ -188,7 +192,7 @@ function registerServiceWorker() {
 }
 
 function loadCurrentMode() {
-  currentMode = localStorage.getItem(MODE_KEY) === "storage" ? "storage" : "picking";
+  currentMode = window.location.hash === "#storage" || localStorage.getItem(MODE_KEY) === "storage" ? "storage" : "picking";
 }
 
 async function setMode(mode) {
@@ -211,16 +215,25 @@ function modeLabel(mode = currentMode) {
 
 function loadCurrentUser() {
   currentUser.name = localStorage.getItem(USER_KEY) || "";
+  currentUser.group = localStorage.getItem(USER_GROUP_KEY) || "";
 }
 
-function setCurrentUser(value) {
+function setCurrentUser(value, groupValue) {
   const name = String(value || "").trim();
-  if (!name) return;
+  const group = normalizeUserGroup(groupValue);
+  if (!name || !group) return;
 
   currentUser.name = name;
+  currentUser.group = group;
   localStorage.setItem(USER_KEY, name);
+  localStorage.setItem(USER_GROUP_KEY, group);
   elements.loginOverlay.hidden = true;
   updateCurrentUserUi();
+  if (group === "tablet") {
+    window.location.href = "/tablet.html";
+    return;
+  }
+  if (!applyUserAccess()) return;
 
   if (state.lines.length || state.id) {
     saveStateWithoutServer();
@@ -230,17 +243,20 @@ function setCurrentUser(value) {
 
 function showLogin(force = false) {
   elements.loginNameInput.value = force ? currentUser.name : "";
+  elements.loginGroupInput.value = force ? currentUser.group : "";
   elements.loginOverlay.hidden = false;
   elements.loginNameInput.focus();
   elements.loginNameInput.select();
 }
 
 function showLoginIfNeeded() {
-  if (!currentUser.name) showLogin(false);
+  if (!currentUser.name || !currentUser.group) showLogin(false);
+  else if (currentUser.group === "tablet") window.location.href = "/tablet.html";
+  else applyUserAccess();
 }
 
 function requireCurrentUser() {
-  if (currentUser.name) return true;
+  if (currentUser.name && currentUser.group) return true;
   showLogin(false);
   setServerStatus("Bitte zuerst mit Namen anmelden.", "error");
   return false;
@@ -248,7 +264,36 @@ function requireCurrentUser() {
 
 function updateCurrentUserUi() {
   if (!elements.currentUserName) return;
-  elements.currentUserName.textContent = currentUser.name || "Nicht angemeldet";
+  const group = userGroupLabel(currentUser.group);
+  elements.currentUserName.textContent = currentUser.name ? `${currentUser.name}${group ? ` - ${group}` : ""}` : "Nicht angemeldet";
+}
+
+function normalizeUserGroup(value) {
+  return value === "lager" || value === "buero" || value === "tablet" ? value : "";
+}
+
+function userGroupLabel(group) {
+  if (group === "lager") return "Lager";
+  if (group === "buero") return "Büro";
+  if (group === "tablet") return "Tablet";
+  return "";
+}
+
+function applyUserAccess() {
+  const isWarehouse = currentUser.group === "lager";
+  const isOffice = currentUser.group === "buero";
+  if (elements.storageModeButton) elements.storageModeButton.hidden = isOffice;
+  if (elements.storageAppLink) elements.storageAppLink.hidden = isWarehouse;
+  if (elements.articleNavLink) elements.articleNavLink.hidden = isWarehouse;
+
+  let changedMode = false;
+  if (isOffice && currentMode === "storage") {
+    currentMode = "picking";
+    localStorage.setItem(MODE_KEY, currentMode);
+    changedMode = true;
+  }
+  if (changedMode && elements.pickList) render();
+  return true;
 }
 
 async function handlePdfUpload(event) {
@@ -307,7 +352,7 @@ async function handleImageUpload(event) {
   if (!file) return;
 
   if (!window.Tesseract?.recognize) {
-    setImportStatus("OCR-Modul konnte nicht geladen werden. Internetverbindung pruefen und Seite neu laden.", "error");
+    setImportStatus("OCR-Modul konnte nicht geladen werden. Internetverbindung prüfen und Seite neu laden.", "error");
     event.target.value = "";
     return;
   }
@@ -449,7 +494,7 @@ async function chooseBestImportText(pdf, fullText) {
 
 async function readPdfWithOcr(pdf) {
   if (!window.Tesseract?.createWorker) {
-    throw new Error("OCR-Modul konnte nicht geladen werden. Internetverbindung pruefen und Seite neu laden.");
+    throw new Error("OCR-Modul konnte nicht geladen werden. Internetverbindung prüfen und Seite neu laden.");
   }
 
   const worker = await createOcrWorker(pdf.numPages * OCR_ROTATIONS.length);
@@ -682,7 +727,7 @@ function parseOrderText(text) {
   ]);
   const explicitCustomerName = findFirst(text, [
     /Auslagerung\s*[:#-]?\s*([^\n\t]{3,80})/i,
-    /(?:kunde|lieferadresse|empfÃ¤nger)\s*[:#-]?\s*([^\n\t]{3,80})/i
+    /(?:kunde|lieferadresse|empfänger)\s*[:#-]?\s*([^\n\t]{3,80})/i
   ]);
 
   const bestellscheinRows = collectBestellscheinRows(cleanedLines);
@@ -721,7 +766,7 @@ function parseOrderText(text) {
   cleanedLines.forEach((line) => {
     const starter = line.match(/^(\d{1,4})(?:[.)\s-]+)(.+)$/);
     const looksLikeArticle = /\b[A-Z0-9][A-Z0-9/-]{3,}\b/.test(line);
-    const hasQuantity = /\b\d+(?:[,.]\d+)?\s*(?:stk|st|stÃ¼ck|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i.test(line);
+    const hasQuantity = /\b\d+(?:[,.]\d+)?\s*(?:stk|st|stück|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i.test(line);
     const isLikelyPosition = starter && (hasQuantity || looksLikeArticle || line.length > 18);
 
     if (isLikelyPosition) {
@@ -875,7 +920,7 @@ function parseWarehouseLine(line) {
   const quantity = combinedQuantity || parseQuantityToken(tokens[cursor] || "");
   const targetQty = quantity ? quantity.value : "";
   if (quantity) cursor += 1;
-  const unit = /^[A-Za-zÃ„Ã–ÃœÃ¤Ã¶Ã¼]{1,5}$/.test(tokens[cursor] || "") ? normalizeUnit(tokens[cursor++]) : "Stk";
+  const unit = /^[A-Za-zÄÖÜäöü]{1,5}$/.test(tokens[cursor] || "") ? normalizeUnit(tokens[cursor++]) : "Stk";
   const remaining = tokens.slice(cursor);
 
   if (!product || !targetQty || remaining.length === 0) return parseWarehouseLineLoose(normalizedLine);
@@ -1151,7 +1196,7 @@ function parseQuantityToken(value) {
 
 function parseQuantityWithUnitToken(value) {
   const compact = String(value || "").replace(/[_|]/g, "").trim();
-  const match = compact.match(/^(\d+(?:[,.]\d+)?)[/ ]?([A-Za-zÃƒâ€žÃƒâ€“ÃƒÅ“ÃƒÂ¤ÃƒÂ¶ÃƒÂ¼]{1,5})$/);
+  const match = compact.match(/^(\d+(?:[,.]\d+)?)[/ ]?([A-Za-zÄÖÜäöü]{1,5})$/);
   if (!match) return null;
 
   return {
@@ -1213,7 +1258,7 @@ function cleanProductDescription(value, toBin = "") {
     .replace(/\(\s*-/g, "-")
     .replace(/[(){}\[\]|_]+/g, " ")
     .replace(/^\s*(?:STK?|SI|S1|5T|KAR|PCK|PAK|VE)\b\s*/i, "")
-    .replace(/^\s*(?:[\\/]+|[IVLJX17][\\/]+|[IVLJX])\s+(?=\d|[A-ZÃƒâ€žÃƒâ€“ÃƒÅ“])/i, "")
+    .replace(/^\s*(?:[\\/]+|[IVLJX17][\\/]+|[IVLJX])\s+(?=\d|[A-ZÄÖÜ])/i, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1229,7 +1274,7 @@ function normalizeQuantity(value) {
 }
 
 function parsePositionLine(position, content) {
-  const quantityMatch = content.match(/(\d+(?:[,.]\d+)?)\s*(stk|st|stÃ¼ck|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i);
+  const quantityMatch = content.match(/(\d+(?:[,.]\d+)?)\s*(stk|st|stück|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i);
   const articleMatch = content.match(/\b([A-Z0-9][A-Z0-9/-]{3,})\b/);
   const targetQty = quantityMatch ? quantityMatch[1].replace(",", ".") : "";
   const unit = quantityMatch ? normalizeUnit(quantityMatch[2]) : "";
@@ -1245,7 +1290,7 @@ function parsePositionLine(position, content) {
 
 function normalizeUnit(unit) {
   const value = unit.toLowerCase();
-  if (["st", "si", "s1", "5t", "stk", "stÃ¼ck"].includes(value)) return "Stk";
+  if (["st", "si", "s1", "5t", "stk", "stück"].includes(value)) return "Stk";
   if (["pck", "pak"].includes(value)) return "Pck";
   if (value === "ve") return "VE";
   return unit;
@@ -1534,8 +1579,8 @@ function renderModeControls() {
   elements.fileDrop.setAttribute("for", isStorage ? "imageInput" : "pdfInput");
   elements.fileDropTitle.textContent = isStorage ? "Lieferschein fotografieren" : "PDF importieren";
   elements.fileDrop.querySelector(".file-drop-copy").textContent = isStorage
-    ? "Bild vom Lieferschein importieren, Positionen pruefen und Stellplatz/HU eintragen."
-    : "Auftrag auswaehlen, Positionen pruefen und digital abhaken.";
+    ? "Bild vom Lieferschein importieren, Positionen prüfen und Stellplatz/HU eintragen."
+    : "Auftrag auswählen, Positionen prüfen und digital abhaken.";
   elements.pickingModeButton.classList.toggle("is-active", !isStorage);
   elements.storageModeButton.classList.toggle("is-active", isStorage);
   elements.pickHeader.querySelector(".pick-column-grid").innerHTML = isStorage
@@ -1552,8 +1597,8 @@ function renderTakeOverButton() {
   elements.takeOverOrderButton.hidden = !hasOrder || isMine;
   elements.takeOverOrderButton.disabled = !hasOrder || !currentUser.name || !serverOnline;
   elements.takeOverOrderButton.textContent = activeUser
-    ? `Bearbeitung von ${activeUser} uebernehmen`
-    : "Bearbeitung uebernehmen";
+    ? `Bearbeitung von ${activeUser} übernehmen`
+    : "Bearbeitung übernehmen";
 }
 
 function renderDeleteOrderButton() {
@@ -1695,7 +1740,7 @@ function setConnectionStatus(isOnline) {
   elements.connectionBadge.classList.toggle("is-online", isOnline === true);
   elements.connectionBadge.classList.toggle("is-offline", isOnline === false);
   elements.connectionBadge.classList.toggle("is-checking", isOnline === null);
-  elements.connectionText.textContent = isOnline === true ? "Online" : isOnline === false ? "Offline" : "Pruefe Verbindung";
+  elements.connectionText.textContent = isOnline === true ? "Online" : isOnline === false ? "Offline" : "Prüfe Verbindung";
 }
 
 function startOrderListRefresh() {
@@ -1772,7 +1817,7 @@ function showNewOrderNotice(newOrders) {
   const label = orderNoticeLabel(firstOrder);
   const message = newOrders.length === 1
     ? `Ein neuer Auftrag wurde eingelesen: ${label}.`
-    : `${newOrders.length} neue Auftraege wurden eingelesen. Neuester Auftrag: ${label}.`;
+    : `${newOrders.length} neue Aufträge wurden eingelesen. Neuester Auftrag: ${label}.`;
 
   elements.orderNoticeText.textContent = message;
   elements.orderNotice.hidden = false;
@@ -1794,7 +1839,7 @@ function hideOrderNotice() {
 
 function orderActivityLabel(order) {
   if (isOrderRecentlyActive(order)) {
-    if (order.id === state.id && order.activeUser === currentUser.name) return "bei dir geoeffnet";
+    if (order.id === state.id && order.activeUser === currentUser.name) return "bei dir geöffnet";
     return `in Bearbeitung: ${order.activeUser}`;
   }
 
@@ -1835,7 +1880,7 @@ async function loadOrder(id) {
 async function takeOverCurrentOrder() {
   if (!requireCurrentUser()) return;
   if (!state.id || !state.lines.length) {
-    setServerStatus("Kein gespeicherter Auftrag ausgewaehlt.", "error");
+    setServerStatus("Kein gespeicherter Auftrag ausgewählt.", "error");
     return;
   }
 
@@ -1848,7 +1893,7 @@ async function takeOverCurrentOrder() {
   render();
 
   const saved = await saveOrderNow(true);
-  setServerStatus(saved ? "Bearbeitung uebernommen." : "Bearbeitung konnte nicht uebernommen werden.", saved ? "ok" : "error");
+  setServerStatus(saved ? "Bearbeitung übernommen." : "Bearbeitung konnte nicht übernommen werden.", saved ? "ok" : "error");
   await loadOrderList();
 }
 
@@ -1886,12 +1931,12 @@ async function saveOrderNow(silent = false) {
 
 async function deleteCurrentOrder() {
   if (!serverOnline) {
-    setServerStatus("Server nicht verbunden. Auftrag kann nicht geloescht werden.", "error");
+    setServerStatus("Server nicht verbunden. Auftrag kann nicht gelöscht werden.", "error");
     return;
   }
 
   if (!state.id) {
-    setServerStatus("Kein gespeicherter Auftrag ausgewaehlt.", "error");
+    setServerStatus("Kein gespeicherter Auftrag ausgewählt.", "error");
     return;
   }
 
@@ -1900,7 +1945,7 @@ async function deleteCurrentOrder() {
     orderNumber: state.orderNumber,
     customerName: state.customerName
   });
-  if (!confirm(`Auftrag "${label}" wirklich aus der Liste loeschen?`)) return;
+  if (!confirm(`Auftrag "${label}" wirklich aus der Liste löschen?`)) return;
 
   window.clearTimeout(saveTimer);
   saveTimer = null;
@@ -1915,10 +1960,10 @@ async function deleteCurrentOrder() {
     elements.imageInput.value = "";
     saveStateWithoutServer();
     render();
-    setServerStatus("Auftrag geloescht.", "ok");
+    setServerStatus("Auftrag gelöscht.", "ok");
     await loadOrderList();
   } catch (error) {
-    setServerStatus(`Loeschen fehlgeschlagen: ${error.message}`, "error");
+    setServerStatus(`Löschen fehlgeschlagen: ${error.message}`, "error");
   }
 }
 
@@ -2056,7 +2101,7 @@ function exportCsv() {
     ["Zuletzt bearbeitet von", state.lastEditedBy],
     ["Abgeschlossen von", state.completedBy],
     ["Europaletten", state.euroPallets],
-    ["Stellplaetze", state.storageSpaces],
+    ["Stellplätze", state.storageSpaces],
     ["Notiz", state.orderNote],
     [],
     ["Erledigt", "Lagerauftrag", "Von-Handling-Unit", "Zusatzbemerkung", "Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit", "Nach-Lagerplatz"]
@@ -2087,7 +2132,7 @@ async function exportPdf() {
   if (!requireCurrentUser()) return;
 
   if (!serverOnline) {
-    showExportMessage("PDF kann nur am Server ausgegeben werden. Bitte Verbindung zum Laptop-Server pruefen.");
+    showExportMessage("PDF kann nur am Server ausgegeben werden. Bitte Verbindung zum Laptop-Server prüfen.");
     return;
   }
 
@@ -2171,7 +2216,7 @@ function renderPrintReport(fileName) {
     </header>
     <section class="report-meta">
       <p><strong>Europaletten:</strong> ${escapeHtml(state.euroPallets || "0")}</p>
-      <p><strong>Stellplaetze:</strong> ${escapeHtml(state.storageSpaces || "0")}</p>
+      <p><strong>Stellplätze:</strong> ${escapeHtml(state.storageSpaces || "0")}</p>
       <p><strong>Korrigiert:</strong> ${escapeHtml(String(state.lines.filter((line) => String(line.actualQty).trim() !== String(line.targetQty).trim()).length))}</p>
     </section>
     <section class="report-note"><strong>Notiz:</strong> ${escapeHtml(state.orderNote || "-")}</section>
@@ -2238,7 +2283,7 @@ function createPdfDocument() {
     text(ops, 430, y, `Datum: ${formatDateForDisplay(state.orderDate)}`, 10);
     y -= 18;
     text(ops, margin, y, `Europaletten: ${state.euroPallets || "0"}`, 10);
-    text(ops, 220, y, `Stellplaetze: ${state.storageSpaces || "0"}`, 10);
+    text(ops, 220, y, `Stellplätze: ${state.storageSpaces || "0"}`, 10);
     text(ops, 430, y, `Erledigt: ${state.lines.filter((line) => line.picked).length}/${state.lines.length}`, 10);
     y -= 18;
     text(ops, margin, y, `Notiz: ${state.orderNote || "-"}`, 9);
@@ -2342,13 +2387,13 @@ function escapePdfText(value) {
 
 function normalizePdfText(value) {
   return String(value ?? "")
-    .replace(/Ã¤/g, "ae")
-    .replace(/Ã¶/g, "oe")
-    .replace(/Ã¼/g, "ue")
-    .replace(/Ã„/g, "Ae")
-    .replace(/Ã–/g, "Oe")
-    .replace(/Ãœ/g, "Ue")
-    .replace(/ÃŸ/g, "ss")
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/Ä/g, "Ae")
+    .replace(/Ö/g, "Oe")
+    .replace(/Ü/g, "Ue")
+    .replace(/ß/g, "ss")
     .replace(/[^\x20-\x7E]/g, "")
     .trim();
 }
@@ -2407,7 +2452,7 @@ function showExportLink(url, fileName, label) {
   openLink.href = url;
   openLink.target = "_blank";
   openLink.rel = "noopener";
-  openLink.textContent = "PDF oeffnen";
+  openLink.textContent = "PDF öffnen";
   const spacer = document.createTextNode(" | ");
   const downloadLink = document.createElement("a");
   downloadLink.href = url;
@@ -2428,7 +2473,7 @@ function showPdfExport(url, fileName) {
   openLink.href = url;
   openLink.target = "_blank";
   openLink.rel = "noopener";
-  openLink.textContent = "PDF oeffnen";
+  openLink.textContent = "PDF öffnen";
 
   const spacer = document.createTextNode(" | ");
   const downloadLink = document.createElement("a");

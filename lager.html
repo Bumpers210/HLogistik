@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#167a58">
+    <title>Einlagern</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="app-icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css?v=20260529-6">
+    <script src="lager.js?v=20260529-5" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Lager</p>
+        <h1>Einlagern</h1>
+      </div>
+      <div class="header-actions">
+        <div id="connectionBadge" class="connection-badge is-checking" role="status" aria-live="polite">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connectionText">Prüfe Verbindung</span>
+        </div>
+        <nav class="mode-nav" aria-label="Arbeitsbereich">
+          <a class="mode-button" href="/">Kommissionierung</a>
+          <span class="mode-button is-active">Einlagern</span>
+          <a class="mode-button" href="/artikel.html">Artikelstamm</a>
+        </nav>
+        <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">
+          <span id="currentUserName">Nicht angemeldet</span>
+          <button id="switchUserButton" class="secondary-button" type="button">Wechseln</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="app-shell storage-shell">
+      <section class="storage-layout">
+        <aside class="summary-box storage-editor">
+          <h2>Wareneingang buchen</h2>
+          <form id="storageForm" class="article-form">
+            <label>
+              Artikelnummer
+              <input id="materialnummerInput" name="materialnummer" type="text" autocomplete="off" inputmode="numeric" required>
+            </label>
+            <label>
+              Lagerplatz
+              <input id="lagerplatzInput" name="lagerplatz" type="text" autocomplete="off" required>
+            </label>
+            <div class="two-columns">
+              <label>
+                Stückzahl
+                <input id="mengeStueckInput" name="mengeStueck" type="number" inputmode="numeric" min="1" step="1" required>
+              </label>
+              <label>
+                LE-Nummer
+                <input id="leNummerInput" name="leNummer" type="text" autocomplete="off" required>
+              </label>
+            </div>
+            <button class="primary-button full-width" type="submit">Einlagern</button>
+          </form>
+          <p id="storageStatus" class="export-status" role="status">Server wird gesucht...</p>
+        </aside>
+
+        <section class="list-panel">
+          <div class="section-heading">
+            <h2>Stellplätze</h2>
+            <span id="locationCount" class="muted-count">0 Einträge</span>
+          </div>
+          <div class="storage-search">
+            <label>
+              Abrufen
+              <input id="locationSearchInput" type="search" autocomplete="off" placeholder="Artikelnummer, Lagerplatz oder LE-Nummer">
+            </label>
+            <button id="refreshLocationsButton" class="secondary-button" type="button">Aktualisieren</button>
+          </div>
+          <div class="article-table-wrap">
+            <table class="article-table storage-table">
+              <thead>
+                <tr>
+                  <th>Artikel</th>
+                  <th>Bezeichnung</th>
+                  <th>Lagerplatz</th>
+                  <th>Stück</th>
+                  <th>LE-Nummer</th>
+                </tr>
+              </thead>
+              <tbody id="locationTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>
