@@ -274,7 +274,8 @@ async function handlePdfUpload(event) {
 
     if (result.lines > 0) {
       const suffix = imported.source === "ocr" ? " per OCR" : "";
-      setImportStatus(`${result.lines} Positionen${suffix} importiert.`, "ok", 100);
+      const pageNotice = imported.pageNotice ? ` ${imported.pageNotice}` : "";
+      setImportStatus(`${result.lines} Positionen${suffix} importiert.${pageNotice}`, imported.pageNotice?.startsWith("Achtung") ? "warning" : "ok", 100);
     } else if (imported.text.trim()) {
       setImportStatus("Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
     } else {
@@ -419,7 +420,12 @@ async function readPdfText(pdf) {
 
 async function chooseBestImportText(pdf, fullText) {
   let parsed = parseOrderText(fullText);
-  if (parsed.lines.length) return { text: fullText, parsed, source: "pdf-text" };
+  if (parsed.lines.length) return {
+    text: fullText,
+    parsed,
+    source: "pdf-text",
+    pageNotice: bestellscheinPageNotice(fullText, pdf.numPages)
+  };
 
   const reason = fullText.trim()
     ? "PDF-Text erkannt, aber keine Tabellenzeilen. Starte OCR ..."
@@ -431,7 +437,12 @@ async function chooseBestImportText(pdf, fullText) {
 
   const combinedText = fullText.trim() ? `${fullText}\n${ocrText}` : ocrText;
   parsed = parseOrderText(combinedText);
-  return { text: combinedText, parsed, source: "ocr" };
+  return {
+    text: combinedText,
+    parsed,
+    source: "ocr",
+    pageNotice: bestellscheinPageNotice(combinedText, pdf.numPages)
+  };
 }
 
 async function readPdfWithOcr(pdf) {
@@ -555,6 +566,25 @@ function scoreStorageOcrCandidate(text, parsed) {
   return parsed.lines.length * 1000 + materialHits * 50 + containerHits * 25 + Math.min(text.length, 500);
 }
 
+function bestellscheinPageNotice(text, pdfPageCount) {
+  if (!/bestellschein|entnahmeanweisungen/i.test(text)) return "";
+
+  const pageMatches = [...String(text || "").matchAll(/Seite\s*:?\s*(\d+)\s*\(?\s*von\s*(\d+)\s*\)?/gi)];
+  const pagesSeen = new Set(pageMatches.map((match) => Number(match[1])).filter(Number.isFinite));
+  const declaredTotal = Math.max(0, ...pageMatches.map((match) => Number(match[2])).filter(Number.isFinite));
+  const checkedPages = Math.max(Number(pdfPageCount) || 0, pagesSeen.size);
+
+  if (declaredTotal > checkedPages) {
+    return `Achtung: Bestellschein nennt ${declaredTotal} Seiten, in dieser PDF wurden nur ${checkedPages} Seiten geprueft.`;
+  }
+
+  if (checkedPages > 1 || declaredTotal > 1) {
+    return `Mehrseitiger Bestellschein geprueft: ${checkedPages}${declaredTotal ? ` von ${declaredTotal}` : ""} Seiten.`;
+  }
+
+  return "";
+}
+
 function importText(text, fileName = "", parsed = parseOrderText(text)) {
   currentMode = "picking";
   localStorage.setItem(MODE_KEY, currentMode);
@@ -596,8 +626,9 @@ function setImportStatus(message, type = "", progress = null) {
   elements.importStatus.textContent = message;
   elements.importStatus.classList.toggle("is-ok", type === "ok");
   elements.importStatus.classList.toggle("is-error", type === "error");
+  elements.importStatus.classList.toggle("is-warning", type === "warning");
 
-  const nextProgress = type === "ok" ? 100 : progress;
+  const nextProgress = type === "ok" || type === "warning" ? 100 : progress;
   if (elements.importProgressBar && nextProgress !== null && nextProgress !== undefined) {
     const clampedProgress = Math.max(0, Math.min(100, Number(nextProgress) || 0));
     elements.importProgressBar.style.width = `${clampedProgress}%`;

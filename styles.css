@@ -424,6 +424,11 @@ h2 {
   background: #fff4ee;
 }
 
+.import-status.is-warning {
+  color: #735300;
+  background: #fff8dd;
+}
+
 .export-status {
   margin: 12px 0 0;
   padding: 10px;
