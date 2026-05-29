@@ -1,0 +1,17 @@
+{
+  "name": "HLogistik",
+  "short_name": "HLogistik",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "background_color": "#f5f7f4",
+  "theme_color": "#167a58",
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

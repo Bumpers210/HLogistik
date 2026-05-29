@@ -18,6 +18,8 @@ const mimeTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
   [".mjs", "text/javascript; charset=utf-8"],
+  [".webmanifest", "application/manifest+json; charset=utf-8"],
+  [".svg", "image/svg+xml"],
   [".pdf", "application/pdf"],
   [".png", "image/png"],
   [".jpg", "image/jpeg"],
@@ -107,8 +109,8 @@ async function route(request, response) {
     const order = normalizeOrder({ ...(savedOrder || {}), ...(body.order || {}) });
     order.id = exportMatch[1];
     const result = await exportPdf(order, requestOrigin(request));
-    await markOrderExported(order.id, result);
-    sendJson(response, 200, { ok: true, ...result });
+    const exportedAt = await markOrderExported(order.id, result);
+    sendJson(response, 200, { ok: true, exportedAt, ...result });
     return;
   }
 
@@ -258,16 +260,18 @@ async function findOrder(id) {
 async function markOrderExported(id, exportResult) {
   const orders = await readOrders();
   const index = orders.findIndex((order) => order.id === id);
-  if (index === -1) return;
+  if (index === -1) return "";
+  const exportedAt = new Date().toISOString();
 
   orders[index] = normalizeOrder({
     ...orders[index],
-    exportedAt: new Date().toISOString(),
+    exportedAt,
     exportedPdfFile: exportResult.file || "",
     exportedPdfPath: exportResult.path || "",
     updatedAt: new Date().toISOString()
   });
   await writeOrders(orders);
+  return exportedAt;
 }
 
 function normalizeOrder(order) {
@@ -282,6 +286,7 @@ function normalizeOrder(order) {
     rawText: String(order.rawText || ""),
     collapseDone: Boolean(order.collapseDone),
     lines: Array.isArray(order.lines) ? order.lines : [],
+    orderType: String(order.orderType || "picking"),
     exportedAt: String(order.exportedAt || ""),
     exportedPdfFile: String(order.exportedPdfFile || ""),
     exportedPdfPath: String(order.exportedPdfPath || ""),
@@ -311,6 +316,7 @@ function orderSummary(order) {
     completedBy: order.completedBy || "",
     completedAt: order.completedAt || "",
     exportedAt: order.exportedAt || "",
+    orderType: order.orderType || "picking",
     updatedAt: order.updatedAt || ""
   };
 }

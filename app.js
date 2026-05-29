@@ -1,14 +1,18 @@
 const STORAGE_KEY = "kommissionier-app-state-v1";
 const USER_KEY = "kommissionier-app-user-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
+const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 2.5;
 const OCR_ROTATIONS = [0, 90, 270];
+const STORAGE_IMAGE_ROTATIONS = [0, -2, 2, -4, 4];
 const ACTIVE_ORDER_TIMEOUT_MS = 10 * 60 * 1000;
 const ORDER_LIST_REFRESH_MS = 30 * 1000;
 const ACTIVITY_HEARTBEAT_MS = 60 * 1000;
 const ORDER_NOTICE_DURATION_MS = 12000;
+const CONNECTION_CHECK_MS = 30 * 1000;
+const CONNECTION_CHECK_TIMEOUT_MS = 5000;
 
 const state = {
   id: "",
@@ -29,17 +33,21 @@ const state = {
   exportedAt: "",
   exportedPdfFile: "",
   exportedPdfPath: "",
+  orderType: "picking",
   lines: []
 };
 
 const elements = {};
 const currentUser = { name: "" };
+let currentMode = "picking";
 let activeDownloadUrl = "";
 let saveTimer = null;
 let serverOnline = false;
 let topControlsCollapsed = false;
 let orderListTimer = null;
 let activityTimer = null;
+let connectionCheckTimer = null;
+let connectionCheckInProgress = false;
 let orderListInitialized = false;
 let knownOrderIds = new Set();
 let orderNoticeTimer = null;
@@ -47,26 +55,40 @@ let notifiedOrderId = "";
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
+  loadCurrentMode();
   loadCurrentUser();
   loadKnownOrderIds();
   clearCurrentOrder();
+  loadState();
   bindEvents();
   configurePdfJs();
+  registerServiceWorker();
   updateCurrentUserUi();
   render();
   initializeServer();
+  startConnectionMonitor();
   showLoginIfNeeded();
 });
 
 function bindElements() {
   [
     "pdfInput",
+    "imageInput",
+    "fileDrop",
+    "fileDropTitle",
+    "appTitle",
+    "connectionBadge",
+    "connectionText",
+    "pickingModeButton",
+    "storageModeButton",
     "orderNumber",
     "customerName",
     "orderDate",
     "euroPallets",
     "storageSpaces",
     "orderNote",
+    "importProgressWrap",
+    "importProgressBar",
     "importStatus",
     "topControls",
     "topToggleButton",
@@ -79,6 +101,7 @@ function bindElements() {
     "printReport",
     "orderSelect",
     "saveOrderButton",
+    "takeOverOrderButton",
     "refreshOrdersButton",
     "serverStatus",
     "clearDoneButton",
@@ -106,6 +129,9 @@ function bindElements() {
 
 function bindEvents() {
   elements.pdfInput.addEventListener("change", handlePdfUpload);
+  elements.imageInput.addEventListener("change", handleImageUpload);
+  elements.pickingModeButton.addEventListener("click", () => setMode("picking"));
+  elements.storageModeButton.addEventListener("click", () => setMode("storage"));
   elements.topToggleButton.addEventListener("click", () => {
     setTopControlsCollapsed(!topControlsCollapsed);
   });
@@ -114,6 +140,7 @@ function bindEvents() {
   elements.exportButton.addEventListener("click", exportCsv);
   elements.pdfExportButton.addEventListener("click", exportPdf);
   elements.saveOrderButton.addEventListener("click", saveOrderNow);
+  elements.takeOverOrderButton.addEventListener("click", takeOverCurrentOrder);
   elements.refreshOrdersButton.addEventListener("click", loadOrderList);
   elements.orderSelect.addEventListener("change", () => loadOrder(elements.orderSelect.value));
   elements.switchUserButton.addEventListener("click", () => showLogin(true));
@@ -123,6 +150,8 @@ function bindEvents() {
     if (id) loadOrder(id);
   });
   elements.dismissOrderNoticeButton.addEventListener("click", hideOrderNotice);
+  window.addEventListener("online", initializeServer);
+  window.addEventListener("offline", () => setConnectionStatus(false));
   elements.loginForm.addEventListener("submit", (event) => {
     event.preventDefault();
     setCurrentUser(elements.loginNameInput.value);
@@ -149,6 +178,35 @@ function configurePdfJs() {
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.min.js";
 }
 
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("/service-worker.js").catch(() => {
+    // Offline caching is optional; the app still works online without it.
+  });
+}
+
+function loadCurrentMode() {
+  currentMode = localStorage.getItem(MODE_KEY) === "storage" ? "storage" : "picking";
+}
+
+async function setMode(mode) {
+  const nextMode = mode === "storage" ? "storage" : "picking";
+  if (nextMode === currentMode) return;
+
+  if (state.id || state.lines.length) await releaseCurrentOrderActivity();
+  currentMode = nextMode;
+  localStorage.setItem(MODE_KEY, currentMode);
+  clearCurrentOrder();
+  topControlsCollapsed = false;
+  saveStateWithoutServer();
+  render();
+  await loadOrderList();
+}
+
+function modeLabel(mode = currentMode) {
+  return mode === "storage" ? "Einlagerung" : "Kommissionierung";
+}
+
 function loadCurrentUser() {
   currentUser.name = localStorage.getItem(USER_KEY) || "";
 }
@@ -163,8 +221,8 @@ function setCurrentUser(value) {
   updateCurrentUserUi();
 
   if (state.lines.length || state.id) {
-    markOrderTouched();
-    saveAndRender();
+    saveStateWithoutServer();
+    render();
   }
 }
 
@@ -207,7 +265,7 @@ async function handlePdfUpload(event) {
   }
 
   try {
-    setImportStatus(`Lese ${file.name} ...`);
+    setImportStatus(`Lese ${file.name} ...`, "", 0);
     data = await file.arrayBuffer();
     const pdf = await window.pdfjsLib.getDocument({ data }).promise;
     const fullText = await readPdfText(pdf);
@@ -216,7 +274,7 @@ async function handlePdfUpload(event) {
 
     if (result.lines > 0) {
       const suffix = imported.source === "ocr" ? " per OCR" : "";
-      setImportStatus(`${result.lines} Positionen${suffix} importiert.`, "ok");
+      setImportStatus(`${result.lines} Positionen${suffix} importiert.`, "ok", 100);
     } else if (imported.text.trim()) {
       setImportStatus("Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
     } else {
@@ -227,12 +285,123 @@ async function handlePdfUpload(event) {
     const fallbackText = data ? extractTextFromSimplePdf(data) : "";
     if (fallbackText.trim()) {
       const result = importText(fallbackText, file.name);
-      setImportStatus(`Fallback genutzt: ${result.lines} Positionen importiert.`, result.lines ? "ok" : "error");
+      setImportStatus(`Fallback genutzt: ${result.lines} Positionen importiert.`, result.lines ? "ok" : "error", result.lines ? 100 : null);
     } else {
       setImportStatus(error.message || "PDF konnte nicht ausgelesen werden.", "error");
     }
   } finally {
     event.target.value = "";
+  }
+}
+
+async function handleImageUpload(event) {
+  if (!requireCurrentUser()) {
+    event.target.value = "";
+    return;
+  }
+
+  const file = event.target.files[0];
+  if (!file) return;
+
+  if (!window.Tesseract?.recognize) {
+    setImportStatus("OCR-Modul konnte nicht geladen werden. Internetverbindung pruefen und Seite neu laden.", "error");
+    event.target.value = "";
+    return;
+  }
+
+  try {
+    setImportStatus(`Lese Lieferschein ${file.name} per OCR ...`, "", 0);
+    const { text, parsed, rotation } = await readBestStorageImageOcr(file);
+    const result = importStorageText(text, file.name, parsed);
+
+    if (result.lines > 0) {
+      const rotationText = rotation ? `, Rotation ${rotation} Grad` : "";
+      setImportStatus(`${result.lines} Einlagerungspositionen importiert${rotationText}.`, "ok", 100);
+    } else if (text.trim()) {
+      setImportStatus("Bild gelesen, aber keine Lieferscheinpositionen erkannt.", "error");
+    } else {
+      setImportStatus("Keine lesbaren Inhalte gefunden.", "error");
+    }
+  } catch (error) {
+    console.error(error);
+    setImportStatus(error.message || "Lieferschein konnte nicht ausgelesen werden.", "error");
+  } finally {
+    event.target.value = "";
+  }
+}
+
+async function readBestStorageImageOcr(file) {
+  const candidates = [];
+
+  for (let index = 0; index < STORAGE_IMAGE_ROTATIONS.length; index += 1) {
+    const rotation = STORAGE_IMAGE_ROTATIONS[index];
+    const rotationLabel = rotation ? `, Rotation ${rotation} Grad` : "";
+    const imageSource = await createRotatedImageCanvas(file, rotation);
+
+    try {
+      setImportStatus(`OCR Lieferschein ${index + 1}/${STORAGE_IMAGE_ROTATIONS.length}${rotationLabel} ...`, "", Math.round((index / STORAGE_IMAGE_ROTATIONS.length) * 100));
+      const result = await window.Tesseract.recognize(imageSource, OCR_LANGUAGE, {
+        logger: (message) => {
+          if (message.status === "recognizing text" && typeof message.progress === "number") {
+            const overallPercent = Math.min(99, Math.round(((index + message.progress) / STORAGE_IMAGE_ROTATIONS.length) * 100));
+            setImportStatus(`OCR Lieferschein ${index + 1}/${STORAGE_IMAGE_ROTATIONS.length}${rotationLabel}: ${Math.round(message.progress * 100)}%`, "", overallPercent);
+          }
+        }
+      });
+      const text = result.data.text || "";
+      const parsed = parseStorageSlipText(text, file.name);
+      candidates.push({ text, parsed, rotation, score: scoreStorageOcrCandidate(text, parsed) });
+    } finally {
+      if (imageSource instanceof HTMLCanvasElement) {
+        imageSource.width = 0;
+        imageSource.height = 0;
+      }
+    }
+  }
+
+  return candidates.sort((left, right) => right.score - left.score)[0] || {
+    text: "",
+    parsed: parseStorageSlipText("", file.name),
+    rotation: 0
+  };
+}
+
+async function createRotatedImageCanvas(file, degrees) {
+  const bitmap = await loadImageBitmap(file);
+  const radians = (degrees * Math.PI) / 180;
+  const sin = Math.abs(Math.sin(radians));
+  const cos = Math.abs(Math.cos(radians));
+  const width = bitmap.width || bitmap.naturalWidth;
+  const height = bitmap.height || bitmap.naturalHeight;
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+
+  canvas.width = Math.ceil(width * cos + height * sin);
+  canvas.height = Math.ceil(width * sin + height * cos);
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.translate(canvas.width / 2, canvas.height / 2);
+  context.rotate(radians);
+  context.drawImage(bitmap, -width / 2, -height / 2, width, height);
+
+  if (typeof bitmap.close === "function") bitmap.close();
+  return canvas;
+}
+
+async function loadImageBitmap(file) {
+  if (window.createImageBitmap) return window.createImageBitmap(file);
+
+  const image = new Image();
+  const url = URL.createObjectURL(file);
+  try {
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = reject;
+      image.src = url;
+    });
+    return image;
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }
 
@@ -255,7 +424,7 @@ async function chooseBestImportText(pdf, fullText) {
   const reason = fullText.trim()
     ? "PDF-Text erkannt, aber keine Tabellenzeilen. Starte OCR ..."
     : "Scan erkannt. Starte OCR ...";
-  setImportStatus(reason);
+  setImportStatus(reason, "", 5);
 
   const ocrText = await readPdfWithOcr(pdf);
   if (!ocrText.trim()) return { text: fullText, parsed, source: "pdf-text" };
@@ -275,7 +444,7 @@ async function readPdfWithOcr(pdf) {
 
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-      setImportStatus(`OCR Seite ${pageNumber}/${pdf.numPages} vorbereiten ...`);
+      setImportStatus(`OCR Seite ${pageNumber}/${pdf.numPages} vorbereiten ...`, "", Math.round(((pageNumber - 1) / pdf.numPages) * 100));
       const baseCanvas = await renderPdfPageToCanvas(pdf, pageNumber);
       const candidates = [];
 
@@ -315,7 +484,8 @@ async function createOcrWorker(totalSteps) {
     logger: (message) => {
       if (message.status === "recognizing text" && typeof message.progress === "number") {
         const percent = Math.round(message.progress * 100);
-        setImportStatus(`OCR ${currentStep}/${totalSteps}: ${percent}%`);
+        const overallPercent = Math.min(99, Math.round(((currentStep - 1 + message.progress) / totalSteps) * 100));
+        setImportStatus(`OCR ${currentStep}/${totalSteps}: ${percent}%`, "", overallPercent);
       }
     }
   });
@@ -379,8 +549,17 @@ function scoreOcrCandidate(text, parsed) {
   return parsed.lines.length * 1000 + warehouseHits * 20 + handlingUnitHits * 10 + binHits * 10 + Math.min(text.length, 500);
 }
 
+function scoreStorageOcrCandidate(text, parsed) {
+  const materialHits = (text.match(/\b\d{7}\b/g) || []).length;
+  const containerHits = (text.match(/\bC\s*\d+\b/gi) || []).length;
+  return parsed.lines.length * 1000 + materialHits * 50 + containerHits * 25 + Math.min(text.length, 500);
+}
+
 function importText(text, fileName = "", parsed = parseOrderText(text)) {
+  currentMode = "picking";
+  localStorage.setItem(MODE_KEY, currentMode);
   clearCurrentOrder();
+  state.orderType = "picking";
   state.rawText = text;
   state.createdBy = currentUser.name;
   state.lastEditedBy = currentUser.name;
@@ -396,11 +575,33 @@ function importText(text, fileName = "", parsed = parseOrderText(text)) {
   return { lines: parsed.lines.length };
 }
 
-function setImportStatus(message, type = "") {
+function importStorageText(text, fileName = "", parsed = parseStorageSlipText(text, fileName)) {
+  currentMode = "storage";
+  localStorage.setItem(MODE_KEY, currentMode);
+  clearCurrentOrder();
+  state.orderType = "storage";
+  state.rawText = text;
+  state.orderNumber = parsed.orderNumber || fileName.replace(/\.[^.]+$/i, "") || `Einlagerung ${new Date().toLocaleDateString("de-DE")}`;
+  state.customerName = parsed.customerName || "Einlagerung";
+  state.lines = parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })];
+  topControlsCollapsed = state.lines.length > 0;
+  markOrderTouched();
+  saveAndRender();
+  return { lines: parsed.lines.length };
+}
+
+function setImportStatus(message, type = "", progress = null) {
   if (!elements.importStatus) return;
+  if (elements.importProgressWrap) elements.importProgressWrap.hidden = false;
   elements.importStatus.textContent = message;
   elements.importStatus.classList.toggle("is-ok", type === "ok");
   elements.importStatus.classList.toggle("is-error", type === "error");
+
+  const nextProgress = type === "ok" ? 100 : progress;
+  if (elements.importProgressBar && nextProgress !== null && nextProgress !== undefined) {
+    const clampedProgress = Math.max(0, Math.min(100, Number(nextProgress) || 0));
+    elements.importProgressBar.style.width = `${clampedProgress}%`;
+  }
 }
 
 function extractTextFromSimplePdf(arrayBuffer) {
@@ -442,12 +643,28 @@ function parseOrderText(text) {
     .filter(Boolean);
 
   const orderNumber = findFirst(text, [
+    /Bestellschein\s*Nr\.?\s*[:.-]?\s*([A-Z0-9-]{4,})/i,
     /(?:^|\n)\s*(?:auftragsnr\.?|auftragsnummer|belegnr\.?)\s*[:#-]?\s*([A-Z0-9-]{4,})/i,
     /(?:^|\n)\s*(?:auftrag|kommission|lieferschein)\s*[:#-]\s*([A-Z0-9-]{4,})/i
   ]);
   const explicitCustomerName = findFirst(text, [
+    /Auslagerung\s*[:#-]?\s*([^\n\t]{3,80})/i,
     /(?:kunde|lieferadresse|empfÃ¤nger)\s*[:#-]?\s*([^\n\t]{3,80})/i
   ]);
+
+  const bestellscheinRows = collectBestellscheinRows(cleanedLines);
+  if (bestellscheinRows.length) {
+    return {
+      orderNumber: orderNumber || "",
+      customerName: cleanCustomerName(explicitCustomerName || "Bestellschein"),
+      lines: bestellscheinRows.map((line, index) => createLine({
+        ...line,
+        warehouseOrder: String(index + 1),
+        actualQty: line.targetQty,
+        fromHandlingUnitEditable: !String(line.fromHandlingUnit || "").trim()
+      }))
+    };
+  }
 
   const tableRows = collectWarehouseRows(cleanedLines);
   const destinationCustomerName = destinationToCustomerName(tableRows);
@@ -496,6 +713,86 @@ function parseOrderText(text) {
       actualQty: line.targetQty
     }))
   };
+}
+
+function collectBestellscheinRows(lines) {
+  if (!lines.some((line) => /bestellschein|entnahmeanweisungen/i.test(line))) return [];
+
+  const chunks = [];
+  let current = [];
+
+  lines.forEach((line) => {
+    if (/^\d{7}\b/.test(line)) {
+      if (current.length) chunks.push(current.join(" "));
+      current = [line];
+      return;
+    }
+
+    if (current.length) current.push(line);
+  });
+
+  if (current.length) chunks.push(current.join(" "));
+
+  return chunks
+    .map(parseBestellscheinRow)
+    .filter(Boolean);
+}
+
+function parseBestellscheinRow(chunk) {
+  const normalized = normalizeBestellscheinText(chunk);
+  const rowMatch = normalized.match(/^(\d{7})\s+(.+?)\s+(\d{1,5})\s*(ST|Stk|Stueck|Stück|PC|PCS)\b/i);
+  if (!rowMatch) return null;
+
+  const product = rowMatch[1];
+  const description = cleanBestellscheinDescription(rowMatch[2]);
+  const targetQty = normalizeQuantity(rowMatch[3]);
+  const unit = normalizeUnit(rowMatch[4]);
+  const fromBin = extractBestellscheinBin(normalized);
+  const fromHandlingUnit = extractBestellscheinFirstBarcode(normalized, product);
+
+  if (!description || !targetQty) return null;
+
+  return {
+    fromHandlingUnit,
+    fromBin,
+    product,
+    description,
+    targetQty,
+    unit,
+    toBin: ""
+  };
+}
+
+function normalizeBestellscheinText(value) {
+  return String(value || "")
+    .replace(/[|[\]{}]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b5T\b/gi, "ST")
+    .replace(/\bS7\b/gi, "ST")
+    .trim();
+}
+
+function cleanBestellscheinDescription(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/\bLagerp?l?atz\b.*$/i, "")
+    .trim();
+}
+
+function extractBestellscheinBin(value) {
+  const match = String(value || "").match(/Lagerp?l?atz\s*[:.]?\s*(\d{2,4}\s*\/\s*\d{7})/i);
+  return match ? match[1].replace(/\s+/g, "") : "";
+}
+
+function extractBestellscheinFirstBarcode(value, product) {
+  const afterBin = String(value || "").match(/Lagerp?l?atz\s*[:.]?\s*\d{2,4}\s*\/\s*\d{7}\D+(.+)$/i);
+  if (!afterBin) return "";
+
+  const match = afterBin[1]
+    .match(/\b\d{7,10}\b/g)
+    ?.find((number) => number !== product);
+
+  return match || "";
 }
 
 function rebuildPageRows(items) {
@@ -983,6 +1280,8 @@ function setHandlingUnitEditMode(input, canEdit) {
 }
 
 function render() {
+  renderModeControls();
+  renderTakeOverButton();
   syncFields();
   renderTopControls();
   elements.pickList.innerHTML = "";
@@ -993,6 +1292,7 @@ function render() {
 
   // The picking view is sorted by storage location. Exports keep state.lines in import order.
   getPickingLines(importOrder).forEach((line) => {
+    const isStorageLine = state.orderType === "storage";
     const item = elements.lineTemplate.content.firstElementChild.cloneNode(true);
     item.dataset.id = line.id;
     item.classList.toggle("is-done", line.picked);
@@ -1009,10 +1309,12 @@ function render() {
       actualQty: item.querySelector(".actual-qty-input"),
       unit: item.querySelector(".unit-input")
     };
+    const huLabel = item.querySelector(".hu-label");
+    if (huLabel) huLabel.textContent = isStorageLine ? "HU" : "Von HU";
 
     map.picked.checked = line.picked;
     const isMissingHandlingUnit = !String(line.fromHandlingUnit || "").trim();
-    const canEditHandlingUnit = line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
+    const canEditHandlingUnit = isStorageLine || line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
     map.fromHandlingUnit.value = line.fromHandlingUnit || "";
     map.positionNote.value = line.positionNote || "";
     map.fromBin.value = line.fromBin || "";
@@ -1024,7 +1326,9 @@ function render() {
     map.product.readOnly = true;
     map.description.readOnly = true;
     setHandlingUnitEditMode(map.fromHandlingUnit, canEditHandlingUnit);
-    map.fromBin.readOnly = true;
+    map.fromBin.readOnly = !isStorageLine;
+    map.fromBin.placeholder = isStorageLine ? "Stellplatz" : "Lagerplatz";
+    map.fromHandlingUnit.placeholder = isStorageLine ? "HU eintragen" : map.fromHandlingUnit.placeholder;
     map.targetQty.readOnly = true;
     map.unit.readOnly = true;
 
@@ -1048,6 +1352,176 @@ function render() {
   updateCollapseButtonText();
 }
 
+function parseStorageSlipText(text, fileName = "") {
+  const cleanedLines = text
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => normalizeStorageOcrLine(line))
+    .filter(Boolean);
+
+  const customerName = findStorageCustomer(cleanedLines);
+  const slipDate = findFirst(text, [/\b(\d{2}\.\d{2}\.\d{4})\b/]);
+  const lines = collectStorageRows(cleanedLines).flatMap((line) => expandStoragePalletRows(line)).map((line) => createLine({
+    orderType: "storage",
+    warehouseOrder: line.position,
+    fromHandlingUnit: "",
+    fromHandlingUnitEditable: true,
+    fromBin: "",
+    product: line.product,
+    description: "",
+    targetQty: line.targetQty,
+    actualQty: line.targetQty,
+    unit: line.unit || "Stk",
+    palletInfo: line.palletInfo,
+    picked: false
+  }));
+
+  return {
+    orderNumber: [customerName, slipDate].filter(Boolean).join(" - ") || fileName.replace(/\.[^.]+$/i, ""),
+    customerName,
+    lines
+  };
+}
+
+function collectStorageRows(lines) {
+  const rows = [];
+  const seen = new Set();
+
+  for (const line of lines) {
+    const row = parseStorageLine(line);
+    if (!row || seen.has(`${row.product}-${row.palletCount}-${row.containerCode}-${row.targetQty}`)) continue;
+    row.position = String(rows.length + 1);
+    rows.push(row);
+    seen.add(`${row.product}-${row.palletCount}-${row.containerCode}-${row.targetQty}`);
+  }
+
+  return rows;
+}
+
+function expandStoragePalletRows(row) {
+  const palletCount = Math.max(row.palletCount || parsePalletCount(row.palletInfo), 1);
+  const totalQty = parseStorageQuantityNumber(row.targetQty);
+  const perPalletQty = totalQty && palletCount > 1 && !row.containerCode ? totalQty / palletCount : totalQty;
+  const formattedQty = formatStorageQuantity(perPalletQty || row.targetQty);
+
+  return Array.from({ length: palletCount }, (_, index) => ({
+    ...row,
+    position: `${row.position}.${index + 1}`,
+    targetQty: formattedQty,
+    palletInfo: [
+      palletCount > 1 ? `Palette ${index + 1}/${palletCount}` : row.palletInfo,
+      row.containerCode
+    ].filter(Boolean).join(" - ")
+  }));
+}
+
+function parseStorageLine(line) {
+  if (/material|artikelbezeichnung|summe|ware erhalten|lieferschein|hummel logistik/i.test(line)) return null;
+
+  const match = line.match(/\b(\d{7})\b\D+(\d{1,2})(?:\s*([A-Z]\s*\d+))?\D+(\d{1,3}(?:[.,]\d{3})*|\d{4,6})\s*(?:st|stk|stück)?\b/i);
+  if (!match) return null;
+
+  const product = match[1];
+  const palletCount = Number(match[2]);
+  const containerCode = normalizeStorageContainerCode(match[3]);
+  const targetQty = normalizeStorageQuantity(match[4]);
+  const targetQtyNumber = parseStorageQuantityNumber(targetQty);
+
+  if (!product || !targetQty || /^0+$/.test(targetQty.replace(/[^\d]/g, ""))) return null;
+  if (!Number.isInteger(palletCount) || palletCount < 1 || palletCount > 12) return null;
+  if (!Number.isFinite(targetQtyNumber) || targetQtyNumber < palletCount || targetQtyNumber > 150000) return null;
+
+  return {
+    position: "",
+    product,
+    palletCount,
+    containerCode,
+    palletInfo: `${palletCount} Palette${palletCount === 1 ? "" : "n"}`,
+    targetQty,
+    unit: "Stk",
+    description: ""
+  };
+}
+
+function normalizeStorageOcrLine(line) {
+  return String(line || "")
+    .replace(/[|[\]{}()]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b5T\b/gi, "ST")
+    .trim();
+}
+
+function normalizeStorageQuantity(value) {
+  const normalized = String(value || "").replace(",", ".");
+  if (/^\d{1,3}\.\d{3}$/.test(normalized)) return normalized;
+  if (/^\d{4,6}$/.test(normalized)) return normalized.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return normalized;
+}
+
+function parsePalletCount(value) {
+  const match = String(value || "").match(/\d+/);
+  return match ? Number(match[0]) || 1 : 1;
+}
+
+function parseStorageQuantityNumber(value) {
+  const compact = String(value || "").replace(/[.,\s]/g, "");
+  return compact ? Number(compact) : 0;
+}
+
+function normalizeStorageContainerCode(value) {
+  const code = String(value || "").replace(/\s+/g, "").toUpperCase();
+  return /^C\d+$/.test(code) ? code : "";
+}
+
+function formatStorageQuantity(value) {
+  if (typeof value === "string") return value.replace(/[.,\s]/g, "");
+  if (!Number.isFinite(value)) return "";
+  if (Number.isInteger(value)) return String(value);
+  return String(Math.round(value * 1000) / 1000).replace(".", ",");
+}
+
+function cleanStorageDescription(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/\bWare erhalten\b.*$/i, "")
+    .trim();
+}
+
+function findStorageCustomer(lines) {
+  const selection = lines.find((line) => /-\s*\d{4,}\b/.test(line) && !/material|artikel/i.test(line));
+  if (selection) return selection.replace(/^.*?\b([A-ZÄÖÜ][A-Za-zÄÖÜäöüß -]+-\s*\d{4,})\b.*$/, "$1").trim();
+  return "";
+}
+
+function renderModeControls() {
+  const isStorage = currentMode === "storage";
+  document.body.classList.toggle("is-storage-mode", isStorage);
+  elements.appTitle.textContent = isStorage ? "Einlagerung" : "Kommissionierliste";
+  elements.fileDrop.setAttribute("for", isStorage ? "imageInput" : "pdfInput");
+  elements.fileDropTitle.textContent = isStorage ? "Lieferschein fotografieren" : "PDF importieren";
+  elements.fileDrop.querySelector(".file-drop-copy").textContent = isStorage
+    ? "Bild vom Lieferschein importieren, Positionen pruefen und Stellplatz/HU eintragen."
+    : "Auftrag auswaehlen, Positionen pruefen und digital abhaken.";
+  elements.pickingModeButton.classList.toggle("is-active", !isStorage);
+  elements.storageModeButton.classList.toggle("is-active", isStorage);
+  elements.pickHeader.querySelector(".pick-column-grid").innerHTML = isStorage
+    ? "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Soll</span><span>Ist</span><span>Einheit</span>"
+    : "<span>Produkt</span><span>Lagerplatz</span><span>Produktbeschreibung</span><span>Soll</span><span>Ist</span><span>Einheit</span>";
+  elements.clearDoneButton.textContent = isStorage ? "Erledigte einklappen" : elements.clearDoneButton.textContent;
+}
+
+function renderTakeOverButton() {
+  if (!elements.takeOverOrderButton) return;
+  const hasOrder = Boolean(state.id && state.lines.length);
+  const activeUser = String(state.activeUser || "").trim();
+  const isMine = activeUser && activeUser === currentUser.name;
+  elements.takeOverOrderButton.hidden = !hasOrder || isMine;
+  elements.takeOverOrderButton.disabled = !hasOrder || !currentUser.name || !serverOnline;
+  elements.takeOverOrderButton.textContent = activeUser
+    ? `Bearbeitung von ${activeUser} uebernehmen`
+    : "Bearbeitung uebernehmen";
+}
+
 function renderTopControls() {
   const canCollapse = state.lines.length > 0;
   topControlsCollapsed = canCollapse && topControlsCollapsed;
@@ -1064,10 +1538,15 @@ function setTopControlsCollapsed(collapsed) {
 }
 
 function updateCollapseButtonText() {
+  if (currentMode === "storage" || state.orderType === "storage") {
+    elements.clearDoneButton.textContent = state.collapseDone ? "Details bei erledigten anzeigen" : "Details bei erledigten ausblenden";
+    return;
+  }
   elements.clearDoneButton.textContent = state.collapseDone ? "HU bei erledigten anzeigen" : "HU bei erledigten ausblenden";
 }
 
 function getPickingLines(importOrder) {
+  if (state.orderType === "storage") return [...state.lines];
   return [...state.lines].sort((left, right) => compareStorageBins(left, right, importOrder));
 }
 
@@ -1132,20 +1611,50 @@ function updateCounts() {
   elements.changedCount.textContent = changed;
 }
 
-async function initializeServer() {
+async function initializeServer({ showChecking = true } = {}) {
+  if (connectionCheckInProgress) return;
+  connectionCheckInProgress = true;
+  let timeoutId = null;
+
   try {
-    const response = await fetch(`${API_BASE}/api/health`);
+    if (showChecking) setConnectionStatus(null);
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), CONNECTION_CHECK_TIMEOUT_MS);
+    const response = await fetch(`${API_BASE}/api/health`, {
+      cache: "no-store",
+      signal: controller.signal
+    });
     if (!response.ok) throw new Error("Server antwortet nicht");
     const info = await response.json();
     serverOnline = true;
+    setConnectionStatus(true);
     setServerStatus(`Server aktiv. PDFs: ${info.exportDir}`, "ok");
     await loadOrderList();
     startOrderListRefresh();
     startActivityHeartbeat();
   } catch {
     serverOnline = false;
+    setConnectionStatus(false);
     setServerStatus("Server nicht verbunden. Daten bleiben nur auf diesem Geraet.", "error");
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    connectionCheckInProgress = false;
   }
+}
+
+function startConnectionMonitor() {
+  if (connectionCheckTimer) return;
+  connectionCheckTimer = setInterval(() => {
+    initializeServer({ showChecking: false });
+  }, CONNECTION_CHECK_MS);
+}
+
+function setConnectionStatus(isOnline) {
+  if (!elements.connectionBadge || !elements.connectionText) return;
+  elements.connectionBadge.classList.toggle("is-online", isOnline === true);
+  elements.connectionBadge.classList.toggle("is-offline", isOnline === false);
+  elements.connectionBadge.classList.toggle("is-checking", isOnline === null);
+  elements.connectionText.textContent = isOnline === true ? "Online" : isOnline === false ? "Offline" : "Pruefe Verbindung";
 }
 
 function startOrderListRefresh() {
@@ -1159,7 +1668,7 @@ function startActivityHeartbeat() {
   if (activityTimer) return;
   activityTimer = setInterval(() => {
     if (!serverOnline || !currentUser.name) return;
-    if (state.id && state.lines.length) {
+    if (state.id && state.lines.length && state.activeUser === currentUser.name) {
       saveOrderNow(true);
       return;
     }
@@ -1170,7 +1679,8 @@ function startActivityHeartbeat() {
 async function loadOrderList() {
   if (!serverOnline) return;
   try {
-    const orders = await apiJson("/api/orders");
+    const orders = (await apiJson("/api/orders"))
+      .filter((order) => (order.orderType || "picking") === currentMode && !order.exportedAt);
     const newOrders = findNewOrders(orders);
     rememberKnownOrders(orders);
     elements.orderSelect.innerHTML = `<option value="">Kein gespeicherter Auftrag</option>`;
@@ -1178,7 +1688,7 @@ async function loadOrderList() {
       const option = document.createElement("option");
       option.value = order.id;
       const activity = orderActivityLabel(order);
-      option.textContent = `${order.orderNumber || order.id} - ${order.customerName || "ohne Kunde"} (${order.picked}/${order.total}) - ${activity}`;
+      option.textContent = `${order.orderNumber || order.id} - ${order.customerName || modeLabel(order.orderType).toLowerCase()} (${order.picked}/${order.total}) - ${activity}`;
       if (order.id === state.id) option.selected = true;
       elements.orderSelect.appendChild(option);
     });
@@ -1263,18 +1773,42 @@ async function loadOrder(id) {
     if (state.id && state.id !== id) await releaseCurrentOrderActivity();
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
     Object.assign(state, order);
-    state.activeUser = currentUser.name;
-    state.lastEditedBy = currentUser.name;
-    state.activeUserAt = new Date().toISOString();
+    currentMode = state.orderType === "storage" ? "storage" : "picking";
+    localStorage.setItem(MODE_KEY, currentMode);
     state.collapseDone = true;
     topControlsCollapsed = state.lines.length > 0;
     saveStateWithoutServer();
     render();
-    setServerStatus("Auftrag geladen.", "ok");
-    await saveOrderNow(true);
+    setServerStatus(
+      state.activeUser && state.activeUser !== currentUser.name
+        ? `Auftrag geladen. Aktuell in Bearbeitung: ${state.activeUser}.`
+        : "Auftrag geladen.",
+      "ok"
+    );
+    await loadOrderList();
   } catch (error) {
     setServerStatus(`Auftrag konnte nicht geladen werden: ${error.message}`, "error");
   }
+}
+
+async function takeOverCurrentOrder() {
+  if (!requireCurrentUser()) return;
+  if (!state.id || !state.lines.length) {
+    setServerStatus("Kein gespeicherter Auftrag ausgewaehlt.", "error");
+    return;
+  }
+
+  state.createdBy = state.createdBy || currentUser.name;
+  state.lastEditedBy = currentUser.name;
+  state.activeUser = currentUser.name;
+  state.activeUserAt = new Date().toISOString();
+  updateCompletionFields();
+  saveStateWithoutServer();
+  render();
+
+  const saved = await saveOrderNow(true);
+  setServerStatus(saved ? "Bearbeitung uebernommen." : "Bearbeitung konnte nicht uebernommen werden.", saved ? "ok" : "error");
+  await loadOrderList();
 }
 
 function scheduleServerSave() {
@@ -1347,6 +1881,7 @@ function currentOrderPayload({ touch = true } = {}) {
     exportedAt: state.exportedAt || "",
     exportedPdfFile: state.exportedPdfFile || "",
     exportedPdfPath: state.exportedPdfPath || "",
+    orderType: state.orderType || currentMode,
     lines: state.lines
   };
 }
@@ -1413,6 +1948,7 @@ function clearCurrentOrder() {
     exportedAt: "",
     exportedPdfFile: "",
     exportedPdfPath: "",
+    orderType: currentMode,
     lines: []
   });
 }
@@ -1488,7 +2024,18 @@ async function exportPdf() {
       method: "POST",
       body: JSON.stringify({ order: currentOrderPayload() })
     });
-    showServerPdfLink(result.url, result.file, result.path);
+    state.exportedAt = result.exportedAt || new Date().toISOString();
+    state.exportedPdfFile = result.file || "";
+    state.exportedPdfPath = result.path || "";
+    const exportedFile = result.file || "PDF";
+    const exportedPath = result.path || "";
+    clearCurrentOrder();
+    topControlsCollapsed = false;
+    elements.pdfInput.value = "";
+    elements.imageInput.value = "";
+    saveStateWithoutServer();
+    render();
+    showExportMessage(exportedPath ? `PDF gespeichert: ${exportedPath}` : `${exportedFile} gespeichert.`);
     await loadOrderList();
   } catch (error) {
     showExportMessage(`Server-PDF fehlgeschlagen: ${error.message}`);

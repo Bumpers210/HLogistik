@@ -3,19 +3,34 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#167a58">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="HLogistik">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Kommissionier-App</title>
-    <link rel="stylesheet" href="styles.css?v=20260528-3">
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="app-icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css?v=20260529-2">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
-    <script src="app.js?v=20260528-7" defer></script>
+    <script src="app.js?v=20260529-9" defer></script>
   </head>
   <body>
     <header class="app-header">
       <div>
         <p class="eyebrow">Lager</p>
-        <h1>Kommissionierliste</h1>
+        <h1 id="appTitle">Kommissionierliste</h1>
       </div>
       <div class="header-actions">
+        <div id="connectionBadge" class="connection-badge is-checking" role="status" aria-live="polite">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connectionText">Pruefe Verbindung</span>
+        </div>
+        <nav class="mode-nav" aria-label="Arbeitsbereich">
+          <button id="pickingModeButton" class="mode-button is-active" type="button">Kommissionierung</button>
+          <button id="storageModeButton" class="mode-button" type="button">Einlagerung</button>
+        </nav>
         <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">
           <span id="currentUserName">Nicht angemeldet</span>
           <button id="switchUserButton" class="secondary-button" type="button">Wechseln</button>
@@ -45,10 +60,11 @@
 
     <main class="app-shell">
       <section id="topControls" class="toolbar" aria-label="Auftrag importieren">
-        <label class="file-drop" for="pdfInput">
-          <span class="file-drop-title">PDF importieren</span>
+        <label id="fileDrop" class="file-drop" for="pdfInput">
+          <span id="fileDropTitle" class="file-drop-title">PDF importieren</span>
           <span class="file-drop-copy">Auftrag auswählen, Positionen prüfen und digital abhaken.</span>
           <input id="pdfInput" type="file" accept="application/pdf">
+          <input id="imageInput" type="file" accept="image/*" capture="environment">
         </label>
 
         <div class="order-picker">
@@ -61,10 +77,17 @@
           </label>
           <div class="stacked-actions">
             <button id="saveOrderButton" class="primary-button" type="button">Auftrag speichern</button>
+            <button id="takeOverOrderButton" class="secondary-button" type="button" hidden>Bearbeitung uebernehmen</button>
             <button id="refreshOrdersButton" class="secondary-button" type="button">Liste laden</button>
           </div>
           <p id="serverStatus" class="export-status">Server wird gesucht...</p>
-          <p id="importStatus" class="import-status sr-only" role="status"></p>
+        </div>
+
+        <div id="importProgressWrap" class="import-progress" hidden>
+          <div class="import-progress-bar" aria-hidden="true">
+            <span id="importProgressBar"></span>
+          </div>
+          <p id="importStatus" class="import-status" role="status"></p>
         </div>
 
         <div class="order-meta">
@@ -184,7 +207,7 @@
           </div>
           <div class="location-row">
             <label>
-              Von HU
+              <span class="hu-label">Von HU</span>
               <input class="from-hu-input" type="text" inputmode="decimal" pattern="[0-9,]*" placeholder="Handling Unit">
             </label>
             <label>
