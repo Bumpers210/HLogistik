@@ -102,6 +102,20 @@ async function route(request, response) {
     return;
   }
 
+  if (orderMatch && request.method === "DELETE") {
+    const orders = await readOrders();
+    const index = orders.findIndex((order) => order.id === orderMatch[1]);
+    if (index < 0) {
+      sendJson(response, 404, { ok: false, error: "Auftrag nicht gefunden" });
+      return;
+    }
+
+    orders.splice(index, 1);
+    await writeOrders(orders);
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+
   const exportMatch = pathname.match(/^\/api\/orders\/([^/]+)\/export-pdf$/);
   if (exportMatch && request.method === "POST") {
     const body = await readBody(request);

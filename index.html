@@ -11,10 +11,10 @@
     <title>Kommissionier-App</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260529-3">
+    <link rel="stylesheet" href="styles.css?v=20260529-4">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
-    <script src="app.js?v=20260529-10" defer></script>
+    <script src="app.js?v=20260529-11" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -79,6 +79,7 @@
             <button id="saveOrderButton" class="primary-button" type="button">Auftrag speichern</button>
             <button id="takeOverOrderButton" class="secondary-button" type="button" hidden>Bearbeitung uebernehmen</button>
             <button id="refreshOrdersButton" class="secondary-button" type="button">Liste laden</button>
+            <button id="deleteOrderButton" class="danger-button" type="button" hidden>Auftrag loeschen</button>
           </div>
           <p id="serverStatus" class="export-status">Server wird gesucht...</p>
         </div>

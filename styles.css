@@ -215,7 +215,8 @@ h2 {
 
 .icon-button,
 .primary-button,
-.secondary-button {
+.secondary-button,
+.danger-button {
   min-height: 34px;
   border-radius: 8px;
   font-weight: 700;
@@ -229,7 +230,8 @@ h2 {
 }
 
 .primary-button,
-.secondary-button {
+.secondary-button,
+.danger-button {
   padding: 0 16px;
 }
 
@@ -309,6 +311,16 @@ h2 {
 .secondary-button {
   background: #e9efec;
   color: var(--ink);
+}
+
+.danger-button {
+  background: #fff0ec;
+  color: #8a2f12;
+  border: 1px solid #e0a08d;
+}
+
+.danger-button:active {
+  background: #ffd9d0;
 }
 
 .full-width {

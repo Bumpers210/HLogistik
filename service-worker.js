@@ -1,4 +1,4 @@
-const CACHE_NAME = "hlogistik-offline-v1";
+const CACHE_NAME = "hlogistik-offline-v2";
 const APP_SHELL = [
   "/",
   "/index.html",

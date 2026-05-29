@@ -103,6 +103,7 @@ function bindElements() {
     "saveOrderButton",
     "takeOverOrderButton",
     "refreshOrdersButton",
+    "deleteOrderButton",
     "serverStatus",
     "clearDoneButton",
     "pickList",
@@ -142,6 +143,7 @@ function bindEvents() {
   elements.saveOrderButton.addEventListener("click", saveOrderNow);
   elements.takeOverOrderButton.addEventListener("click", takeOverCurrentOrder);
   elements.refreshOrdersButton.addEventListener("click", loadOrderList);
+  elements.deleteOrderButton.addEventListener("click", deleteCurrentOrder);
   elements.orderSelect.addEventListener("change", () => loadOrder(elements.orderSelect.value));
   elements.switchUserButton.addEventListener("click", () => showLogin(true));
   elements.openNotifiedOrderButton.addEventListener("click", () => {
@@ -1313,6 +1315,7 @@ function setHandlingUnitEditMode(input, canEdit) {
 function render() {
   renderModeControls();
   renderTakeOverButton();
+  renderDeleteOrderButton();
   syncFields();
   renderTopControls();
   elements.pickList.innerHTML = "";
@@ -1551,6 +1554,13 @@ function renderTakeOverButton() {
   elements.takeOverOrderButton.textContent = activeUser
     ? `Bearbeitung von ${activeUser} uebernehmen`
     : "Bearbeitung uebernehmen";
+}
+
+function renderDeleteOrderButton() {
+  if (!elements.deleteOrderButton) return;
+  const hasSavedOrder = Boolean(state.id);
+  elements.deleteOrderButton.hidden = !hasSavedOrder;
+  elements.deleteOrderButton.disabled = !hasSavedOrder || !serverOnline;
 }
 
 function renderTopControls() {
@@ -1871,6 +1881,44 @@ async function saveOrderNow(silent = false) {
   } catch (error) {
     if (!silent) setServerStatus(`Speichern fehlgeschlagen: ${error.message}`, "error");
     return false;
+  }
+}
+
+async function deleteCurrentOrder() {
+  if (!serverOnline) {
+    setServerStatus("Server nicht verbunden. Auftrag kann nicht geloescht werden.", "error");
+    return;
+  }
+
+  if (!state.id) {
+    setServerStatus("Kein gespeicherter Auftrag ausgewaehlt.", "error");
+    return;
+  }
+
+  const label = orderNoticeLabel({
+    id: state.id,
+    orderNumber: state.orderNumber,
+    customerName: state.customerName
+  });
+  if (!confirm(`Auftrag "${label}" wirklich aus der Liste loeschen?`)) return;
+
+  window.clearTimeout(saveTimer);
+  saveTimer = null;
+
+  try {
+    await apiJson(`/api/orders/${encodeURIComponent(state.id)}`, { method: "DELETE" });
+    knownOrderIds.delete(state.id);
+    localStorage.setItem(KNOWN_ORDERS_KEY, JSON.stringify([...knownOrderIds]));
+    clearCurrentOrder();
+    topControlsCollapsed = false;
+    elements.pdfInput.value = "";
+    elements.imageInput.value = "";
+    saveStateWithoutServer();
+    render();
+    setServerStatus("Auftrag geloescht.", "ok");
+    await loadOrderList();
+  } catch (error) {
+    setServerStatus(`Loeschen fehlgeschlagen: ${error.message}`, "error");
   }
 }
 
