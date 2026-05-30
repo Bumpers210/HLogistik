@@ -15,6 +15,26 @@ const ordersFile = path.join(dataDir, "orders.json");
 const legacyArticlesFile = path.join(dataDir, "articles.json");
 const databaseFile = path.join(dataDir, "logistik.sqlite");
 const port = Number(globalThis.process?.env?.PORT || 4174);
+const maxBodyBytes = 2 * 1024 * 1024;
+const publicStaticFiles = new Set([
+  "/",
+  "/index.html",
+  "/artikel.html",
+  "/lager.html",
+  "/tablet.html",
+  "/app.js",
+  "/artikel.js",
+  "/lager.js",
+  "/tablet.js",
+  "/styles.css",
+  "/tablet.css",
+  "/manifest.webmanifest",
+  "/app-icon.svg",
+  "/pdf.min.js",
+  "/pdf.worker.min.js",
+  "/kommissionier-app-screenshot.png",
+  "/muster-kommissionierauftrag.pdf"
+]);
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -44,7 +64,8 @@ const server = createServer(async (request, response) => {
     await route(request, response);
   } catch (error) {
     console.error(error);
-    sendJson(response, 500, { ok: false, error: error.message || "Serverfehler" });
+    const status = error.statusCode || 500;
+    sendJson(response, status, { ok: false, error: status >= 500 ? "Serverfehler" : error.publicMessage || error.message || "Fehler" });
   }
 });
 
@@ -58,6 +79,7 @@ server.listen(port, "0.0.0.0", () => {
 async function route(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
   const pathname = decodeURIComponent(url.pathname);
+  enforceSameOriginMutation(request);
 
   if (pathname === "/api/health") {
     sendJson(response, 200, { ok: true, host: hostname(), exportDir });
@@ -245,7 +267,7 @@ async function route(request, response) {
   }
 
   if (pathname.startsWith("/exports/")) {
-    await sendFile(response, path.join(exportDir, pathname.replace("/exports/", "")));
+    await sendExportFile(response, pathname);
     return;
   }
 
@@ -266,7 +288,6 @@ async function exportPdf(order, origin = "") {
   await run(browser, [
     "--headless",
     "--disable-gpu",
-    "--no-sandbox",
     `--print-to-pdf=${pdfPath}`,
     pathToFileURL(htmlPath).href
   ]);
@@ -963,18 +984,31 @@ function normalizeSearch(value) {
 }
 
 function csvCell(value) {
-  const text = String(value ?? "");
+  let text = String(value ?? "");
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
   if (!/[;"\r\n]/.test(text)) return text;
   return `"${text.replace(/"/g, '""')}"`;
 }
 
 async function sendStatic(response, requestPath) {
-  const safe = path.normalize(requestPath).replace(/^([/\\])+/, "");
-  const filePath = path.join(root, safe);
-  if (!filePath.startsWith(root)) {
-    sendText(response, 403, "Forbidden");
+  const normalizedPath = requestPath === "/" ? "/index.html" : requestPath;
+  if (!publicStaticFiles.has(normalizedPath)) {
+    sendText(response, 404, "Not found");
     return;
   }
+  const filePath = safeResolve(root, normalizedPath);
+  if (!filePath) return sendText(response, 403, "Forbidden");
+  await sendFile(response, filePath);
+}
+
+async function sendExportFile(response, requestPath) {
+  const relativeName = requestPath.replace(/^\/exports\//, "");
+  if (!/^[^/\\]+\.pdf$/i.test(relativeName)) {
+    sendText(response, 404, "Not found");
+    return;
+  }
+  const filePath = safeResolve(exportDir, `/${relativeName}`);
+  if (!filePath) return sendText(response, 403, "Forbidden");
   await sendFile(response, filePath);
 }
 
@@ -982,7 +1016,10 @@ async function sendFile(response, filePath) {
   try {
     const info = await stat(filePath);
     if (!info.isFile()) throw new Error("not file");
-    response.writeHead(200, { "Content-Type": mimeTypes.get(path.extname(filePath).toLowerCase()) || "application/octet-stream" });
+    response.writeHead(200, {
+      "Content-Type": mimeTypes.get(path.extname(filePath).toLowerCase()) || "application/octet-stream",
+      "X-Content-Type-Options": "nosniff"
+    });
     createReadStream(filePath).pipe(response);
   } catch {
     sendText(response, 404, "Not found");
@@ -991,9 +1028,18 @@ async function sendFile(response, filePath) {
 
 async function readBody(request) {
   const chunks = [];
-  for await (const chunk of request) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBodyBytes) throw httpError(413, "Anfrage ist zu groß");
+    chunks.push(chunk);
+  }
   const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : {};
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    throw httpError(400, "Ungültige JSON-Daten");
+  }
 }
 
 async function writeJson(filePath, value) {
@@ -1001,21 +1047,60 @@ async function writeJson(filePath, value) {
 }
 
 function sendJson(response, status, value) {
-  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  response.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff"
+  });
   response.end(JSON.stringify(value));
 }
 
 function sendText(response, status, value) {
-  response.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
+  response.writeHead(status, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "X-Content-Type-Options": "nosniff"
+  });
   response.end(value);
 }
 
 function sendCsv(response, status, fileName, value) {
   response.writeHead(status, {
     "Content-Type": "text/csv; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
     "Content-Disposition": `attachment; filename="${sanitizeFileName(fileName)}"`
   });
   response.end(value);
+}
+
+function safeResolve(baseDir, requestPath) {
+  const base = path.resolve(baseDir);
+  const relative = path.normalize(requestPath).replace(/^([/\\])+/, "");
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  const resolved = path.resolve(base, relative);
+  const relation = path.relative(base, resolved);
+  if (relation.startsWith("..") || path.isAbsolute(relation)) return null;
+  return resolved;
+}
+
+function enforceSameOriginMutation(request) {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) return;
+  const origin = request.headers.origin;
+  if (!origin) return;
+
+  const host = request.headers.host || `localhost:${port}`;
+  try {
+    const originUrl = new URL(origin);
+    if (originUrl.host === host) return;
+  } catch {
+    // Fall through to forbidden.
+  }
+  throw httpError(403, "Ungültiger Ursprung der Anfrage");
+}
+
+function httpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.publicMessage = message;
+  return error;
 }
 
 function run(command, args) {
