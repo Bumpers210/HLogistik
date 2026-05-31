@@ -73,18 +73,13 @@ function Ensure-HostsEntry {
     }
 }
 
-# ── Port-Pruefer ───────────────────────────────────────────────────────────────
+# ── Port-Pruefer (Get-NetTCPConnection ist zuverlaessiger als netstat-Parsing) ──
 
 function Get-PortOwnerPid {
     param([int]$port)
-    $lines = & netstat -ano 2>$null | Select-String ":$port\s"
-    foreach ($line in $lines) {
-        if ($line -match "ABHOER|LISTEN|ABHOR") {
-            $parts = ($line.ToString().Trim()) -split "\s+"
-            $p = $parts[-1]
-            if ($p -match "^\d+$" -and [int]$p -gt 0) { return [int]$p }
-        }
-    }
+    $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    if ($conn -and $conn.OwningProcess -gt 0) { return $conn.OwningProcess }
     return 0
 }
 
