@@ -2,7 +2,7 @@
 
 # WinForms braucht STA. Falls MTA: Skript im STA-Modus neu starten.
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne "STA") {
-    Start-Process powershell -ArgumentList "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path
+    Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path
     exit
 }
 
@@ -10,13 +10,46 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+try {
+    if (-not ("ConsoleWindow" -as [type])) {
+        Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class ConsoleWindow {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+"@
+    }
+    $consoleHandle = [ConsoleWindow]::GetConsoleWindow()
+    if ($consoleHandle -ne [IntPtr]::Zero) {
+        [ConsoleWindow]::ShowWindow($consoleHandle, 0) | Out-Null
+    }
+} catch { }
+
 $ErrorActionPreference = "Continue"
 $root      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $hostsPath = "$env:Windir\System32\drivers\etc\hosts"
 $dataDir   = Join-Path $root "data"
 $backupDir = Join-Path $root "Backups"
 $databaseFile = Join-Path $dataDir "logistik.sqlite"
+$logFile = Join-Path $dataDir "server.log"
+$errorLogFile = Join-Path $dataDir "server-error.log"
+$managerLogFile = Join-Path $dataDir "server-manager.log"
 $dot       = [char]0x25CF
+
+function Write-ManagerLog ([string]$message) {
+    try {
+        New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -Path $managerLogFile -Value "[$timestamp] $message" -Encoding UTF8
+    } catch { }
+}
+
+Write-ManagerLog "Manager gestartet. ApartmentState=$([System.Threading.Thread]::CurrentThread.GetApartmentState())"
 
 # ── Farben ─────────────────────────────────────────────────────────────────────
 
@@ -35,8 +68,6 @@ $cLogErr = [System.Drawing.ColorTranslator]::FromHtml("#ff6b6b")
 # ── Hilfsfunktionen ────────────────────────────────────────────────────────────
 
 function Find-NodeExe {
-    $n = Get-Command node -ErrorAction SilentlyContinue
-    if ($n) { return $n.Source }
     $candidates = @(
         "C:\Program Files\nodejs\node.exe",
         "$env:LOCALAPPDATA\Programs\nodejs\node.exe",
@@ -45,7 +76,15 @@ function Find-NodeExe {
     $nvmNode = Get-ChildItem "$env:APPDATA\nvm\*\node.exe" -ErrorAction SilentlyContinue |
                Sort-Object DirectoryName -Descending | Select-Object -First 1
     if ($nvmNode) { $candidates += $nvmNode.FullName }
-    foreach ($p in $candidates) { if ($p -and (Test-Path $p)) { return $p } }
+
+    $n = Get-Command node -ErrorAction SilentlyContinue
+    if ($n) { $candidates += $n.Source }
+
+    foreach ($p in $candidates) {
+        if (-not $p -or -not (Test-Path $p)) { continue }
+        if ($p -like "*\WindowsApps\OpenAI.Codex_*") { continue }
+        return $p
+    }
     return $null
 }
 
@@ -124,6 +163,57 @@ function Backup-Database {
     ) | Out-Null
 }
 
+function New-AppIcon {
+    $bitmap = New-Object System.Drawing.Bitmap 32, 32
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $graphics.Clear([System.Drawing.Color]::Transparent)
+
+    $greenBrush = New-Object System.Drawing.SolidBrush $cGreen
+    $whiteBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
+    $darkBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.ColorTranslator]::FromHtml("#17211b"))
+
+    $graphics.FillRectangle($greenBrush, 2, 2, 28, 28)
+    $graphics.FillRectangle($whiteBrush, 8, 8, 16, 14)
+    $graphics.FillRectangle($greenBrush, 10, 10, 12, 2)
+    $graphics.FillRectangle($greenBrush, 10, 15, 12, 2)
+    $graphics.FillRectangle($greenBrush, 10, 20, 8, 2)
+    $graphics.FillRectangle($darkBrush, 6, 24, 20, 3)
+
+    $greenBrush.Dispose()
+    $whiteBrush.Dispose()
+    $darkBrush.Dispose()
+    $graphics.Dispose()
+
+    return [System.Drawing.Icon]::FromHandle($bitmap.GetHicon())
+}
+
+function Add-LogLine ([string]$text, [bool]$isError = $false) {
+    if ($isError) { $script:queue.Enqueue("[ERR]$text") }
+    else { $script:queue.Enqueue($text) }
+}
+
+function Read-NewLogLines ([string]$path, [ref]$position) {
+    if (-not (Test-Path $path)) { return @() }
+
+    try {
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            if ($position.Value -gt $stream.Length) { $position.Value = 0 }
+            $stream.Seek($position.Value, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+            $text = $reader.ReadToEnd()
+            $position.Value = $stream.Position
+            if (-not $text) { return @() }
+            return $text -split "\r?\n" | Where-Object { $_ }
+        } finally {
+            $stream.Dispose()
+        }
+    } catch {
+        return @()
+    }
+}
+
 # ── Voraussetzungen pruefen ────────────────────────────────────────────────────
 
 $nodeExe = Find-NodeExe
@@ -136,14 +226,18 @@ if (-not $nodeExe) {
     ) | Out-Null
     exit 1
 }
+Write-ManagerLog "Node gefunden: $nodeExe"
 
 $localHostname = Get-LocalHostname
+Write-ManagerLog "Lokaler Hostname: $localHostname"
 Ensure-HostsEntry $localHostname
+Write-ManagerLog "Hosts-Eintrag geprueft"
 
 $script:existingServerPid = 0
 $script:stopRequested = $false
 
 $ownerPid = Get-PortOwnerPid 4174
+Write-ManagerLog "Port 4174 OwnerPid: $ownerPid"
 if ($ownerPid -gt 0) {
     $ownerProc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
     $procName  = if ($ownerProc) { $ownerProc.Name } else { "Unbekannt" }
@@ -164,8 +258,12 @@ if ($ownerPid -gt 0) {
 # ── Log-Queue (thread-sicher, kein form.Invoke noetig) ─────────────────────────
 
 $script:queue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-$script:procDone  = $false
+$script:serverExitedHandled = $false
 $script:networkUrl = ""
+$script:logPosition = 0L
+$script:errorLogPosition = 0L
+$script:appIcon = New-AppIcon
+Write-ManagerLog "UI wird aufgebaut"
 
 # ── Fenster ────────────────────────────────────────────────────────────────────
 
@@ -177,6 +275,8 @@ $form.StartPosition = "CenterScreen"
 $form.BackColor     = $cBg
 $form.ForeColor     = $cText
 $form.Font          = New-Object System.Drawing.Font("Segoe UI", 10)
+$form.Icon          = $script:appIcon
+$form.ShowInTaskbar = $true
 
 # -- Header --
 $pnlHeader           = New-Object System.Windows.Forms.Panel
@@ -312,6 +412,42 @@ $btnStop.add_Click({
 })
 $pnlBottom.Controls.Add($btnStop)
 
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$trayOpen = $trayMenu.Items.Add("Fenster anzeigen")
+$trayOpen.add_Click({
+    $form.Show()
+    $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $form.Activate()
+})
+$trayBrowser = $trayMenu.Items.Add("App im Browser oeffnen")
+$trayBrowser.add_Click({ Start-Process "http://localhost:4174" })
+$trayBackup = $trayMenu.Items.Add("Backup erstellen")
+$trayBackup.add_Click({ Backup-Database })
+$trayRestart = $trayMenu.Items.Add("Server neu starten")
+$trayRestart.add_Click({
+    $script:stopRequested = $true
+    Stop-RunningServer
+    Start-Process powershell -ArgumentList "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path
+    $form.Close()
+})
+$trayStop = $trayMenu.Items.Add("Server stoppen und beenden")
+$trayStop.add_Click({
+    $script:stopRequested = $true
+    Stop-RunningServer
+    $form.Close()
+})
+
+$notifyIcon = New-Object System.Windows.Forms.NotifyIcon
+$notifyIcon.Icon = $script:appIcon
+$notifyIcon.Text = "HLogistik Server"
+$notifyIcon.ContextMenuStrip = $trayMenu
+$notifyIcon.Visible = $true
+$notifyIcon.add_DoubleClick({
+    $form.Show()
+    $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $form.Activate()
+})
+
 $pnlBottom.add_Resize({
     $btnStop.Location = New-Object System.Drawing.Point(($pnlBottom.Width - $btnStop.Width - 16), 10)
 })
@@ -334,6 +470,13 @@ $uiTimer          = New-Object System.Windows.Forms.Timer
 $uiTimer.Interval = 150
 
 $uiTimer.add_Tick({
+    foreach ($logLine in (Read-NewLogLines $logFile ([ref]$script:logPosition))) {
+        $script:queue.Enqueue($logLine)
+    }
+    foreach ($errorLine in (Read-NewLogLines $errorLogFile ([ref]$script:errorLogPosition))) {
+        $script:queue.Enqueue("[ERR]$errorLine")
+    }
+
     $line = $null
     while ($script:queue.TryDequeue([ref]$line)) {
         $isErr = $line.StartsWith("[ERR]")
@@ -357,62 +500,14 @@ $uiTimer.add_Tick({
         }
     }
 
-    if ($script:procDone -and $global:serverProc.HasExited) {
-        $script:procDone     = $false
+    if ($global:serverProc -and $global:serverProc.HasExited -and -not $script:serverExitedHandled) {
+        $script:serverExitedHandled = $true
+        Add-LogLine "Serverprozess wurde beendet. Exit-Code: $($global:serverProc.ExitCode)" $true
         $lblStatus.Text      = "$dot Gestoppt"
         $lblStatus.ForeColor = $cRed
         $lblStatus.Location  = New-Object System.Drawing.Point(($pnlHeader.Width - $lblStatus.Width - 16), 24)
         $btnStop.Text        = "Schliessen"
         $btnStop.ForeColor   = $cText
-    }
-})
-
-# ── Server starten ─────────────────────────────────────────────────────────────
-
-$pinfo = New-Object System.Diagnostics.ProcessStartInfo
-$pinfo.FileName               = $nodeExe
-$pinfo.Arguments              = "`"$(Join-Path $root 'server.mjs')`""
-$pinfo.WorkingDirectory       = $root
-$pinfo.UseShellExecute        = $false
-$pinfo.CreateNoWindow         = $true
-$pinfo.RedirectStandardOutput = $true
-$pinfo.RedirectStandardError  = $true
-$pinfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-$pinfo.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
-
-$global:serverProc                     = New-Object System.Diagnostics.Process
-$global:serverProc.StartInfo           = $pinfo
-$global:serverProc.EnableRaisingEvents = $true
-
-# Hintergrund-Threads schreiben NUR in die Queue – kein UI-Zugriff
-$global:serverProc.add_OutputDataReceived({
-    param($s, $e)
-    if (-not [string]::IsNullOrEmpty($e.Data)) { $script:queue.Enqueue($e.Data) }
-})
-$global:serverProc.add_ErrorDataReceived({
-    param($s, $e)
-    if (-not [string]::IsNullOrEmpty($e.Data)) { $script:queue.Enqueue("[ERR]$($e.Data)") }
-})
-$global:serverProc.add_Exited({
-    $script:procDone = $true
-})
-
-$form.add_Shown({
-    $uiTimer.Start()
-    if ($script:existingServerPid -gt 0) {
-        $script:queue.Enqueue("HLogistik laeuft bereits im Hintergrund. PID: $script:existingServerPid")
-        $script:queue.Enqueue("laeuft auf http://localhost:4174/")
-        return
-    }
-
-    try {
-        $global:serverProc.Start()               | Out-Null
-        $global:serverProc.BeginOutputReadLine()
-        $global:serverProc.BeginErrorReadLine()
-    } catch {
-        $script:queue.Enqueue("[ERR]Server konnte nicht gestartet werden: $_")
-        $lblStatus.Text      = "$dot Fehler"
-        $lblStatus.ForeColor = $cRed
     }
 })
 
@@ -440,6 +535,41 @@ $form.add_FormClosing({
             Stop-RunningServer
         }
     }
+
+    $notifyIcon.Visible = $false
+    $notifyIcon.Dispose()
 })
+
+$uiTimer.Start()
+if ($script:existingServerPid -gt 0) {
+    Write-ManagerLog "Haenge mich an bestehenden Server: PID $script:existingServerPid"
+    Add-LogLine "HLogistik laeuft bereits im Hintergrund. PID: $script:existingServerPid"
+    Add-LogLine "laeuft auf http://localhost:4174/"
+} else {
+    try {
+        Write-ManagerLog "Starte Node-Server"
+        New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+        Remove-Item -LiteralPath $logFile, $errorLogFile -ErrorAction SilentlyContinue
+        $script:logPosition = 0L
+        $script:errorLogPosition = 0L
+        $script:serverExitedHandled = $false
+        $serverScript = Join-Path $root "server.mjs"
+        $global:serverProc = Start-Process `
+            -FilePath $nodeExe `
+            -ArgumentList "`"$serverScript`"" `
+            -WorkingDirectory $root `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $logFile `
+            -RedirectStandardError $errorLogFile `
+            -PassThru
+        Write-ManagerLog "Node-Server gestartet: PID $($global:serverProc.Id)"
+        Add-LogLine "Serverprozess gestartet. PID: $($global:serverProc.Id)"
+    } catch {
+        Write-ManagerLog "Serverstart fehlgeschlagen: $_"
+        Add-LogLine "Server konnte nicht gestartet werden: $_" $true
+        $lblStatus.Text      = "$dot Fehler"
+        $lblStatus.ForeColor = $cRed
+    }
+}
 
 [System.Windows.Forms.Application]::Run($form)
