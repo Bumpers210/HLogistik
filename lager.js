@@ -6,10 +6,15 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const elements = {};
 let serverOnline = false;
 let searchTimer = null;
+let movementSearchTimer = null;
+let receiptLineCounter = 0;
+let issueLineCounter = 0;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
   bindEvents();
+  resetBookingLines("receipt");
+  resetBookingLines("issue");
   initialize();
 });
 
@@ -19,16 +24,30 @@ function bindElements() {
     "connectionText",
     "currentUserName",
     "switchUserButton",
+    "receiptTabButton",
+    "issueTabButton",
+    "receiptTabPanel",
+    "issueTabPanel",
     "storageForm",
     "materialnummerInput",
-    "lagerplatzInput",
-    "mengeStueckInput",
-    "leNummerInput",
+    "receiptReferenceInput",
+    "addReceiptLineButton",
+    "receiptLinesBody",
     "storageStatus",
+    "issueForm",
+    "issueMaterialInput",
+    "issueReferenceInput",
+    "addIssueLineButton",
+    "issueLinesBody",
+    "issueStatus",
     "locationSearchInput",
     "refreshLocationsButton",
     "locationCount",
-    "locationTableBody"
+    "locationTableBody",
+    "movementSearchInput",
+    "refreshMovementsButton",
+    "movementCount",
+    "movementTableBody"
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
   });
@@ -36,11 +55,23 @@ function bindElements() {
 
 function bindEvents() {
   elements.storageForm.addEventListener("submit", bookStorageReceipt);
+  elements.issueForm.addEventListener("submit", bookStorageIssue);
   elements.switchUserButton.addEventListener("click", switchUser);
+  elements.receiptTabButton.addEventListener("click", () => switchStorageTab("receipt"));
+  elements.issueTabButton.addEventListener("click", () => switchStorageTab("issue"));
+  elements.addReceiptLineButton.addEventListener("click", () => addBookingLine("receipt"));
+  elements.addIssueLineButton.addEventListener("click", () => addBookingLine("issue"));
+  elements.receiptLinesBody.addEventListener("click", handleBookingLineAction);
+  elements.issueLinesBody.addEventListener("click", handleBookingLineAction);
   elements.refreshLocationsButton.addEventListener("click", loadLocations);
+  elements.refreshMovementsButton.addEventListener("click", loadMovements);
   elements.locationSearchInput.addEventListener("input", () => {
     window.clearTimeout(searchTimer);
     searchTimer = window.setTimeout(loadLocations, SEARCH_DEBOUNCE_MS);
+  });
+  elements.movementSearchInput.addEventListener("input", () => {
+    window.clearTimeout(movementSearchTimer);
+    movementSearchTimer = window.setTimeout(loadMovements, SEARCH_DEBOUNCE_MS);
   });
 }
 
@@ -51,12 +82,12 @@ async function initialize() {
     await apiJson("/api/health");
     serverOnline = true;
     setConnectionStatus(true);
-    await loadLocations();
-    setStatus("Bereit zum Einlagern.", "ok");
+    await refreshStorageViews();
+    setStatus(elements.storageStatus, "Bereit zum Einlagern.", "ok");
   } catch {
     serverOnline = false;
     setConnectionStatus(false);
-    setStatus("Server nicht verbunden. Einlagerung ist nicht verfügbar.", "error");
+    setStatus(elements.storageStatus, "Server nicht verbunden. Einlagerung ist nicht verfügbar.", "error");
   }
 }
 
@@ -77,28 +108,138 @@ function switchUser() {
   window.location.replace("/");
 }
 
+function switchStorageTab(type) {
+  const isReceipt = type === "receipt";
+  elements.receiptTabButton.classList.toggle("is-active", isReceipt);
+  elements.issueTabButton.classList.toggle("is-active", !isReceipt);
+  elements.receiptTabButton.setAttribute("aria-selected", String(isReceipt));
+  elements.issueTabButton.setAttribute("aria-selected", String(!isReceipt));
+  elements.receiptTabPanel.classList.toggle("is-active", isReceipt);
+  elements.issueTabPanel.classList.toggle("is-active", !isReceipt);
+  elements.receiptTabPanel.hidden = !isReceipt;
+  elements.issueTabPanel.hidden = isReceipt;
+}
+
 async function bookStorageReceipt(event) {
   event.preventDefault();
-  if (!serverOnline) return setStatus("Server nicht verbunden.", "error");
+  if (!serverOnline) return setStatus(elements.storageStatus, "Server nicht verbunden.", "error");
 
   try {
-    const receipt = {
-      materialnummer: elements.materialnummerInput.value,
-      lagerplatz: elements.lagerplatzInput.value,
-      mengeStueck: elements.mengeStueckInput.value,
-      leNummer: elements.leNummerInput.value
-    };
+    const materialnummer = elements.materialnummerInput.value;
+    const referenz = elements.receiptReferenceInput.value;
+    const receipts = collectBookingLines("receipt").map((line) => ({ materialnummer, referenz, ...line }));
     const result = await apiJson("/api/storage/receipts", {
       method: "POST",
-      body: JSON.stringify({ receipt })
+      body: JSON.stringify({ receipts })
     });
-    setStatus(`${result.movement.materialnummer} auf ${result.location.lagerplatz} eingelagert. Bestand: ${result.location.mengeStueck} Stück.`, "ok");
-    elements.mengeStueckInput.value = "";
-    elements.leNummerInput.value = "";
-    await loadLocations();
+    const amount = sumQuantity(result.movements);
+    setStatus(
+      elements.storageStatus,
+      `${result.movements.length} Wareneingang${result.movements.length === 1 ? "" : "e"} gebucht. Gesamtmenge: ${amount} Stück.`,
+      "ok"
+    );
+    elements.receiptReferenceInput.value = "";
+    resetBookingLines("receipt");
+    await refreshStorageViews();
   } catch (error) {
-    setStatus(`Einlagern fehlgeschlagen: ${error.message}`, "error");
+    setStatus(elements.storageStatus, `Einlagern fehlgeschlagen: ${error.message}`, "error");
   }
+}
+
+async function bookStorageIssue(event) {
+  event.preventDefault();
+  if (!serverOnline) return setStatus(elements.issueStatus, "Server nicht verbunden.", "error");
+
+  try {
+    const materialnummer = elements.issueMaterialInput.value;
+    const referenz = elements.issueReferenceInput.value;
+    const issues = collectBookingLines("issue").map((line) => ({ materialnummer, referenz, ...line }));
+    const result = await apiJson("/api/storage/issues", {
+      method: "POST",
+      body: JSON.stringify({ issues })
+    });
+    const amount = sumQuantity(result.movements);
+    setStatus(
+      elements.issueStatus,
+      `${result.movements.length} Warenausgang${result.movements.length === 1 ? "" : "e"} gebucht. Gesamtmenge: ${amount} Stück.`,
+      "ok"
+    );
+    elements.issueReferenceInput.value = "";
+    resetBookingLines("issue");
+    await refreshStorageViews();
+  } catch (error) {
+    setStatus(elements.issueStatus, `Warenausgang fehlgeschlagen: ${error.message}`, "error");
+  }
+}
+
+function resetBookingLines(type) {
+  const body = bookingLinesBody(type);
+  body.innerHTML = "";
+  addBookingLine(type);
+}
+
+function addBookingLine(type, values = {}) {
+  const body = bookingLinesBody(type);
+  const id = type === "receipt" ? ++receiptLineCounter : ++issueLineCounter;
+  const row = document.createElement("tr");
+  row.dataset.bookingLine = type;
+  row.innerHTML = `
+    <td>
+      <input data-field="lagerplatz" name="${type}-lagerplatz-${id}" type="text" autocomplete="off" value="${escapeAttribute(values.lagerplatz)}" required>
+    </td>
+    <td>
+      <input data-field="mengeStueck" name="${type}-menge-${id}" type="number" inputmode="numeric" min="1" step="1" value="${escapeAttribute(values.mengeStueck)}" required>
+    </td>
+    <td>
+      <input data-field="leNummer" name="${type}-le-${id}" type="text" autocomplete="off" value="${escapeAttribute(values.leNummer)}" required>
+    </td>
+    <td>
+      <button class="icon-button compact remove-booking-line" type="button" aria-label="Zeile entfernen">×</button>
+    </td>
+  `;
+
+  if (values.maxMenge) {
+    row.querySelector('[data-field="mengeStueck"]').max = String(values.maxMenge);
+  }
+
+  body.appendChild(row);
+  return row;
+}
+
+function handleBookingLineAction(event) {
+  const button = event.target.closest(".remove-booking-line");
+  if (!button) return;
+
+  const row = button.closest("tr");
+  const body = row?.parentElement;
+  if (!row || !body) return;
+
+  if (body.querySelectorAll("tr").length === 1) {
+    row.querySelectorAll("input").forEach((input) => {
+      input.value = "";
+      input.removeAttribute("max");
+    });
+    return;
+  }
+
+  row.remove();
+}
+
+function collectBookingLines(type) {
+  const rows = Array.from(bookingLinesBody(type).querySelectorAll("tr"));
+  return rows.map((row) => ({
+    lagerplatz: row.querySelector('[data-field="lagerplatz"]').value,
+    mengeStueck: row.querySelector('[data-field="mengeStueck"]').value,
+    leNummer: row.querySelector('[data-field="leNummer"]').value
+  }));
+}
+
+function bookingLinesBody(type) {
+  return type === "receipt" ? elements.receiptLinesBody : elements.issueLinesBody;
+}
+
+async function refreshStorageViews() {
+  await Promise.all([loadLocations(), loadMovements()]);
 }
 
 async function loadLocations() {
@@ -111,13 +252,28 @@ async function loadLocations() {
     const locations = await apiJson(`/api/storage/locations${params.toString() ? `?${params}` : ""}`);
     renderLocations(locations);
   } catch (error) {
-    setStatus(`Stellplätze konnten nicht geladen werden: ${error.message}`, "error");
+    setStatus(elements.storageStatus, `Stellplätze konnten nicht geladen werden: ${error.message}`, "error");
+  }
+}
+
+async function loadMovements() {
+  if (!serverOnline) return;
+
+  try {
+    const params = new URLSearchParams();
+    const query = elements.movementSearchInput.value.trim();
+    if (query) params.set("q", query);
+    params.set("limit", "150");
+    const movements = await apiJson(`/api/storage/movements?${params}`);
+    renderMovements(movements);
+  } catch (error) {
+    setStatus(elements.issueStatus, `Historie konnte nicht geladen werden: ${error.message}`, "error");
   }
 }
 
 function renderLocations(locations) {
   elements.locationTableBody.innerHTML = "";
-  elements.locationCount.textContent = `${locations.length} Eintraege`;
+  elements.locationCount.textContent = `${locations.length} Einträge`;
 
   if (!locations.length) {
     const row = document.createElement("tr");
@@ -135,7 +291,53 @@ function renderLocations(locations) {
       <td class="num">${escapeHtml(location.mengeStueck)}</td>
       <td>${escapeHtml(location.leNummer)}</td>
     `;
+    row.addEventListener("click", () => fillIssueFromLocation(location));
     elements.locationTableBody.appendChild(row);
+  });
+}
+
+function renderMovements(movements) {
+  elements.movementTableBody.innerHTML = "";
+  elements.movementCount.textContent = `${movements.length} Buchungen`;
+
+  if (!movements.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td colspan="7" class="empty-cell">Keine Buchungen gefunden.</td>`;
+    elements.movementTableBody.appendChild(row);
+    return;
+  }
+
+  movements.forEach((movement) => {
+    const row = document.createElement("tr");
+    row.className = movement.bewegungsart === "Warenausgang" ? "is-issue" : "is-receipt";
+    row.innerHTML = `
+      <td>${escapeHtml(formatDateTime(movement.erstelltAm))}</td>
+      <td>${escapeHtml(movement.bewegungsart)}</td>
+      <td>${escapeHtml(movement.materialnummer)}</td>
+      <td>${escapeHtml(movement.lagerplatz)}</td>
+      <td>${escapeHtml(movement.leNummer)}</td>
+      <td class="num">${escapeHtml(movement.mengeStueck)}</td>
+      <td>${escapeHtml(movement.referenz)}</td>
+    `;
+    elements.movementTableBody.appendChild(row);
+  });
+}
+
+function fillIssueFromLocation(location) {
+  switchStorageTab("issue");
+  elements.issueMaterialInput.value = location.materialnummer;
+  const emptyRow = findEmptyBookingLine("issue") || addBookingLine("issue");
+  emptyRow.querySelector('[data-field="lagerplatz"]').value = location.lagerplatz;
+  emptyRow.querySelector('[data-field="leNummer"]').value = location.leNummer;
+  const quantityInput = emptyRow.querySelector('[data-field="mengeStueck"]');
+  quantityInput.value = "";
+  quantityInput.max = String(location.mengeStueck || "");
+  setStatus(elements.issueStatus, `Bestand gewählt: ${location.mengeStueck} Stück verfügbar.`, "ok");
+}
+
+function findEmptyBookingLine(type) {
+  return Array.from(bookingLinesBody(type).querySelectorAll("tr")).find((row) => {
+    return Array.from(row.querySelectorAll("input")).every((input) => !input.value.trim());
   });
 }
 
@@ -156,10 +358,27 @@ function setConnectionStatus(isOnline) {
   elements.connectionText.textContent = isOnline === true ? "Online" : isOnline === false ? "Offline" : "Prüfe Verbindung";
 }
 
-function setStatus(message, type = "") {
-  elements.storageStatus.textContent = message;
-  elements.storageStatus.classList.toggle("is-ok", type === "ok");
-  elements.storageStatus.classList.toggle("is-error", type === "error");
+function setStatus(element, message, type = "") {
+  element.textContent = message;
+  element.classList.toggle("is-ok", type === "ok");
+  element.classList.toggle("is-error", type === "error");
+}
+
+function sumQuantity(movements) {
+  return movements.reduce((sum, movement) => sum + Number(movement.mengeStueck || 0), 0);
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("de-DE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function escapeHtml(value) {
@@ -169,4 +388,8 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value);
 }

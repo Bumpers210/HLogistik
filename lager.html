@@ -7,8 +7,8 @@
     <title>Einlagern</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260529-6">
-    <script src="lager.js?v=20260529-5" defer></script>
+    <link rel="stylesheet" href="styles.css?v=20260531-2">
+    <script src="lager.js?v=20260531-2" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -35,30 +35,81 @@
 
     <main class="app-shell storage-shell">
       <section class="storage-layout">
-        <aside class="summary-box storage-editor">
-          <h2>Wareneingang buchen</h2>
-          <form id="storageForm" class="article-form">
-            <label>
-              Artikelnummer
-              <input id="materialnummerInput" name="materialnummer" type="text" autocomplete="off" inputmode="numeric" required>
-            </label>
-            <label>
-              Lagerplatz
-              <input id="lagerplatzInput" name="lagerplatz" type="text" autocomplete="off" required>
-            </label>
-            <div class="two-columns">
+        <aside class="summary-box storage-editor storage-booking-panel">
+          <div class="storage-tabs" role="tablist" aria-label="Buchungsart">
+            <button id="receiptTabButton" class="storage-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="receiptTabPanel" data-storage-tab="receipt">Wareneingang</button>
+            <button id="issueTabButton" class="storage-tab" type="button" role="tab" aria-selected="false" aria-controls="issueTabPanel" data-storage-tab="issue">Warenausgang</button>
+          </div>
+
+          <section id="receiptTabPanel" class="storage-tab-panel is-active" role="tabpanel" aria-labelledby="receiptTabButton">
+            <h2>Wareneingang buchen</h2>
+            <form id="storageForm" class="article-form">
               <label>
-                Stückzahl
-                <input id="mengeStueckInput" name="mengeStueck" type="number" inputmode="numeric" min="1" step="1" required>
+                Artikelnummer
+                <input id="materialnummerInput" name="materialnummer" type="text" autocomplete="off" inputmode="numeric" required>
               </label>
               <label>
-                LE-Nummer
-                <input id="leNummerInput" name="leNummer" type="text" autocomplete="off" required>
+                Referenz / Bemerkung
+                <input id="receiptReferenceInput" name="referenz" type="text" autocomplete="off">
               </label>
-            </div>
-            <button class="primary-button full-width" type="submit">Einlagern</button>
-          </form>
-          <p id="storageStatus" class="export-status" role="status">Server wird gesucht...</p>
+
+              <div class="booking-lines-heading">
+                <h3>Stellplätze und LE-Nummern</h3>
+                <button id="addReceiptLineButton" class="secondary-button" type="button">Zeile hinzufügen</button>
+              </div>
+              <div class="booking-lines-wrap">
+                <table class="booking-lines-table">
+                  <thead>
+                    <tr>
+                      <th>Lagerplatz</th>
+                      <th>Stückzahl</th>
+                      <th>LE-Nummer / HU</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="receiptLinesBody"></tbody>
+                </table>
+              </div>
+
+              <button class="primary-button full-width" type="submit">Wareneingang buchen</button>
+            </form>
+            <p id="storageStatus" class="export-status" role="status">Server wird gesucht...</p>
+          </section>
+
+          <section id="issueTabPanel" class="storage-tab-panel" role="tabpanel" aria-labelledby="issueTabButton" hidden>
+            <h2>Warenausgang buchen</h2>
+            <form id="issueForm" class="article-form">
+              <label>
+                Materialnummer / Barcode
+                <input id="issueMaterialInput" name="materialnummer" type="text" autocomplete="off" inputmode="numeric" required>
+              </label>
+              <label>
+                Referenz / Bemerkung
+                <input id="issueReferenceInput" name="referenz" type="text" autocomplete="off">
+              </label>
+
+              <div class="booking-lines-heading">
+                <h3>Stellplätze und LE-Nummern</h3>
+                <button id="addIssueLineButton" class="secondary-button" type="button">Zeile hinzufügen</button>
+              </div>
+              <div class="booking-lines-wrap">
+                <table class="booking-lines-table">
+                  <thead>
+                    <tr>
+                      <th>Lagerplatz</th>
+                      <th>Stückzahl</th>
+                      <th>LE-Nummer / HU</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="issueLinesBody"></tbody>
+                </table>
+              </div>
+
+              <button class="danger-button full-width" type="submit">Warenausgang buchen</button>
+            </form>
+            <p id="issueStatus" class="export-status" role="status">Bestand wird vor der Buchung geprüft.</p>
+          </section>
         </aside>
 
         <section class="list-panel">
@@ -85,6 +136,36 @@
                 </tr>
               </thead>
               <tbody id="locationTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="list-panel storage-history-panel">
+          <div class="section-heading">
+            <h2>Historie</h2>
+            <span id="movementCount" class="muted-count">0 Buchungen</span>
+          </div>
+          <div class="storage-search">
+            <label>
+              Historie suchen
+              <input id="movementSearchInput" type="search" autocomplete="off" placeholder="Artikel, Lagerplatz, LE oder Referenz">
+            </label>
+            <button id="refreshMovementsButton" class="secondary-button" type="button">Aktualisieren</button>
+          </div>
+          <div class="article-table-wrap">
+            <table class="article-table storage-table">
+              <thead>
+                <tr>
+                  <th>Zeit</th>
+                  <th>Art</th>
+                  <th>Artikel</th>
+                  <th>Lagerplatz</th>
+                  <th>LE/HU</th>
+                  <th>Menge</th>
+                  <th>Referenz</th>
+                </tr>
+              </thead>
+              <tbody id="movementTableBody"></tbody>
             </table>
           </div>
         </section>

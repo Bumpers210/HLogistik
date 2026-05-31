@@ -887,7 +887,7 @@ textarea[readonly] {
 
 .storage-layout {
   display: grid;
-  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+  grid-template-columns: minmax(380px, 540px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -903,6 +903,115 @@ textarea[readonly] {
 .storage-editor {
   position: sticky;
   top: 78px;
+}
+
+.storage-booking-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.storage-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 4px;
+  background: #eef4f1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.storage-tab {
+  min-height: 36px;
+  padding: 0 10px;
+  color: var(--ink);
+  font-weight: 800;
+  background: transparent;
+  border-radius: 6px;
+}
+
+.storage-tab.is-active {
+  color: #fff;
+  background: var(--accent);
+  box-shadow: 0 6px 14px rgba(31, 130, 94, 0.18);
+}
+
+.storage-tab-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.storage-tab-panel[hidden] {
+  display: none;
+}
+
+.booking-lines-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.booking-lines-heading h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.booking-lines-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.booking-lines-table {
+  width: 100%;
+  min-width: 500px;
+  border-collapse: collapse;
+}
+
+.booking-lines-table th,
+.booking-lines-table td {
+  padding: 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.booking-lines-table th {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.booking-lines-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.booking-lines-table input {
+  width: 100%;
+  min-width: 0;
+}
+
+.booking-lines-table .icon-button.compact {
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+  background: #ffe8e1;
+  color: #8a2f12;
+}
+
+.storage-history-panel {
+  grid-column: 2;
+}
+
+.storage-table tbody tr {
+  cursor: pointer;
+}
+
+.storage-table tbody tr.is-issue {
+  background: #fff4ee;
+}
+
+.storage-table tbody tr.is-receipt {
+  background: #f0faf5;
 }
 
 .two-columns {
@@ -941,6 +1050,10 @@ textarea[readonly] {
 
   .storage-editor {
     position: static;
+  }
+
+  .storage-history-panel {
+    grid-column: auto;
   }
 }
 

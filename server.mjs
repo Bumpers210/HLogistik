@@ -93,9 +93,33 @@ async function route(request, response) {
     return;
   }
 
+  if (pathname === "/api/storage/movements" && request.method === "GET") {
+    const query = url.searchParams.get("q") || "";
+    const limit = readInteger(url.searchParams.get("limit") || 100);
+    sendJson(response, 200, readStorageMovements({ query, limit }));
+    return;
+  }
+
   if (pathname === "/api/storage/receipts" && request.method === "POST") {
     const body = await readBody(request);
+    if (Array.isArray(body.receipts)) {
+      const result = bookStorageReceipts(body.receipts);
+      sendJson(response, 200, { ok: true, ...result });
+      return;
+    }
     const result = bookStorageReceipt(body.receipt || body);
+    sendJson(response, 200, { ok: true, ...result });
+    return;
+  }
+
+  if (pathname === "/api/storage/issues" && request.method === "POST") {
+    const body = await readBody(request);
+    if (Array.isArray(body.issues)) {
+      const result = bookStorageIssues(body.issues);
+      sendJson(response, 200, { ok: true, ...result });
+      return;
+    }
+    const result = bookStorageIssue(body.issue || body);
     sendJson(response, 200, { ok: true, ...result });
     return;
   }
@@ -596,12 +620,79 @@ function readStorageLocations({ query = "", materialnummer = "" } = {}) {
   });
 }
 
-function bookStorageReceipt(receipt) {
-  const normalized = normalizeStorageReceipt(receipt);
-  const article = findArticleByCode(readArticlesSync(), normalized.materialnummer);
-  if (!article) throw new Error("Artikelnummer ist nicht im Artikelstamm vorhanden");
+function readStorageMovements({ query = "", limit = 100 } = {}) {
+  const safeLimit = Math.min(Math.max(Number.isInteger(limit) && limit > 0 ? limit : 100, 1), 500);
+  const rows = db.prepare(`
+    SELECT
+      lagerbewegung.id,
+      lagerbewegung.materialnummer,
+      artikel.materialbezeichnung,
+      lagerbewegung.bewegungsart,
+      lagerbewegung.menge_stueck,
+      lagerbewegung.lagerplatz,
+      lagerbewegung.le_nummer,
+      lagerbewegung.referenz,
+      lagerbewegung.erstellt_am
+    FROM lagerbewegung
+    LEFT JOIN artikel ON artikel.id = lagerbewegung.artikel_id
+    ORDER BY lagerbewegung.erstellt_am DESC
+    LIMIT ?
+  `).all(safeLimit).map(storageMovementFromRow);
 
-  const now = new Date().toISOString();
+  const terms = normalizeSearch(query).split(" ").filter(Boolean);
+  if (!terms.length) return rows;
+  return rows.filter((row) => {
+    const haystack = normalizeSearch([
+      row.materialnummer,
+      row.materialbezeichnung,
+      row.bewegungsart,
+      row.lagerplatz,
+      row.leNummer,
+      row.referenz
+    ].join(" "));
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+function bookStorageReceipt(receipt) {
+  const result = bookStorageReceipts([receipt]);
+  return {
+    movement: result.movements[0],
+    location: result.locations[0]
+  };
+}
+
+function bookStorageReceipts(receipts) {
+  if (!Array.isArray(receipts) || !receipts.length) throw httpError(400, "Mindestens eine Buchungszeile ist erforderlich");
+
+  const articles = readArticlesSync();
+  const results = [];
+
+  db.exec("BEGIN");
+  try {
+    receipts.forEach((receipt, index) => {
+      try {
+        const normalized = normalizeStorageReceipt(receipt);
+        const article = findArticleByCode(articles, normalized.materialnummer);
+        if (!article) throw httpError(400, "Artikelnummer ist nicht im Artikelstamm vorhanden");
+        results.push(applyStorageReceipt(normalized, article, new Date().toISOString()));
+      } catch (error) {
+        throw withLineContext(error, index);
+      }
+    });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  return {
+    movements: results.map((result) => result.movement),
+    locations: results.map((result) => result.location)
+  };
+}
+
+function applyStorageReceipt(normalized, article, now) {
   const existing = db.prepare(`
     SELECT id, menge_stueck
     FROM lagerbestand
@@ -611,47 +702,39 @@ function bookStorageReceipt(receipt) {
   const bestandId = existing?.id || createStorageId();
   const bewegungId = createStorageMovementId();
 
-  db.exec("BEGIN");
-  try {
-    if (existing) {
-      db.prepare(`
-        UPDATE lagerbestand
-        SET menge_stueck = menge_stueck + ?, aktualisiert_am = ?
-        WHERE id = ?
-      `).run(normalized.mengeStueck, now, existing.id);
-    } else {
-      db.prepare(`
-        INSERT INTO lagerbestand (
-          id,
-          artikel_id,
-          materialnummer,
-          lagerplatz,
-          le_nummer,
-          menge_stueck,
-          aktualisiert_am
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(bestandId, article.id, article.materialnummer, normalized.lagerplatz, normalized.leNummer, normalized.mengeStueck, now);
-    }
-
+  if (existing) {
     db.prepare(`
-      INSERT INTO lagerbewegung (
+      UPDATE lagerbestand
+      SET menge_stueck = menge_stueck + ?, aktualisiert_am = ?
+      WHERE id = ?
+    `).run(normalized.mengeStueck, now, existing.id);
+  } else {
+    db.prepare(`
+      INSERT INTO lagerbestand (
         id,
         artikel_id,
         materialnummer,
-        bewegungsart,
-        menge_stueck,
         lagerplatz,
         le_nummer,
-        referenz,
-        erstellt_am
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(bewegungId, article.id, article.materialnummer, "Wareneingang", normalized.mengeStueck, normalized.lagerplatz, normalized.leNummer, normalized.referenz, now);
-
-    db.exec("COMMIT");
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
+        menge_stueck,
+        aktualisiert_am
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(bestandId, article.id, article.materialnummer, normalized.lagerplatz, normalized.leNummer, normalized.mengeStueck, now);
   }
+
+  db.prepare(`
+    INSERT INTO lagerbewegung (
+      id,
+      artikel_id,
+      materialnummer,
+      bewegungsart,
+      menge_stueck,
+      lagerplatz,
+      le_nummer,
+      referenz,
+      erstellt_am
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(bewegungId, article.id, article.materialnummer, "Wareneingang", normalized.mengeStueck, normalized.lagerplatz, normalized.leNummer, normalized.referenz, now);
 
   const location = db.prepare(`
     SELECT
@@ -675,6 +758,109 @@ function bookStorageReceipt(receipt) {
       mengeStueck: normalized.mengeStueck,
       lagerplatz: normalized.lagerplatz,
       leNummer: normalized.leNummer,
+      referenz: normalized.referenz,
+      erstelltAm: now
+    },
+    location: storageLocationFromRow(location)
+  };
+}
+
+function bookStorageIssue(issue) {
+  const result = bookStorageIssues([issue]);
+  return {
+    movement: result.movements[0],
+    location: result.locations[0]
+  };
+}
+
+function bookStorageIssues(issues) {
+  if (!Array.isArray(issues) || !issues.length) throw httpError(400, "Mindestens eine Buchungszeile ist erforderlich");
+
+  const articles = readArticlesSync();
+  const results = [];
+
+  db.exec("BEGIN");
+  try {
+    issues.forEach((issue, index) => {
+      try {
+        const normalized = normalizeStorageIssue(issue);
+        const article = findArticleByCode(articles, normalized.materialnummer);
+        if (!article) throw httpError(400, "Artikelnummer oder Barcode ist nicht im Artikelstamm vorhanden");
+        results.push(applyStorageIssue(normalized, article, new Date().toISOString()));
+      } catch (error) {
+        throw withLineContext(error, index);
+      }
+    });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  return {
+    movements: results.map((result) => result.movement),
+    locations: results.map((result) => result.location)
+  };
+}
+
+function applyStorageIssue(normalized, article, now) {
+  const existing = db.prepare(`
+    SELECT id, menge_stueck
+    FROM lagerbestand
+    WHERE materialnummer = ? AND lagerplatz = ? AND le_nummer = ?
+  `).get(article.materialnummer, normalized.lagerplatz, normalized.leNummer);
+
+  if (!existing) throw httpError(400, "Kein Bestand für diese Kombination aus Artikel, Lagerplatz und LE/HU vorhanden");
+  if (Number(existing.menge_stueck) < normalized.mengeStueck) {
+    throw httpError(400, `Nicht genug Bestand vorhanden. Bestand: ${existing.menge_stueck} Stück`);
+  }
+
+  const bewegungId = createStorageMovementId();
+  const restbestand = Number(existing.menge_stueck) - normalized.mengeStueck;
+
+  db.prepare(`
+    UPDATE lagerbestand
+    SET menge_stueck = ?, aktualisiert_am = ?
+    WHERE id = ?
+  `).run(restbestand, now, existing.id);
+
+  db.prepare(`
+    INSERT INTO lagerbewegung (
+      id,
+      artikel_id,
+      materialnummer,
+      bewegungsart,
+      menge_stueck,
+      lagerplatz,
+      le_nummer,
+      referenz,
+      erstellt_am
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(bewegungId, article.id, article.materialnummer, "Warenausgang", normalized.mengeStueck, normalized.lagerplatz, normalized.leNummer, normalized.referenz, now);
+
+  const location = db.prepare(`
+    SELECT
+      lagerbestand.id,
+      lagerbestand.materialnummer,
+      artikel.materialbezeichnung,
+      lagerbestand.lagerplatz,
+      lagerbestand.le_nummer,
+      lagerbestand.menge_stueck,
+      lagerbestand.aktualisiert_am
+    FROM lagerbestand
+    LEFT JOIN artikel ON artikel.id = lagerbestand.artikel_id
+    WHERE lagerbestand.id = ?
+  `).get(existing.id);
+
+  return {
+    movement: {
+      id: bewegungId,
+      bewegungsart: "Warenausgang",
+      materialnummer: article.materialnummer,
+      mengeStueck: normalized.mengeStueck,
+      lagerplatz: normalized.lagerplatz,
+      leNummer: normalized.leNummer,
+      referenz: normalized.referenz,
       erstelltAm: now
     },
     location: storageLocationFromRow(location)
@@ -881,10 +1067,26 @@ function normalizeStorageReceipt(receipt) {
     referenz: String(receipt.referenz ?? receipt.reference ?? "").trim()
   };
 
-  if (!normalized.materialnummer) throw new Error("Artikelnummer fehlt");
-  if (!normalized.lagerplatz) throw new Error("Lagerplatz fehlt");
-  if (!normalized.leNummer) throw new Error("LE-Nummer fehlt");
-  if (!Number.isInteger(normalized.mengeStueck) || normalized.mengeStueck <= 0) throw new Error("Stückzahl muss größer 0 sein");
+  if (!normalized.materialnummer) throw httpError(400, "Artikelnummer fehlt");
+  if (!normalized.lagerplatz) throw httpError(400, "Lagerplatz fehlt");
+  if (!normalized.leNummer) throw httpError(400, "LE-Nummer fehlt");
+  if (!Number.isInteger(normalized.mengeStueck) || normalized.mengeStueck <= 0) throw httpError(400, "Stückzahl muss größer 0 sein");
+  return normalized;
+}
+
+function normalizeStorageIssue(issue) {
+  const normalized = {
+    materialnummer: String(issue.materialnummer ?? issue.artikelnummer ?? issue.barcode ?? issue.articleNumber ?? "").trim(),
+    lagerplatz: String(issue.lagerplatz ?? issue.storageBin ?? "").trim().toUpperCase(),
+    leNummer: String(issue.leNummer ?? issue.le_nummer ?? issue.LE ?? issue.hu ?? issue.handlingUnit ?? "").trim(),
+    mengeStueck: readInteger(issue.mengeStueck ?? issue.menge_stueck ?? issue.stueckzahl ?? issue.quantity),
+    referenz: String(issue.referenz ?? issue.bemerkung ?? issue.reference ?? issue.note ?? "").trim()
+  };
+
+  if (!normalized.materialnummer) throw httpError(400, "Artikelnummer oder Barcode fehlt");
+  if (!normalized.lagerplatz) throw httpError(400, "Lagerplatz fehlt");
+  if (!normalized.leNummer) throw httpError(400, "LE-Nummer/HU fehlt");
+  if (!Number.isInteger(normalized.mengeStueck) || normalized.mengeStueck <= 0) throw httpError(400, "Stückzahl muss größer 0 sein");
   return normalized;
 }
 
@@ -897,6 +1099,20 @@ function storageLocationFromRow(row) {
     leNummer: String(row.le_nummer || ""),
     mengeStueck: Number(row.menge_stueck || 0),
     aktualisiertAm: String(row.aktualisiert_am || "")
+  };
+}
+
+function storageMovementFromRow(row) {
+  return {
+    id: String(row.id || ""),
+    materialnummer: String(row.materialnummer || ""),
+    materialbezeichnung: String(row.materialbezeichnung || ""),
+    bewegungsart: String(row.bewegungsart || ""),
+    mengeStueck: Number(row.menge_stueck || 0),
+    lagerplatz: String(row.lagerplatz || ""),
+    leNummer: String(row.le_nummer || ""),
+    referenz: String(row.referenz || ""),
+    erstelltAm: String(row.erstellt_am || "")
   };
 }
 
@@ -1101,6 +1317,12 @@ function httpError(statusCode, message) {
   error.statusCode = statusCode;
   error.publicMessage = message;
   return error;
+}
+
+function withLineContext(error, index) {
+  const statusCode = error.statusCode || 400;
+  const message = error.publicMessage || error.message || "Buchungszeile ist ungültig";
+  return httpError(statusCode, `Zeile ${index + 1}: ${message}`);
 }
 
 function run(command, args) {
