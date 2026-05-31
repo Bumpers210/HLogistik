@@ -1,4 +1,7 @@
-const CACHE_NAME = "hlogistik-offline-v12";
+// Bump CACHE_VERSION whenever static files change (keep in sync with "version" in manifest.webmanifest).
+const CACHE_VERSION = "1.1.0";
+const CACHE_NAME = `hlogistik-${CACHE_VERSION}`;
+
 const APP_SHELL = [
   "/",
   "/index.html",

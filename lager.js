@@ -359,9 +359,15 @@ function findEmptyBookingLine(type) {
 }
 
 async function apiJson(url, options = {}) {
+  const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
+  const { headers: extraHeaders, ...rest } = options;
   const response = await fetch(`${API_BASE}${url}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options
+    headers: {
+      "Content-Type": "application/json",
+      "X-User-Group": userGroup,
+      ...extraHeaders,
+    },
+    ...rest,
   });
   const data = await response.json();
   if (!response.ok || data.ok === false) throw new Error(data.error || "Serverfehler");
