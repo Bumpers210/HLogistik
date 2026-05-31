@@ -1719,19 +1719,72 @@ async function initializeServer({ showChecking = true } = {}) {
     });
     if (!response.ok) throw new Error("Server antwortet nicht");
     const info = await response.json();
+    const wasOffline = !serverOnline;
     serverOnline = true;
     setConnectionStatus(true);
     setServerStatus(`Server aktiv. PDFs: ${info.exportDir}`, "ok");
+    if (wasOffline) await flushSyncQueue();
     await loadOrderList();
     startOrderListRefresh();
     startActivityHeartbeat();
   } catch {
     serverOnline = false;
     setConnectionStatus(false);
-    setServerStatus("Server nicht verbunden. Daten bleiben nur auf diesem Geraet.", "error");
+    const cached = await loadOrderListFromCache();
+    setServerStatus(
+      cached
+        ? "Offline: Auftragsliste aus lokalem Cache geladen."
+        : "Server nicht verbunden. Daten bleiben nur auf diesem Geraet.",
+      "error"
+    );
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
     connectionCheckInProgress = false;
+  }
+}
+
+async function flushSyncQueue() {
+  if (!window.OfflineStore) return;
+  try {
+    const pending = await OfflineStore.getPending();
+    if (!pending.length) return;
+
+    // Dedup: nur die neueste Mutation je URL behalten
+    const latestByUrl = new Map();
+    pending.forEach((item) => {
+      const existing = latestByUrl.get(item.url);
+      if (!existing || item.timestamp > existing.timestamp) latestByUrl.set(item.url, item);
+    });
+
+    let synced = 0;
+    for (const [, item] of latestByUrl) {
+      try {
+        await apiJson(item.url, { method: item.method, body: item.body });
+        synced++;
+      } catch {
+        // Einzelner Fehler blockiert nicht den Rest
+      }
+    }
+
+    await OfflineStore.clearQueue();
+    if (synced > 0) {
+      setServerStatus(`${synced} Offline-Änderung${synced !== 1 ? "en" : ""} synchronisiert.`, "ok");
+    }
+  } catch {
+    // Queue-Flush ist nicht kritisch
+  }
+}
+
+async function loadOrderListFromCache() {
+  if (!window.OfflineStore) return false;
+  try {
+    const cached = (await OfflineStore.loadOrderSummaries())
+      .filter((o) => (o.orderType || "picking") === currentMode && !o.exportedAt);
+    if (!cached.length) return false;
+    renderOrderListItems(cached);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1770,25 +1823,33 @@ function startActivityHeartbeat() {
 }
 
 async function loadOrderList() {
-  if (!serverOnline) return;
+  if (!serverOnline) {
+    await loadOrderListFromCache();
+    return;
+  }
   try {
     const orders = (await apiJson("/api/orders"))
       .filter((order) => (order.orderType || "picking") === currentMode && !order.exportedAt);
     const newOrders = findNewOrders(orders);
     rememberKnownOrders(orders);
-    elements.orderSelect.innerHTML = `<option value="">Kein gespeicherter Auftrag</option>`;
-    orders.forEach((order) => {
-      const option = document.createElement("option");
-      option.value = order.id;
-      const activity = orderActivityLabel(order);
-      option.textContent = `${order.orderNumber || order.id} - ${order.customerName || modeLabel(order.orderType).toLowerCase()} (${order.picked}/${order.total}) - ${activity}`;
-      if (order.id === state.id) option.selected = true;
-      elements.orderSelect.appendChild(option);
-    });
+    renderOrderListItems(orders);
     if (newOrders.length) showNewOrderNotice(newOrders);
+    try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders); } catch { /* non-critical */ }
   } catch (error) {
     setServerStatus(`Auftragsliste konnte nicht geladen werden: ${error.message}`, "error");
   }
+}
+
+function renderOrderListItems(orders) {
+  elements.orderSelect.innerHTML = `<option value="">Kein gespeicherter Auftrag</option>`;
+  orders.forEach((order) => {
+    const option = document.createElement("option");
+    option.value = order.id;
+    const activity = orderActivityLabel(order);
+    option.textContent = `${order.orderNumber || order.id} - ${order.customerName || modeLabel(order.orderType).toLowerCase()} (${order.picked}/${order.total}) - ${activity}`;
+    if (order.id === state.id) option.selected = true;
+    elements.orderSelect.appendChild(option);
+  });
 }
 
 function findNewOrders(orders) {
@@ -1860,8 +1921,31 @@ function isOrderRecentlyActive(order) {
 }
 
 async function loadOrder(id) {
-  if (!id || !serverOnline) return;
+  if (!id) return;
   if (!requireCurrentUser()) return;
+
+  if (!serverOnline) {
+    if (!window.OfflineStore) return;
+    try {
+      const cached = await OfflineStore.loadOrder(id);
+      if (!cached) {
+        setServerStatus("Offline: Dieser Auftrag ist nicht im lokalen Cache vorhanden.", "error");
+        return;
+      }
+      Object.assign(state, cached);
+      currentMode = state.orderType === "storage" ? "storage" : "picking";
+      localStorage.setItem(MODE_KEY, currentMode);
+      state.collapseDone = true;
+      topControlsCollapsed = state.lines.length > 0;
+      saveStateWithoutServer();
+      render();
+      setServerStatus("Offline: Auftrag aus Cache geladen. Änderungen werden bei Verbindung synchronisiert.", "ok");
+    } catch (error) {
+      setServerStatus(`Offline-Cache konnte nicht gelesen werden: ${error.message}`, "error");
+    }
+    return;
+  }
+
   try {
     if (state.id && state.id !== id) await releaseCurrentOrderActivity();
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
@@ -1878,6 +1962,7 @@ async function loadOrder(id) {
         : "Auftrag geladen.",
       "ok"
     );
+    try { if (window.OfflineStore) await OfflineStore.saveOrder(order); } catch { /* non-critical */ }
     await loadOrderList();
   } catch (error) {
     setServerStatus(`Auftrag konnte nicht geladen werden: ${error.message}`, "error");
@@ -1916,7 +2001,20 @@ async function saveOrderNow(silent = false) {
   if (!requireCurrentUser()) return false;
 
   if (!serverOnline) {
-    if (!silent) setServerStatus("Server nicht verbunden. Auftrag nur lokal gespeichert.", "error");
+    if (window.OfflineStore) {
+      try {
+        const payload = currentOrderPayload();
+        const endpoint = state.id ? `/api/orders/${encodeURIComponent(state.id)}` : "/api/orders";
+        const method = state.id ? "PUT" : "POST";
+        await OfflineStore.enqueue(method, endpoint, JSON.stringify({ order: payload }));
+        if (state.id) await OfflineStore.saveOrder({ ...payload, id: state.id });
+        if (!silent) setServerStatus("Offline gespeichert – wird synchronisiert, sobald der Server erreichbar ist.", "ok");
+      } catch {
+        if (!silent) setServerStatus("Offline: Lokales Speichern fehlgeschlagen.", "error");
+      }
+    } else {
+      if (!silent) setServerStatus("Server nicht verbunden. Auftrag nur lokal gespeichert.", "error");
+    }
     return false;
   }
 
@@ -2022,9 +2120,15 @@ function saveStateWithoutServer() {
 }
 
 async function apiJson(url, options = {}) {
+  const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
+  const { headers: extraHeaders, ...rest } = options;
   const response = await fetch(`${API_BASE}${url}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options
+    headers: {
+      "Content-Type": "application/json",
+      "X-User-Group": userGroup,
+      ...extraHeaders,
+    },
+    ...rest,
   });
   const data = await response.json();
   if (!response.ok || data.ok === false) throw new Error(data.error || "Serverfehler");

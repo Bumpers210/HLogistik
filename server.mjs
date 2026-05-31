@@ -79,6 +79,7 @@ const publicStaticFiles = new Set([
   "/tablet.css",
   "/manifest.webmanifest",
   "/app-icon.svg",
+  "/offline-store.js",
   "/pdf.min.js",
   "/pdf.worker.min.js",
   "/kommissionier-app-screenshot.png",

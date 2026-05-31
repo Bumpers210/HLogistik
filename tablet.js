@@ -19,6 +19,10 @@ document.addEventListener("DOMContentLoaded", () => {
   initialize();
 });
 
+window.addEventListener("online", () => {
+  if (!serverOnline) initialize();
+});
+
 function bindElements() {
   [
     "connectionStatus",
@@ -70,16 +74,71 @@ async function initialize() {
     await apiJson("/api/health");
     serverOnline = true;
     setConnectionStatus(true);
+    await flushSyncQueue();
     loadOrderList();
     orderListTimer = window.setInterval(loadOrderList, ORDER_LIST_REFRESH_MS);
-    saveTimer = window.setInterval(() => {
-      if (dirty) saveOrder(true);
+    saveTimer = window.setInterval(async () => {
+      if (dirty) await saveOrder(true);
+      if (!serverOnline) return;
+      // Retry queue after auto-save interval when back online
+      const pending = window.OfflineStore ? await OfflineStore.getPending().catch(() => []) : [];
+      if (pending.length) await flushSyncQueue();
     }, AUTO_SAVE_MS);
   } catch {
     serverOnline = false;
     setConnectionStatus(false);
-    setMessage("Server nicht verbunden.", true);
+    const cached = await loadOrderListFromCache();
+    setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden.", !cached);
   }
+}
+
+async function flushSyncQueue() {
+  if (!window.OfflineStore) return;
+  try {
+    const pending = await OfflineStore.getPending();
+    if (!pending.length) return;
+
+    const latestByUrl = new Map();
+    pending.forEach((item) => {
+      const existing = latestByUrl.get(item.url);
+      if (!existing || item.timestamp > existing.timestamp) latestByUrl.set(item.url, item);
+    });
+
+    let synced = 0;
+    for (const [, item] of latestByUrl) {
+      try {
+        await apiJson(item.url, { method: item.method, body: item.body });
+        synced++;
+      } catch { /* weiter */ }
+    }
+    await OfflineStore.clearQueue();
+    if (synced > 0) setMessage(`${synced} Offline-Änderung${synced !== 1 ? "en" : ""} synchronisiert.`, false);
+  } catch { /* non-critical */ }
+}
+
+async function loadOrderListFromCache() {
+  if (!window.OfflineStore) return false;
+  try {
+    const cached = (await OfflineStore.loadOrderSummaries())
+      .filter((o) => (o.orderType || "picking") === "picking");
+    if (!cached.length) return false;
+    renderCachedOrderList(cached);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function renderCachedOrderList(orders) {
+  clearSelect(elements.orderSelect);
+  addOption(elements.orderSelect, "", "Auftrag wählen (Offline-Cache)");
+  orders.forEach((order) => {
+    addOption(
+      elements.orderSelect,
+      order.id,
+      `${order.orderNumber || order.id} - ${order.customerName || ""} (${order.picked}/${order.total}) [Cache]`
+    );
+  });
 }
 
 function loadUser() {
@@ -101,7 +160,10 @@ function saveUser() {
 }
 
 async function loadOrderList() {
-  if (!serverOnline) return;
+  if (!serverOnline) {
+    await loadOrderListFromCache();
+    return;
+  }
   try {
     const orders = await apiJson("/api/orders");
     const selected = elements.orderSelect.value;
@@ -117,6 +179,7 @@ async function loadOrderList() {
     });
     elements.orderSelect.value = selected;
     setMessage(currentOrder ? "Auftragsliste aktualisiert." : "Bitte Auftrag wählen.", false);
+    try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders.filter((o) => (o.orderType || "picking") === "picking")); } catch { /* non-critical */ }
   } catch (error) {
     setMessage(`Auftragsliste konnte nicht geladen werden: ${error.message}`, true);
   }
@@ -126,6 +189,26 @@ async function loadOrder(id) {
   if (!id) return;
   if (dirty && !window.confirm("Es gibt ungespeicherte Änderungen. Auftrag trotzdem wechseln?")) {
     elements.orderSelect.value = currentOrder ? currentOrder.id : "";
+    return;
+  }
+
+  if (!serverOnline) {
+    if (!window.OfflineStore) return;
+    try {
+      const cached = await OfflineStore.loadOrder(id);
+      if (!cached) {
+        setMessage("Offline: Dieser Auftrag ist nicht im lokalen Cache vorhanden.", true);
+        return;
+      }
+      currentOrder = cached;
+      currentOrder.collapseDone = currentOrder.collapseDone !== false;
+      elements.collapseDoneInput.checked = currentOrder.collapseDone;
+      dirty = false;
+      renderOrder();
+      setMessage("Offline: Auftrag aus Cache geladen. Änderungen werden bei Verbindung synchronisiert.", false);
+    } catch (error) {
+      setMessage(`Cache-Fehler: ${error.message}`, true);
+    }
     return;
   }
 
@@ -142,6 +225,7 @@ async function loadOrder(id) {
         : "Auftrag geladen.",
       false
     );
+    try { if (window.OfflineStore) await OfflineStore.saveOrder(order); } catch { /* non-critical */ }
   } catch (error) {
     setMessage(`Auftrag konnte nicht geladen werden: ${error.message}`, true);
   }
@@ -324,6 +408,24 @@ function currentUserName() {
 async function saveOrder(silent, onSuccess) {
   if (!currentOrder || !currentOrder.id) return;
   touchOrder();
+
+  if (!serverOnline) {
+    if (window.OfflineStore) {
+      try {
+        const url = `/api/orders/${encodeURIComponent(currentOrder.id)}`;
+        await OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder }));
+        await OfflineStore.saveOrder(currentOrder);
+        dirty = false;
+        if (!silent) setMessage("Offline gespeichert – wird synchronisiert, sobald der Server erreichbar ist.", false);
+      } catch {
+        if (!silent) setMessage("Offline: Lokales Speichern fehlgeschlagen.", true);
+      }
+    } else {
+      if (!silent) setMessage("Server nicht verbunden.", true);
+    }
+    return;
+  }
+
   try {
     await apiJson(`/api/orders/${encodeURIComponent(currentOrder.id)}`, {
       method: "PUT",
