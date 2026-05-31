@@ -13,6 +13,9 @@ Add-Type -AssemblyName System.Drawing
 $ErrorActionPreference = "Continue"
 $root      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $hostsPath = "$env:Windir\System32\drivers\etc\hosts"
+$dataDir   = Join-Path $root "data"
+$backupDir = Join-Path $root "Backups"
+$databaseFile = Join-Path $dataDir "logistik.sqlite"
 $dot       = [char]0x25CF
 
 # ── Farben ─────────────────────────────────────────────────────────────────────
@@ -77,6 +80,50 @@ function Get-PortOwnerPid ([int]$port) {
     return 0
 }
 
+function Test-HLogistikServer {
+    try {
+        $health = Invoke-RestMethod -Uri "http://localhost:4174/api/health" -TimeoutSec 2
+        return [bool]$health.ok
+    } catch {
+        return $false
+    }
+}
+
+function Stop-RunningServer {
+    if ($script:existingServerPid -gt 0) {
+        Stop-Process -Id $script:existingServerPid -Force -ErrorAction SilentlyContinue
+        $script:existingServerPid = 0
+        return
+    }
+
+    if ($global:serverProc -and -not $global:serverProc.HasExited) {
+        $global:serverProc.Kill()
+    }
+}
+
+function Backup-Database {
+    if (-not (Test-Path $databaseFile)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Keine Datenbank gefunden:`n$databaseFile",
+            "HLogistik Backup",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
+    }
+
+    New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $target = Join-Path $backupDir "logistik-$timestamp.sqlite"
+    Copy-Item -LiteralPath $databaseFile -Destination $target
+    [System.Windows.Forms.MessageBox]::Show(
+        "Backup erstellt:`n$target",
+        "HLogistik Backup",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    ) | Out-Null
+}
+
 # ── Voraussetzungen pruefen ────────────────────────────────────────────────────
 
 $nodeExe = Find-NodeExe
@@ -93,18 +140,25 @@ if (-not $nodeExe) {
 $localHostname = Get-LocalHostname
 Ensure-HostsEntry $localHostname
 
+$script:existingServerPid = 0
+$script:stopRequested = $false
+
 $ownerPid = Get-PortOwnerPid 4174
 if ($ownerPid -gt 0) {
     $ownerProc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
     $procName  = if ($ownerProc) { $ownerProc.Name } else { "Unbekannt" }
-    $msg    = "Port 4174 wird bereits verwendet ($procName, PID $ownerPid).`nVorhandenen Server beenden und neu starten?"
-    $answer = [System.Windows.Forms.MessageBox]::Show($msg, "HLogistik",
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question)
-    if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-        Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 700
-    } else { exit 0 }
+    if (Test-HLogistikServer) {
+        $script:existingServerPid = $ownerPid
+    } else {
+        $msg    = "Port 4174 wird bereits verwendet ($procName, PID $ownerPid).`nDieser Prozess antwortet nicht wie HLogistik.`nProzess beenden und HLogistik starten?"
+        $answer = [System.Windows.Forms.MessageBox]::Show($msg, "HLogistik",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+            Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 700
+        } else { exit 0 }
+    }
 }
 
 # ── Log-Queue (thread-sicher, kein form.Invoke noetig) ─────────────────────────
@@ -217,6 +271,33 @@ $btnOpen.FlatAppearance.BorderSize = 0
 $btnOpen.add_Click({ Start-Process "http://localhost:4174" })
 $pnlBottom.Controls.Add($btnOpen)
 
+$btnBackup             = New-Object System.Windows.Forms.Button
+$btnBackup.Text        = "Backup"
+$btnBackup.Size        = New-Object System.Drawing.Size(100, 36)
+$btnBackup.Location    = New-Object System.Drawing.Point(210, 10)
+$btnBackup.FlatStyle   = "Flat"
+$btnBackup.FlatAppearance.BorderSize = 0
+$btnBackup.BackColor   = [System.Drawing.ColorTranslator]::FromHtml("#2a2a3a")
+$btnBackup.ForeColor   = $cText
+$btnBackup.add_Click({ Backup-Database })
+$pnlBottom.Controls.Add($btnBackup)
+
+$btnRestart             = New-Object System.Windows.Forms.Button
+$btnRestart.Text        = "Neustart"
+$btnRestart.Size        = New-Object System.Drawing.Size(110, 36)
+$btnRestart.Location    = New-Object System.Drawing.Point(320, 10)
+$btnRestart.FlatStyle   = "Flat"
+$btnRestart.FlatAppearance.BorderSize = 0
+$btnRestart.BackColor   = [System.Drawing.ColorTranslator]::FromHtml("#2a2a3a")
+$btnRestart.ForeColor   = $cText
+$btnRestart.add_Click({
+    $script:stopRequested = $true
+    Stop-RunningServer
+    Start-Process powershell -ArgumentList "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path
+    $form.Close()
+})
+$pnlBottom.Controls.Add($btnRestart)
+
 $btnStop             = New-Object System.Windows.Forms.Button
 $btnStop.Text        = "Server stoppen"
 $btnStop.Size        = New-Object System.Drawing.Size(150, 36)
@@ -225,7 +306,8 @@ $btnStop.FlatAppearance.BorderSize = 0
 $btnStop.BackColor   = [System.Drawing.ColorTranslator]::FromHtml("#2a2a3a")
 $btnStop.ForeColor   = $cRed
 $btnStop.add_Click({
-    if ($global:serverProc -and -not $global:serverProc.HasExited) { $global:serverProc.Kill() }
+    $script:stopRequested = $true
+    Stop-RunningServer
     $form.Close()
 })
 $pnlBottom.Controls.Add($btnStop)
@@ -316,11 +398,17 @@ $global:serverProc.add_Exited({
 })
 
 $form.add_Shown({
+    $uiTimer.Start()
+    if ($script:existingServerPid -gt 0) {
+        $script:queue.Enqueue("HLogistik laeuft bereits im Hintergrund. PID: $script:existingServerPid")
+        $script:queue.Enqueue("laeuft auf http://localhost:4174/")
+        return
+    }
+
     try {
         $global:serverProc.Start()               | Out-Null
         $global:serverProc.BeginOutputReadLine()
         $global:serverProc.BeginErrorReadLine()
-        $uiTimer.Start()
     } catch {
         $script:queue.Enqueue("[ERR]Server konnte nicht gestartet werden: $_")
         $lblStatus.Text      = "$dot Fehler"
@@ -330,7 +418,28 @@ $form.add_Shown({
 
 $form.add_FormClosing({
     $uiTimer.Stop()
-    if ($global:serverProc -and -not $global:serverProc.HasExited) { $global:serverProc.Kill() }
+    $serverStillRunning =
+        ($script:existingServerPid -gt 0 -and (Get-Process -Id $script:existingServerPid -ErrorAction SilentlyContinue)) -or
+        ($global:serverProc -and -not $global:serverProc.HasExited)
+
+    if ($serverStillRunning -and -not $script:stopRequested) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "Der Server laeuft noch.`n`nJa: Server beenden`nNein: Im Hintergrund weiterlaufen lassen`nAbbrechen: Fenster offen lassen",
+            "HLogistik Server",
+            [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
+            [System.Windows.Forms.MessageBoxIcon]::Question
+        )
+
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Cancel) {
+            $_.Cancel = $true
+            $uiTimer.Start()
+            return
+        }
+
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+            Stop-RunningServer
+        }
+    }
 })
 
 [System.Windows.Forms.Application]::Run($form)
