@@ -88,8 +88,14 @@ function enforceArticleAccess() {
     window.location.replace("/");
     return false;
   }
-  if (elements.storageAppLink) elements.storageAppLink.hidden = false;
-  if (elements.currentUserName) elements.currentUserName.textContent = `${userName} - Büro`;
+  if (elements.storageAppLink) {
+    elements.storageAppLink.hidden = false;
+    elements.storageAppLink.textContent = userGroup === "buero" ? "Buchung" : "Einlagern";
+  }
+  if (elements.currentUserName) {
+    const groupLabel = userGroup === "buero" ? "Büro" : userGroup === "tablet" ? "Tablet" : "";
+    elements.currentUserName.textContent = groupLabel ? `${userName} - ${groupLabel}` : userName;
+  }
   return true;
 }
 

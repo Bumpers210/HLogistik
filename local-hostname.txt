@@ -1,0 +1,6 @@
+# Lokaler Name fuer den Browser (ohne http:// und ohne Port).
+# Beispiel: hlogistik.lokal
+# Nach Aenderung Server neu starten.
+# Windows: Eintrag in C:\Windows\System32\drivers\etc\hosts noetig:
+#   127.0.0.1    hlogistik.lokal
+hlogistik.lokal

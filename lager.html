@@ -4,17 +4,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#167a58">
-    <title>Einlagern</title>
+    <title>Buchung</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css?v=20260531-2">
-    <script src="lager.js?v=20260531-2" defer></script>
+    <script src="lager.js?v=20260531-3" defer></script>
   </head>
   <body>
     <header class="app-header">
       <div>
         <p class="eyebrow">Lager</p>
-        <h1>Einlagern</h1>
+        <h1 id="storagePageTitle">Buchung</h1>
       </div>
       <div class="header-actions">
         <div id="connectionBadge" class="connection-badge is-checking" role="status" aria-live="polite">
@@ -23,7 +23,7 @@
         </div>
         <nav class="mode-nav" aria-label="Arbeitsbereich">
           <a class="mode-button" href="/">Kommissionierung</a>
-          <span class="mode-button is-active">Einlagern</span>
+          <span id="storageNavLabel" class="mode-button is-active">Buchung</span>
           <a class="mode-button" href="/artikel.html">Artikelstamm</a>
         </nav>
         <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">

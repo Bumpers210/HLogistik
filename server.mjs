@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
@@ -15,6 +15,7 @@ const ordersFile = path.join(dataDir, "orders.json");
 const legacyArticlesFile = path.join(dataDir, "articles.json");
 const databaseFile = path.join(dataDir, "logistik.sqlite");
 const port = Number(globalThis.process?.env?.PORT || 4174);
+const localHostname = readLocalHostname();
 const maxBodyBytes = 2 * 1024 * 1024;
 const publicStaticFiles = new Set([
   "/",
@@ -71,6 +72,9 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`Kommissionier-App laeuft auf http://localhost:${port}/`);
+  if (localHostname) {
+    console.log(`Lokaler Name: http://${localHostname}:${port}/`);
+  }
   for (const address of localAddresses()) {
     console.log(`Im Netzwerk: http://${address}:${port}/`);
   }
@@ -82,7 +86,13 @@ async function route(request, response) {
   enforceSameOriginMutation(request);
 
   if (pathname === "/api/health") {
-    sendJson(response, 200, { ok: true, host: hostname(), exportDir });
+    sendJson(response, 200, {
+      ok: true,
+      host: hostname(),
+      localHostname: localHostname || null,
+      port,
+      exportDir
+    });
     return;
   }
 
@@ -1352,6 +1362,27 @@ function localAddresses() {
     .flat()
     .filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
     .map((entry) => entry.address);
+}
+
+function readLocalHostname() {
+  const fromEnv = String(globalThis.process?.env?.LOCAL_HOSTNAME || "").trim();
+  if (fromEnv) return sanitizeHostname(fromEnv);
+
+  const configFile = path.join(root, "local-hostname.txt");
+  if (!existsSync(configFile)) return "";
+
+  const raw = readFileSync(configFile, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith("#"));
+  return sanitizeHostname(raw || "");
+}
+
+function sanitizeHostname(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9.-]/g, "");
 }
 
 function createId() {

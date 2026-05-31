@@ -279,11 +279,18 @@ function userGroupLabel(group) {
   return "";
 }
 
+function storageNavLabel(group) {
+  return group === "buero" ? "Buchung" : "Einlagern";
+}
+
 function applyUserAccess() {
   const isWarehouse = currentUser.group === "lager";
   const isOffice = currentUser.group === "buero";
   if (elements.storageModeButton) elements.storageModeButton.hidden = isOffice;
-  if (elements.storageAppLink) elements.storageAppLink.hidden = isWarehouse;
+  if (elements.storageAppLink) {
+    elements.storageAppLink.hidden = isWarehouse;
+    elements.storageAppLink.textContent = storageNavLabel(currentUser.group);
+  }
   if (elements.articleNavLink) elements.articleNavLink.hidden = isWarehouse;
 
   let changedMode = false;

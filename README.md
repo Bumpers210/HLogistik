@@ -11,8 +11,9 @@ Aktuell in dieser Sitzung:
 Später dauerhaft:
 
 1. Node.js LTS installieren.
-2. `start-server.ps1` starten.
-3. Adresse aus dem Fenster auf Tablets öffnen.
+2. Optional: `local-hostname.txt` anpassen (z. B. `hlogistik.lokal`) und einmal `setup-local-hostname.ps1` als Administrator ausführen.
+3. `start-server.ps1` starten.
+4. Adresse aus dem Fenster auf Tablets öffnen (z. B. `http://hlogistik.lokal:4174/`).
 
 ## Was schon geht
 
@@ -30,7 +31,7 @@ Später dauerhaft:
 - Artikelstamm mit SQLite pflegen unter `http://127.0.0.1:4174/artikel.html`
 - Artikel per CSV importieren/exportieren
 - Artikel nach Materialnummer, Materialbezeichnung oder Barcode suchen
-- Manuelle Einlagerung unter `http://127.0.0.1:4174/lager.html`
+- Manuelle Buchung (Büro) unter `http://127.0.0.1:4174/lager.html`
 - Stellplätze nach Artikelnummer, Lagerplatz oder LE-Nummer abrufen
 - Tablet-Light-Modus als einfache Pickliste unter `http://127.0.0.1:4174/tablet.html`
 - REST-Schnittstellen für spätere Apps:

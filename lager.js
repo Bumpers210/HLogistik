@@ -3,6 +3,10 @@ const SEARCH_DEBOUNCE_MS = 200;
 const USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 
+function storagePageLabel(group) {
+  return group === "buero" ? "Buchung" : "Einlagern";
+}
+
 const elements = {};
 let serverOnline = false;
 let searchTimer = null;
@@ -47,7 +51,9 @@ function bindElements() {
     "movementSearchInput",
     "refreshMovementsButton",
     "movementCount",
-    "movementTableBody"
+    "movementTableBody",
+    "storagePageTitle",
+    "storageNavLabel"
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
   });
@@ -83,11 +89,11 @@ async function initialize() {
     serverOnline = true;
     setConnectionStatus(true);
     await refreshStorageViews();
-    setStatus(elements.storageStatus, "Bereit zum Einlagern.", "ok");
+    setStatus(elements.storageStatus, "Bereit zur Buchung.", "ok");
   } catch {
     serverOnline = false;
     setConnectionStatus(false);
-    setStatus(elements.storageStatus, "Server nicht verbunden. Einlagerung ist nicht verfügbar.", "error");
+    setStatus(elements.storageStatus, "Server nicht verbunden. Buchung ist nicht verfügbar.", "error");
   }
 }
 
@@ -98,8 +104,19 @@ function enforceStorageAccess() {
     window.location.replace("/");
     return false;
   }
-  if (elements.currentUserName) elements.currentUserName.textContent = `${userName} - Büro`;
+  applyStoragePageLabels(userGroup);
+  if (elements.currentUserName) {
+    const groupLabel = userGroup === "buero" ? "Büro" : userGroup === "tablet" ? "Tablet" : "";
+    elements.currentUserName.textContent = groupLabel ? `${userName} - ${groupLabel}` : userName;
+  }
   return true;
+}
+
+function applyStoragePageLabels(userGroup) {
+  const label = storagePageLabel(userGroup);
+  document.title = label;
+  if (elements.storagePageTitle) elements.storagePageTitle.textContent = label;
+  if (elements.storageNavLabel) elements.storageNavLabel.textContent = label;
 }
 
 function switchUser() {
@@ -142,7 +159,7 @@ async function bookStorageReceipt(event) {
     resetBookingLines("receipt");
     await refreshStorageViews();
   } catch (error) {
-    setStatus(elements.storageStatus, `Einlagern fehlgeschlagen: ${error.message}`, "error");
+    setStatus(elements.storageStatus, `Buchung fehlgeschlagen: ${error.message}`, "error");
   }
 }
 
