@@ -1,11 +1,19 @@
 ﻿#Requires -Version 5.1
+
+# WinForms braucht STA. Falls MTA: Skript im STA-Modus neu starten.
+if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne "STA") {
+    Start-Process powershell -ArgumentList "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path
+    exit
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $root      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $hostsPath = "$env:Windir\System32\drivers\etc\hosts"
+$dot       = [char]0x25CF
 
 # ── Farben ─────────────────────────────────────────────────────────────────────
 
@@ -21,10 +29,7 @@ $cLogBg  = [System.Drawing.ColorTranslator]::FromHtml("#070b10")
 $cLogFg  = [System.Drawing.ColorTranslator]::FromHtml("#4dde9f")
 $cLogErr = [System.Drawing.ColorTranslator]::FromHtml("#ff6b6b")
 
-# Bullet-Zeichen als Char (nicht im Source-Code, damit ASCII-kompatibel)
-$dot = [char]0x25CF
-
-# ── Node.js finden ─────────────────────────────────────────────────────────────
+# ── Hilfsfunktionen ────────────────────────────────────────────────────────────
 
 function Find-NodeExe {
     $n = Get-Command node -ErrorAction SilentlyContinue
@@ -37,13 +42,9 @@ function Find-NodeExe {
     $nvmNode = Get-ChildItem "$env:APPDATA\nvm\*\node.exe" -ErrorAction SilentlyContinue |
                Sort-Object DirectoryName -Descending | Select-Object -First 1
     if ($nvmNode) { $candidates += $nvmNode.FullName }
-    foreach ($p in $candidates) {
-        if ($p -and (Test-Path $p)) { return $p }
-    }
+    foreach ($p in $candidates) { if ($p -and (Test-Path $p)) { return $p } }
     return $null
 }
-
-# ── Lokalen Hostnamen lesen ────────────────────────────────────────────────────
 
 function Get-LocalHostname {
     $f = Join-Path $root "local-hostname.txt"
@@ -51,18 +52,14 @@ function Get-LocalHostname {
     $line = Get-Content $f |
         Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") } |
         Select-Object -First 1
-    if ($line) { return $line.Trim() }
-    return ""
+    if ($line) { return $line.Trim() } else { return "" }
 }
 
-# ── Hosts-Eintrag sicherstellen ────────────────────────────────────────────────
-
-function Ensure-HostsEntry {
-    param([string]$hostname)
+function Ensure-HostsEntry ([string]$hostname) {
     if (-not $hostname) { return }
     $content = Get-Content $hostsPath -Raw -ErrorAction SilentlyContinue
     if ($content -match [regex]::Escape($hostname)) { return }
-    $entry   = "127.0.0.1`t$hostname"
+    $entry = "127.0.0.1`t$hostname"
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($isAdmin) {
         Add-Content -Path $hostsPath -Value $entry -Encoding ascii
@@ -73,17 +70,14 @@ function Ensure-HostsEntry {
     }
 }
 
-# ── Port-Pruefer (Get-NetTCPConnection ist zuverlaessiger als netstat-Parsing) ──
-
-function Get-PortOwnerPid {
-    param([int]$port)
+function Get-PortOwnerPid ([int]$port) {
     $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
             Select-Object -First 1
     if ($conn -and $conn.OwningProcess -gt 0) { return $conn.OwningProcess }
     return 0
 }
 
-# ── Voraussetzungen ────────────────────────────────────────────────────────────
+# ── Voraussetzungen pruefen ────────────────────────────────────────────────────
 
 $nodeExe = Find-NodeExe
 if (-not $nodeExe) {
@@ -103,22 +97,23 @@ $ownerPid = Get-PortOwnerPid 4174
 if ($ownerPid -gt 0) {
     $ownerProc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
     $procName  = if ($ownerProc) { $ownerProc.Name } else { "Unbekannt" }
-    $msg = "Port 4174 wird bereits verwendet ($procName, PID $ownerPid).`nVorhandenen Server beenden und neu starten?"
-    $answer = [System.Windows.Forms.MessageBox]::Show(
-        $msg,
-        "HLogistik",
+    $msg    = "Port 4174 wird bereits verwendet ($procName, PID $ownerPid).`nVorhandenen Server beenden und neu starten?"
+    $answer = [System.Windows.Forms.MessageBox]::Show($msg, "HLogistik",
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question
-    )
+        [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
         Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 600
-    } else {
-        exit 0
-    }
+        Start-Sleep -Milliseconds 700
+    } else { exit 0 }
 }
 
-# ── Fenster aufbauen ───────────────────────────────────────────────────────────
+# ── Log-Queue (thread-sicher, kein form.Invoke noetig) ─────────────────────────
+
+$script:queue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+$script:procDone  = $false
+$script:networkUrl = ""
+
+# ── Fenster ────────────────────────────────────────────────────────────────────
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text          = "HLogistik Server"
@@ -156,9 +151,10 @@ $lblStatus.Text      = "$dot Startet..."
 $lblStatus.Font      = New-Object System.Drawing.Font("Segoe UI", 10)
 $lblStatus.ForeColor = $cOrange
 $lblStatus.AutoSize  = $true
+$lblStatus.Location  = New-Object System.Drawing.Point(500, 24)
 $pnlHeader.Controls.Add($lblStatus)
 
-$pnlHeader.add_Layout({
+$pnlHeader.add_Resize({
     $lblStatus.Location = New-Object System.Drawing.Point(($pnlHeader.Width - $lblStatus.Width - 16), 24)
 })
 
@@ -171,8 +167,7 @@ $pnlUrls.Dock      = "Top"
 $pnlUrls.Height    = 10 + $urlCount * 26
 $pnlUrls.BackColor = $cBg
 
-function New-UrlLink {
-    param([string]$label, [int]$y, [bool]$primary)
+function New-UrlLink ([string]$label, [int]$y, [bool]$primary) {
     $lnk                  = New-Object System.Windows.Forms.LinkLabel
     $lnk.Text             = $label
     $lnk.Location         = New-Object System.Drawing.Point(20, $y)
@@ -188,20 +183,17 @@ function New-UrlLink {
 $lnkLocal = New-UrlLink "http://localhost:4174" 8 $true
 $lnkLocal.add_LinkClicked({ Start-Process "http://localhost:4174" })
 
-$script:networkUrl = ""
-$lnkNet            = New-UrlLink "Netzwerk: wird ermittelt..." 34 $false
+$lnkNet = New-UrlLink "Netzwerk: wird ermittelt..." 34 $false
 $lnkNet.add_LinkClicked({ if ($script:networkUrl) { Start-Process $script:networkUrl } })
 
 if ($localHostname) {
     $hnTarget = "http://${localHostname}:4174"
-    $lnkHn    = New-UrlLink $hnTarget 60 $false
-    $capturedHnTarget = $hnTarget
-    $lnkHn.add_LinkClicked([scriptblock]::Create("Start-Process '$capturedHnTarget'"))
+    $lnkHn = New-UrlLink $hnTarget 60 $false
+    $lnkHn.add_LinkClicked([scriptblock]::Create("Start-Process '$hnTarget'"))
 }
 
 $form.Controls.Add($pnlUrls)
 
-# -- Trennlinie --
 $sep           = New-Object System.Windows.Forms.Panel
 $sep.Dock      = "Top"
 $sep.Height    = 1
@@ -238,13 +230,13 @@ $btnStop.add_Click({
 })
 $pnlBottom.Controls.Add($btnStop)
 
-$pnlBottom.add_Layout({
+$pnlBottom.add_Resize({
     $btnStop.Location = New-Object System.Drawing.Point(($pnlBottom.Width - $btnStop.Width - 16), 10)
 })
 
 $form.Controls.Add($pnlBottom)
 
-# -- Log-Bereich --
+# -- Log --
 $logBox             = New-Object System.Windows.Forms.RichTextBox
 $logBox.Dock        = "Fill"
 $logBox.ReadOnly    = $true
@@ -254,33 +246,46 @@ $logBox.Font        = New-Object System.Drawing.Font("Cascadia Mono,Consolas,Cou
 $logBox.BorderStyle = "None"
 $form.Controls.Add($logBox)
 
-# ── Hilfsfunktionen ────────────────────────────────────────────────────────────
+# ── Timer: verarbeitet Queue auf UI-Thread (kein Invoke noetig) ────────────────
 
-function Append-Log {
-    param([string]$line, [bool]$isError = $false)
-    if (-not $form.IsHandleCreated) { return }
-    $ts    = Get-Date -Format "HH:mm:ss"
-    $color = if ($isError) { $cLogErr } else { $cLogFg }
-    $form.Invoke([Action]{
+$uiTimer          = New-Object System.Windows.Forms.Timer
+$uiTimer.Interval = 150
+
+$uiTimer.add_Tick({
+    $line = $null
+    while ($script:queue.TryDequeue([ref]$line)) {
+        $isErr = $line.StartsWith("[ERR]")
+        $text  = if ($isErr) { $line.Substring(5) } else { $line }
+        $ts    = Get-Date -Format "HH:mm:ss"
+
         $logBox.SelectionStart  = $logBox.TextLength
         $logBox.SelectionLength = 0
-        $logBox.SelectionColor  = $color
-        $logBox.AppendText("[$ts] $line`n")
+        $logBox.SelectionColor  = if ($isErr) { $cLogErr } else { $cLogFg }
+        $logBox.AppendText("[$ts] $text`n")
         $logBox.ScrollToCaret()
-    })
-}
 
-function Set-StatusText {
-    param([string]$text, $color)
-    if (-not $form.IsHandleCreated) { return }
-    $form.Invoke([Action]{
-        $lblStatus.Text      = $text
-        $lblStatus.ForeColor = $color
+        if ($text -match "Im Netzwerk: (http://[\d.:]+/)") {
+            $script:networkUrl = $Matches[1]
+            $lnkNet.Text = $Matches[1]
+        }
+        if ($text -match "laeuft auf") {
+            $lblStatus.Text      = "$dot Online"
+            $lblStatus.ForeColor = $cGreenL
+            $lblStatus.Location  = New-Object System.Drawing.Point(($pnlHeader.Width - $lblStatus.Width - 16), 24)
+        }
+    }
+
+    if ($script:procDone -and $global:serverProc.HasExited) {
+        $script:procDone     = $false
+        $lblStatus.Text      = "$dot Gestoppt"
+        $lblStatus.ForeColor = $cRed
         $lblStatus.Location  = New-Object System.Drawing.Point(($pnlHeader.Width - $lblStatus.Width - 16), 24)
-    })
-}
+        $btnStop.Text        = "Schliessen"
+        $btnStop.ForeColor   = $cText
+    }
+})
 
-# ── Server-Prozess vorbereiten ─────────────────────────────────────────────────
+# ── Server starten ─────────────────────────────────────────────────────────────
 
 $pinfo = New-Object System.Diagnostics.ProcessStartInfo
 $pinfo.FileName               = $nodeExe
@@ -297,48 +302,34 @@ $global:serverProc                     = New-Object System.Diagnostics.Process
 $global:serverProc.StartInfo           = $pinfo
 $global:serverProc.EnableRaisingEvents = $true
 
+# Hintergrund-Threads schreiben NUR in die Queue – kein UI-Zugriff
 $global:serverProc.add_OutputDataReceived({
-    param($sender, $e)
-    if ([string]::IsNullOrEmpty($e.Data)) { return }
-    Append-Log $e.Data $false
-
-    if ($e.Data -match "Im Netzwerk: (http://[\d.:]+/)") {
-        $url               = $Matches[1]
-        $script:networkUrl = $url
-        if ($form.IsHandleCreated) {
-            $form.Invoke([Action]{ $lnkNet.Text = $url })
-        }
-    }
-    if ($e.Data -match "laeuft auf") {
-        Set-StatusText "$dot Online" $cGreenL
-    }
+    param($s, $e)
+    if (-not [string]::IsNullOrEmpty($e.Data)) { $script:queue.Enqueue($e.Data) }
 })
-
 $global:serverProc.add_ErrorDataReceived({
-    param($sender, $e)
-    if ([string]::IsNullOrEmpty($e.Data)) { return }
-    Append-Log $e.Data $true
-    Set-StatusText "$dot Fehler" $cRed
+    param($s, $e)
+    if (-not [string]::IsNullOrEmpty($e.Data)) { $script:queue.Enqueue("[ERR]$($e.Data)") }
 })
-
 $global:serverProc.add_Exited({
-    Set-StatusText "$dot Gestoppt" $cRed
-    if ($form.IsHandleCreated) {
-        $form.Invoke([Action]{
-            Append-Log "[Server wurde beendet]" $true
-            $btnStop.Text      = "Schliessen"
-            $btnStop.ForeColor = $cText
-        })
-    }
+    $script:procDone = $true
 })
 
 $form.add_Shown({
-    $global:serverProc.Start()               | Out-Null
-    $global:serverProc.BeginOutputReadLine()
-    $global:serverProc.BeginErrorReadLine()
+    try {
+        $global:serverProc.Start()               | Out-Null
+        $global:serverProc.BeginOutputReadLine()
+        $global:serverProc.BeginErrorReadLine()
+        $uiTimer.Start()
+    } catch {
+        $script:queue.Enqueue("[ERR]Server konnte nicht gestartet werden: $_")
+        $lblStatus.Text      = "$dot Fehler"
+        $lblStatus.ForeColor = $cRed
+    }
 })
 
 $form.add_FormClosing({
+    $uiTimer.Stop()
     if ($global:serverProc -and -not $global:serverProc.HasExited) { $global:serverProc.Kill() }
 })
 
