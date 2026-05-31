@@ -263,6 +263,7 @@ $script:networkUrl = ""
 $script:logPosition = 0L
 $script:errorLogPosition = 0L
 $script:appIcon = New-AppIcon
+$script:reallyExit = $false
 Write-ManagerLog "UI wird aufgebaut"
 
 # ── Fenster ────────────────────────────────────────────────────────────────────
@@ -391,6 +392,7 @@ $btnRestart.FlatAppearance.BorderSize = 0
 $btnRestart.BackColor   = [System.Drawing.ColorTranslator]::FromHtml("#2a2a3a")
 $btnRestart.ForeColor   = $cText
 $btnRestart.add_Click({
+    $script:reallyExit = $true
     $script:stopRequested = $true
     Stop-RunningServer
     Start-Process powershell -ArgumentList "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path
@@ -406,6 +408,7 @@ $btnStop.FlatAppearance.BorderSize = 0
 $btnStop.BackColor   = [System.Drawing.ColorTranslator]::FromHtml("#2a2a3a")
 $btnStop.ForeColor   = $cRed
 $btnStop.add_Click({
+    $script:reallyExit = $true
     $script:stopRequested = $true
     Stop-RunningServer
     $form.Close()
@@ -425,6 +428,7 @@ $trayBackup = $trayMenu.Items.Add("Backup erstellen")
 $trayBackup.add_Click({ Backup-Database })
 $trayRestart = $trayMenu.Items.Add("Server neu starten")
 $trayRestart.add_Click({
+    $script:reallyExit = $true
     $script:stopRequested = $true
     Stop-RunningServer
     Start-Process powershell -ArgumentList "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path
@@ -432,6 +436,7 @@ $trayRestart.add_Click({
 })
 $trayStop = $trayMenu.Items.Add("Server stoppen und beenden")
 $trayStop.add_Click({
+    $script:reallyExit = $true
     $script:stopRequested = $true
     Stop-RunningServer
     $form.Close()
@@ -532,12 +537,25 @@ $form.add_FormClosing({
         }
 
         if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $script:reallyExit = $true
             Stop-RunningServer
+            return
+        }
+
+        if ($answer -eq [System.Windows.Forms.DialogResult]::No) {
+            $_.Cancel = $true
+            $form.Hide()
+            $notifyIcon.Visible = $true
+            $notifyIcon.ShowBalloonTip(2500, "HLogistik Server", "Der Server laeuft weiter. Doppelklick auf das Symbol oeffnet das Fenster wieder.", [System.Windows.Forms.ToolTipIcon]::Info)
+            $uiTimer.Start()
+            return
         }
     }
 
-    $notifyIcon.Visible = $false
-    $notifyIcon.Dispose()
+    if ($script:reallyExit -or -not $serverStillRunning) {
+        $notifyIcon.Visible = $false
+        $notifyIcon.Dispose()
+    }
 })
 
 $uiTimer.Start()
