@@ -2277,12 +2277,7 @@ async function ensureCurrentOrderStillOpen({ openOrders = null, refreshList = tr
     const serverOrder = await apiJson(`/api/orders/${encodeURIComponent(state.id)}`);
     if (isOpenOrderSummary(serverOrder) || isOwnCompletedOrder(serverOrder)) return true;
 
-    clearCurrentOrder();
-    topControlsCollapsed = false;
-    elements.pdfInput.value = "";
-    elements.imageInput.value = "";
-    saveStateWithoutServer();
-    render();
+    resetCurrentOrderView();
     setServerStatus("Dieser Auftrag wurde auf einem anderen Gerät abgeschlossen oder exportiert und lokal geschlossen.", "ok");
     if (refreshList) await loadOrderList();
     return false;
@@ -2330,12 +2325,8 @@ async function releaseCurrentOrder() {
 
   setImportStatus("Auftrag freigegeben und in die Auftragsliste übernommen.", "ok", 100);
   setServerStatus("Auftrag freigegeben und in die Auftragsliste übernommen.", "ok");
-  clearCurrentOrder();
-  topControlsCollapsed = false;
-  elements.pdfInput.value = "";
-  elements.imageInput.value = "";
-  saveStateWithoutServer();
-  render();
+  resetCurrentOrderView();
+  await loadOrderList();
 }
 
 async function deleteCurrentOrder() {
@@ -2363,12 +2354,7 @@ async function deleteCurrentOrder() {
     await apiJson(`/api/orders/${encodeURIComponent(state.id)}`, { method: "DELETE" });
     knownOrderIds.delete(state.id);
     localStorage.setItem(KNOWN_ORDERS_KEY, JSON.stringify([...knownOrderIds]));
-    clearCurrentOrder();
-    topControlsCollapsed = false;
-    elements.pdfInput.value = "";
-    elements.imageInput.value = "";
-    saveStateWithoutServer();
-    render();
+    resetCurrentOrderView();
     setServerStatus("Auftrag gelöscht.", "ok");
     await loadOrderList();
   } catch (error) {
@@ -2500,16 +2486,30 @@ function clearCurrentOrder() {
   });
 }
 
+function resetCurrentOrderView() {
+  window.clearTimeout(saveTimer);
+  saveTimer = null;
+  clearCurrentOrder();
+  topControlsCollapsed = false;
+  if (elements.orderSelect) elements.orderSelect.value = "";
+  if (elements.pdfInput) elements.pdfInput.value = "";
+  if (elements.imageInput) elements.imageInput.value = "";
+  if (elements.importProgressWrap) elements.importProgressWrap.hidden = true;
+  if (elements.importStatus) {
+    elements.importStatus.textContent = "";
+    elements.importStatus.className = "status-line";
+  }
+  saveStateWithoutServer();
+  render();
+}
+
 async function resetOrder() {
   if (!requireCurrentUser()) return;
   const hasData = state.lines.length || state.rawText || state.orderNumber || state.customerName;
   if (hasData && !confirm("Aktuellen Auftrag leeren?")) return;
 
   await releaseCurrentOrderActivity();
-  clearCurrentOrder();
-  topControlsCollapsed = false;
-  elements.pdfInput.value = "";
-  saveAndRender();
+  resetCurrentOrderView();
 }
 
 function exportCsv() {
@@ -2577,13 +2577,13 @@ async function exportPdf() {
     state.exportedPdfPath = result.path || "";
     const exportedFile = result.file || "PDF";
     const exportedPath = result.path || "";
-    clearCurrentOrder();
-    topControlsCollapsed = false;
-    elements.pdfInput.value = "";
-    elements.imageInput.value = "";
-    saveStateWithoutServer();
-    render();
-    showExportMessage(exportedPath ? `PDF gespeichert: ${exportedPath}` : `${exportedFile} gespeichert.`);
+    const copyPath = result.copyPath || "";
+    resetCurrentOrderView();
+    showExportMessage(
+      exportedPath
+        ? `PDF gespeichert: ${exportedPath}${copyPath ? ` | Kopie: ${copyPath}` : ""}`
+        : `${exportedFile} gespeichert.`
+    );
     await loadOrderList();
   } catch (error) {
     showExportMessage(`Server-PDF fehlgeschlagen: ${error.message}`);

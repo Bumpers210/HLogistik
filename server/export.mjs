@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { escapeHtml, formatDate, sanitizeFileName, sanitizeFileNamePart, absoluteUrl } from "./helpers.mjs";
 
-export async function exportPdf(order, exportDir, tempDir, origin = "") {
+export async function exportPdf(order, exportDir, tempDir, origin = "", copyDir = "") {
   const fileBase = pdfFileBase(order);
   const htmlPath = path.join(tempDir, `${fileBase}.html`);
   const pdfPath = path.join(exportDir, `${fileBase}.pdf`);
@@ -17,12 +17,23 @@ export async function exportPdf(order, exportDir, tempDir, origin = "") {
   }
 
   await run(browser, ["--headless", "--disable-gpu", `--print-to-pdf=${pdfPath}`, pathToFileURL(htmlPath).href]);
+  const copyPath = await copyPdfToExportFolder(pdfPath, copyDir, `${fileBase}.pdf`);
 
   return {
     file: `${fileBase}.pdf`,
     path: pdfPath,
+    copyPath,
     url: absoluteUrl(origin, `/exports/${encodeURIComponent(`${fileBase}.pdf`)}`),
   };
+}
+
+async function copyPdfToExportFolder(sourcePath, copyDir, fileName) {
+  if (!copyDir) return "";
+  const targetPath = path.join(copyDir, fileName);
+  if (path.resolve(sourcePath).toLowerCase() === path.resolve(targetPath).toLowerCase()) return "";
+  await mkdir(copyDir, { recursive: true });
+  await copyFile(sourcePath, targetPath);
+  return targetPath;
 }
 
 function printableHtml(order, fileName) {

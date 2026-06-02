@@ -56,6 +56,7 @@ import { exportPdf } from "./server/export.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(root, "data");
+const defaultExportDir = path.join(root, "Exporte");
 const exportDir = readExportDir();
 const tempDir = path.join(root, "tmp");
 const legacyOrdersFile = path.join(dataDir, "orders.json");
@@ -92,6 +93,7 @@ const publicStaticFiles = new Set([
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 await mkdir(dataDir, { recursive: true });
+await mkdir(defaultExportDir, { recursive: true });
 await mkdir(exportDir, { recursive: true });
 await mkdir(tempDir, { recursive: true });
 
@@ -369,7 +371,7 @@ async function route(request, response) {
     const savedOrder = findOrder(exportMatch[1]);
     const order = normalizeOrder({ ...(savedOrder || {}), ...(body.order || {}) });
     order.id = exportMatch[1];
-    const result = await exportPdf(order, exportDir, tempDir, requestOrigin(request));
+    const result = await exportPdf(order, exportDir, tempDir, requestOrigin(request), defaultExportDir);
     const exportedAt = markOrderExported(order.id, result);
     sendJson(response, 200, { ok: true, exportedAt, ...result });
     return;
