@@ -1,6 +1,7 @@
 const STORAGE_KEY = "kommissionier-app-state-v1";
 const USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
+const WAREHOUSE_KEY = "hlogistik-warehouse-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
@@ -60,6 +61,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindElements();
   loadCurrentMode();
   loadCurrentUser();
+  applyWarehouseSelection();
   loadKnownOrderIds();
   clearCurrentOrder();
   loadState();
@@ -82,6 +84,7 @@ function bindElements() {
     "appTitle",
     "connectionBadge",
     "connectionText",
+    "warehouseSelect",
     "pickingModeButton",
     "storageModeButton",
     "storageAppLink",
@@ -169,6 +172,14 @@ function bindEvents() {
     event.preventDefault();
     setCurrentUser(elements.loginNameInput.value, elements.loginGroupInput.value);
   });
+  if (elements.warehouseSelect) {
+    elements.warehouseSelect.addEventListener("change", async () => {
+      saveCurrentWarehouse();
+      clearCurrentOrder();
+      render();
+      if (serverOnline) await loadOrderList();
+    });
+  }
   window.addEventListener("afterprint", cleanupPrintReport);
   elements.clearDoneButton.addEventListener("click", () => {
     state.collapseDone = !state.collapseDone;
@@ -229,6 +240,24 @@ function loadCurrentUser() {
   }
   currentUser.name = localStorage.getItem(USER_KEY) || "";
   currentUser.group = localStorage.getItem(USER_GROUP_KEY) || "";
+}
+
+function currentWarehouse() {
+  return normalizeWarehouse(localStorage.getItem(WAREHOUSE_KEY));
+}
+
+function saveCurrentWarehouse() {
+  if (!elements.warehouseSelect) return;
+  localStorage.setItem(WAREHOUSE_KEY, normalizeWarehouse(elements.warehouseSelect.value));
+}
+
+function applyWarehouseSelection() {
+  if (!elements.warehouseSelect) return;
+  elements.warehouseSelect.value = currentWarehouse();
+}
+
+function normalizeWarehouse(value) {
+  return String(value || "SSI").trim().toUpperCase() === "SI" ? "SI" : "SSI";
 }
 
 function setCurrentUser(value, groupValue) {
@@ -2572,11 +2601,13 @@ function saveStateWithoutServer() {
 
 async function apiJson(url, options = {}) {
   const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
+  const warehouse = currentWarehouse();
   const { headers: extraHeaders, ...rest } = options;
   const response = await fetch(`${API_BASE}${url}`, {
     headers: {
       "Content-Type": "application/json",
       "X-User-Group": userGroup,
+      "X-Warehouse": warehouse,
       ...extraHeaders,
     },
     ...rest,

@@ -7,9 +7,9 @@
     <title>Artikelstamm</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260529-5">
+    <link rel="stylesheet" href="styles.css?v=20260602-3">
     <script src="xlsx.full.min.js" defer></script>
-    <script src="artikel.js?v=20260601-4" defer></script>
+    <script src="artikel.js?v=20260602-6" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -22,6 +22,13 @@
           <span class="connection-dot" aria-hidden="true"></span>
           <span id="connectionText">Prüfe Verbindung</span>
         </div>
+        <label class="warehouse-picker">
+          Lager
+          <select id="warehouseSelect">
+            <option value="SSI">SSI</option>
+            <option value="SI">SI</option>
+          </select>
+        </label>
         <nav class="mode-nav" aria-label="Arbeitsbereich">
           <a class="mode-button" href="/">Kommissionierung</a>
           <a id="storageAppLink" class="mode-button" href="/lager.html">Einlagern</a>
@@ -124,6 +131,7 @@
             <div class="stacked-actions">
               <button class="primary-button" type="submit">Speichern</button>
               <button id="deactivateButton" class="danger-button" type="button">Deaktivieren</button>
+              <button id="permanentDeleteButton" class="danger-button danger-button-strong" type="button">Endgültig löschen</button>
             </div>
           </form>
         </aside>

@@ -1,12 +1,12 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { getDb } from "./db.mjs";
+import { getArticleDb, getDb } from "./db.mjs";
 import { createArticleId, readInteger, readBoolean, normalizeSearch, csvCell } from "./helpers.mjs";
 
 // ── Read / write ──────────────────────────────────────────────────────────────
 
-export async function readArticles() {
-  return getDb()
+export async function readArticles(warehouse = "SSI") {
+  return getArticleDb(warehouse)
     .prepare(
       `SELECT id, materialnummer, materialbezeichnung, gebinde_art, menge_pro_karton,
               menge_pro_palette, barcode, lagerplatz, artikelgruppe, bemerkung,
@@ -16,8 +16,8 @@ export async function readArticles() {
     .map(articleFromRow);
 }
 
-export function readArticlesSync() {
-  return getDb()
+export function readArticlesSync(warehouse = "SSI") {
+  return getArticleDb(warehouse)
     .prepare(
       `SELECT id, materialnummer, materialbezeichnung, gebinde_art, menge_pro_karton,
               menge_pro_palette, barcode, lagerplatz, artikelgruppe, bemerkung,
@@ -27,8 +27,8 @@ export function readArticlesSync() {
     .map(articleFromRow);
 }
 
-export async function writeArticles(articles) {
-  const db = getDb();
+export async function writeArticles(articles, warehouse = "SSI") {
+  const db = getArticleDb(warehouse);
   const insert = db.prepare(
     `INSERT INTO artikel (id, materialnummer, materialbezeichnung, gebinde_art, menge_pro_karton,
        menge_pro_palette, barcode, lagerplatz, artikelgruppe, bemerkung, aktiv, erstellt_am, geaendert_am)
@@ -62,8 +62,8 @@ export async function writeArticles(articles) {
   }
 }
 
-export async function findArticle(id) {
-  const row = getDb()
+export async function findArticle(id, warehouse = "SSI") {
+  const row = getArticleDb(warehouse)
     .prepare(
       `SELECT id, materialnummer, materialbezeichnung, gebinde_art, menge_pro_karton,
               menge_pro_palette, barcode, lagerplatz, artikelgruppe, bemerkung,
@@ -75,8 +75,8 @@ export async function findArticle(id) {
 
 // ── Import / export ───────────────────────────────────────────────────────────
 
-export async function importArticles(incoming) {
-  const articles = await readArticles();
+export async function importArticles(incoming, warehouse = "SSI") {
+  const articles = await readArticles(warehouse);
   const byMaterialnummer = new Map(articles.map((article, index) => [article.materialnummer, { article, index }]));
   let created = 0;
   let updated = 0;
@@ -111,18 +111,46 @@ export async function importArticles(incoming) {
     }
   });
 
-  if (created || updated) await writeArticles(sortArticles(articles));
+  if (created || updated) await writeArticles(sortArticles(articles), warehouse);
   return { created, updated, errors };
 }
 
-export async function migrateLegacyArticles(legacyArticlesFile) {
+export async function deleteArticle(id, warehouse = "SSI") {
+  const articles = await readArticles(warehouse);
+  const index = articles.findIndex((article) => article.id === id);
+  if (index < 0) return null;
+
+  const [deleted] = articles.splice(index, 1);
+  await writeArticles(articles, warehouse);
+  return deleted;
+}
+
+export async function migrateMainArticlesToWarehouse(warehouse = "SSI") {
+  const count = getArticleDb(warehouse).prepare("SELECT COUNT(*) AS count FROM artikel").get().count;
+  if (count > 0) return;
+
+  try {
+    const rows = getDb()
+      .prepare(
+        `SELECT id, materialnummer, materialbezeichnung, gebinde_art, menge_pro_karton,
+                menge_pro_palette, barcode, lagerplatz, artikelgruppe, bemerkung,
+                aktiv, erstellt_am, geaendert_am FROM artikel`
+      )
+      .all();
+    if (rows.length) await writeArticles(rows.map(articleFromRow), warehouse);
+  } catch {
+    // Legacy main database may not have a compatible article table; ignore it.
+  }
+}
+
+export async function migrateLegacyArticles(legacyArticlesFile, warehouse = "SSI") {
   if (!existsSync(legacyArticlesFile)) return;
-  const count = getDb().prepare("SELECT COUNT(*) AS count FROM artikel").get().count;
+  const count = getArticleDb(warehouse).prepare("SELECT COUNT(*) AS count FROM artikel").get().count;
   if (count > 0) return;
 
   try {
     const legacy = JSON.parse(await readFile(legacyArticlesFile, "utf8"));
-    if (Array.isArray(legacy) && legacy.length) await importArticles(legacy);
+    if (Array.isArray(legacy) && legacy.length) await importArticles(legacy, warehouse);
   } catch {
     // A broken legacy import file should not block the server start.
   }

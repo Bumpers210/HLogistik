@@ -2,6 +2,7 @@ const API_BASE = "";
 const SEARCH_DEBOUNCE_MS = 200;
 const USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
+const WAREHOUSE_KEY = "hlogistik-warehouse-v1";
 
 function storagePageLabel(group) {
   return group === "buero" ? "Buchung" : "Einlagern";
@@ -26,6 +27,7 @@ function bindElements() {
   [
     "connectionBadge",
     "connectionText",
+    "warehouseSelect",
     "currentUserName",
     "switchUserButton",
     "receiptTabButton",
@@ -69,6 +71,14 @@ function bindEvents() {
   elements.addIssueLineButton.addEventListener("click", () => addBookingLine("issue"));
   elements.receiptLinesBody.addEventListener("click", handleBookingLineAction);
   elements.issueLinesBody.addEventListener("click", handleBookingLineAction);
+  if (elements.warehouseSelect) {
+    elements.warehouseSelect.addEventListener("change", async () => {
+      saveCurrentWarehouse();
+      resetBookingLines("receipt");
+      resetBookingLines("issue");
+      if (serverOnline) await refreshStorageViews();
+    });
+  }
   elements.refreshLocationsButton.addEventListener("click", loadLocations);
   elements.refreshMovementsButton.addEventListener("click", loadMovements);
   elements.locationSearchInput.addEventListener("input", () => {
@@ -83,6 +93,7 @@ function bindEvents() {
 
 async function initialize() {
   if (!enforceStorageAccess()) return;
+  applyWarehouseSelection();
   try {
     setConnectionStatus(null);
     await apiJson("/api/health");
@@ -123,6 +134,24 @@ function switchUser() {
   localStorage.removeItem(USER_KEY);
   localStorage.removeItem(USER_GROUP_KEY);
   window.location.replace("/");
+}
+
+function currentWarehouse() {
+  return normalizeWarehouse(localStorage.getItem(WAREHOUSE_KEY));
+}
+
+function saveCurrentWarehouse() {
+  if (!elements.warehouseSelect) return;
+  localStorage.setItem(WAREHOUSE_KEY, normalizeWarehouse(elements.warehouseSelect.value));
+}
+
+function applyWarehouseSelection() {
+  if (!elements.warehouseSelect) return;
+  elements.warehouseSelect.value = currentWarehouse();
+}
+
+function normalizeWarehouse(value) {
+  return String(value || "SSI").trim().toUpperCase() === "SI" ? "SI" : "SSI";
 }
 
 function switchStorageTab(type) {
@@ -360,11 +389,13 @@ function findEmptyBookingLine(type) {
 
 async function apiJson(url, options = {}) {
   const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
+  const warehouse = currentWarehouse();
   const { headers: extraHeaders, ...rest } = options;
   const response = await fetch(`${API_BASE}${url}`, {
     headers: {
       "Content-Type": "application/json",
       "X-User-Group": userGroup,
+      "X-Warehouse": warehouse,
       ...extraHeaders,
     },
     ...rest,

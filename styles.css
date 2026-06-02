@@ -157,6 +157,32 @@ h2 {
   background: #c9a227;
 }
 
+.warehouse-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 3px 8px 3px 10px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.warehouse-picker select {
+  min-height: 26px;
+  padding: 0 24px 0 8px;
+  border: 1px solid #cfd9d3;
+  border-radius: 6px;
+  background: #f5f7f4;
+  color: var(--ink);
+  font: inherit;
+  text-transform: none;
+}
+
 .mode-nav {
   display: flex;
   gap: 4px;
@@ -237,6 +263,11 @@ h2 {
 .secondary-button,
 .danger-button {
   padding: 0 16px;
+}
+
+.danger-button-strong {
+  background: #8f1d1d;
+  color: #fff;
 }
 
 .link-button,
@@ -1034,6 +1065,10 @@ textarea[readonly] {
   .mode-nav {
     order: 2;
     width: 100%;
+  }
+
+  .warehouse-picker {
+    order: 1;
   }
 
   .mode-button {

@@ -2,6 +2,7 @@ const API_BASE = "";
 const ARTICLE_SEARCH_DEBOUNCE_MS = 200;
 const USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
+const WAREHOUSE_KEY = "hlogistik-warehouse-v1";
 
 const elements = {};
 let articles = [];
@@ -20,6 +21,7 @@ function bindElements() {
   [
     "connectionBadge",
     "connectionText",
+    "warehouseSelect",
     "storageAppLink",
     "currentUserName",
     "switchUserButton",
@@ -42,7 +44,8 @@ function bindElements() {
     "artikelgruppeInput",
     "bemerkungInput",
     "aktivInput",
-    "deactivateButton"
+    "deactivateButton",
+    "permanentDeleteButton"
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
   });
@@ -58,12 +61,24 @@ function bindEvents() {
   elements.csvInput.addEventListener("change", importArticleFile);
   elements.articleForm.addEventListener("submit", saveArticle);
   elements.deactivateButton.addEventListener("click", deactivateSelectedArticle);
+  elements.permanentDeleteButton.addEventListener("click", permanentlyDeleteSelectedArticle);
   elements.gebindeArtInput.addEventListener("change", updateKrtFieldVisibility);
   elements.switchUserButton.addEventListener("click", switchUser);
+  if (elements.warehouseSelect) {
+    elements.warehouseSelect.addEventListener("change", async () => {
+      saveCurrentWarehouse();
+      selectedArticleId = "";
+      selectArticle(null);
+      updateExportLink();
+      if (serverOnline) await loadArticles();
+    });
+  }
 }
 
 async function initialize() {
   if (!enforceArticleAccess()) return;
+  applyWarehouseSelection();
+  updateExportLink();
   selectArticle(null);
   try {
     setConnectionStatus(null);
@@ -126,6 +141,29 @@ async function loadArticles() {
   }
 }
 
+function currentWarehouse() {
+  return normalizeWarehouse(localStorage.getItem(WAREHOUSE_KEY));
+}
+
+function saveCurrentWarehouse() {
+  if (!elements.warehouseSelect) return;
+  localStorage.setItem(WAREHOUSE_KEY, normalizeWarehouse(elements.warehouseSelect.value));
+}
+
+function applyWarehouseSelection() {
+  if (!elements.warehouseSelect) return;
+  elements.warehouseSelect.value = currentWarehouse();
+}
+
+function updateExportLink() {
+  if (!elements.exportLink) return;
+  elements.exportLink.href = `/api/articles/export?warehouse=${encodeURIComponent(currentWarehouse())}`;
+}
+
+function normalizeWarehouse(value) {
+  return String(value || "SSI").trim().toUpperCase() === "SI" ? "SI" : "SSI";
+}
+
 function renderArticles() {
   elements.articleTableBody.innerHTML = "";
   elements.articleCount.textContent = `${articles.length} Artikel`;
@@ -177,6 +215,7 @@ function selectArticle(article) {
   elements.bemerkungInput.value = article?.bemerkung || "";
   elements.aktivInput.checked = article?.aktiv ?? true;
   elements.deactivateButton.hidden = !article || !article.aktiv;
+  elements.permanentDeleteButton.hidden = !article;
   updateKrtFieldVisibility();
   renderArticles();
 }
@@ -213,6 +252,39 @@ async function deactivateSelectedArticle() {
     selectArticle(result.article);
   } catch (error) {
     setStatus(`Deaktivieren fehlgeschlagen: ${error.message}`, "error");
+  }
+}
+
+async function permanentlyDeleteSelectedArticle() {
+  if (!selectedArticleId) return;
+  const article = articles.find((entry) => entry.id === selectedArticleId);
+  if (!article) return;
+
+  const warning = [
+    `Artikel ${article.materialnummer} endgültig löschen?`,
+    "",
+    "Dabei werden auch aktueller Lagerbestand und die Lagerhistorie zu dieser Materialnummer im gewählten Lager gelöscht.",
+    "Diese Aktion kann nicht rückgängig gemacht werden."
+  ].join("\n");
+  if (!confirm(warning)) return;
+
+  const password = prompt("Passwort für endgültiges Löschen eingeben:");
+  if (password === null) return;
+
+  try {
+    const result = await apiJson(`/api/articles/${encodeURIComponent(selectedArticleId)}/permanent`, {
+      method: "DELETE",
+      body: JSON.stringify({ password })
+    });
+    selectedArticleId = "";
+    setStatus(
+      `Artikel gelöscht. ${result.stockDeleted || 0} Bestandszeile(n), ${result.movementsDeleted || 0} Historienzeile(n) entfernt.`,
+      "ok"
+    );
+    await loadArticles();
+    selectArticle(null);
+  } catch (error) {
+    setStatus(`Löschen fehlgeschlagen: ${error.message}`, "error");
   }
 }
 
@@ -434,7 +506,10 @@ function stockSheetToImport(rows, fileName) {
   const materialnummer = findStockSheetMaterial(rows) || fileName.match(/\b\d{7}\b/)?.[0] || "";
   if (!materialnummer) return null;
 
-  const stockLines = findStockSheetLines(rows);
+  const stockLines = findCurrentStockSheetLines(rows, {
+    bestand: findStockSheetValue(rows, "bestande"),
+    paletten: findStockSheetValue(rows, "paletten")
+  });
   const quantities = stockLines.map((line) => line.quantity).filter((quantity) => quantity > 0);
   const bestand = findStockSheetValue(rows, "bestande") || sumNumbers(quantities) || findPositiveInteger(rows.flat(), materialnummer) || 1;
   const paletten = findStockSheetValue(rows, "paletten") || stockLines.length || 1;
@@ -457,7 +532,7 @@ function stockSheetToImport(rows, fileName) {
     bemerkung: [`Bestand: ${bestand}`, `Paletten: ${paletten}`, lineText, `Import: ${fileName}`].filter(Boolean).join(" | "),
     aktiv: true
   };
-  const receipts = stockLines.flatMap((line) => splitStockLineReceipts(line, materialnummer, fileName));
+  const receipts = stockLines.map((line) => stockLineReceipt(line, materialnummer, fileName));
   return { articles: [article], receipts };
 }
 
@@ -494,21 +569,37 @@ function findStockSheetValue(rows, key) {
   return 0;
 }
 
-function findStockSheetLines(rows) {
-  return rows
-    .map((row) => {
-      const pack = row.map(String).find((cell) => /^\s*\d+\s*x\s*\d+\s*$/i.test(cell.trim())) || "";
-      const parsedPack = parsePack(pack);
-      const quantity = parsedPack.quantity;
-      const location = findStoragePlace(row);
-      const le = row
-        .map(String)
-        .map((cell) => cell.trim())
-        .find((cell) => /^\d{8,10}$/.test(cell)) || "";
-      if (!quantity || !location || !le) return null;
-      return { pack: pack.replace(/\s+/g, ""), palletCount: parsedPack.count, quantity, location, le };
-    })
-    .filter(Boolean);
+function findCurrentStockSheetLines(rows, { bestand = 0, paletten = 0 } = {}) {
+  const currentLines = [];
+  let totalQuantity = 0;
+  let totalPallets = 0;
+
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const rowLines = stockSheetRowToLines(rows[index]);
+    if (!rowLines.length) continue;
+
+    currentLines.unshift(...rowLines);
+    totalQuantity += sumNumbers(rowLines.map((line) => line.quantity));
+    totalPallets += rowLines.length;
+
+    if (bestand > 0 && totalQuantity >= bestand && (!paletten || totalPallets >= paletten)) break;
+    if (!bestand && paletten > 0 && totalPallets >= paletten) break;
+  }
+
+  return currentLines;
+}
+
+function stockSheetRowToLines(row) {
+  const pack = row.map(String).find((cell) => /^\s*\d+\s*x\s*\d+\s*$/i.test(cell.trim())) || "";
+  const parsedPack = parsePack(pack);
+  const locations = findStoragePlaces(row);
+  if (!parsedPack.quantity || !locations.length) return [];
+
+  return locations.map((location) => ({
+    pack: pack.replace(/\s+/g, ""),
+    quantity: parsedPack.quantity,
+    location
+  }));
 }
 
 function parsePack(value) {
@@ -516,25 +607,22 @@ function parsePack(value) {
   return match ? { count: parsePositiveInteger(match[1]) || 1, quantity: parsePositiveInteger(match[2]) } : { count: 1, quantity: 0 };
 }
 
-function splitStockLineReceipts(line, materialnummer, fileName) {
-  const palletCount = Math.max(1, line.palletCount || 1);
-  const quantities = distributeQuantity(line.quantity, palletCount);
-  return quantities.map((mengeStueck, index) => ({
+function stockLineReceipt(line, materialnummer, fileName) {
+  return {
     materialnummer,
     lagerplatz: line.location,
-    leNummer: palletCount > 1 ? `${line.le}/${index + 1}` : line.le,
-    originalLe: line.le,
-    mengeStueck,
+    leNummer: excelStockLeNumber(materialnummer, line.location),
+    mengeStueck: line.quantity,
     referenz: `Excel-Import ${fileName}`
-  }));
+  };
 }
 
-function distributeQuantity(quantity, count) {
-  const total = Number(quantity) || 0;
-  const safeCount = Math.max(1, Number(count) || 1);
-  const base = Math.floor(total / safeCount);
-  const remainder = total % safeCount;
-  return Array.from({ length: safeCount }, (_unused, index) => base + (index < remainder ? 1 : 0)).filter((amount) => amount > 0);
+function excelStockLeNumber(materialnummer, location) {
+  return `EXCEL-${materialnummer}-${String(location || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")}`;
 }
 
 function mostFrequentNumber(values) {
@@ -676,7 +764,11 @@ function findPositiveInteger(row, materialnummer) {
 }
 
 function findStoragePlace(row) {
-  return row.map(String).find((cell) => normalizeStoragePlace(cell)) || "";
+  return row.map(String).map(normalizeStoragePlace).find(Boolean) || "";
+}
+
+function findStoragePlaces(row) {
+  return row.map(String).map(normalizeStoragePlace).filter(Boolean);
 }
 
 function normalizeStoragePlace(value) {
@@ -685,7 +777,51 @@ function normalizeStoragePlace(value) {
     .toUpperCase()
     .replace(/[-_/]+/g, " ")
     .replace(/\s+/g, " ");
-  return /^[A-Z]{1,3}\s+\d{1,3}\s+[A-Z]\s+\d{1,3}$/.test(normalized) ? normalized : "";
+  if (!normalized) return "";
+  const existingCanonical = normalized.match(/^002\s+(H[1347])\s+S\s*(.+)$/);
+  if (existingCanonical) {
+    const suffix = formatStoragePlaceSuffix(existingCanonical[2].split(" "));
+    if (!/[A-Z]/.test(suffix)) return "";
+    return suffix ? `002-${existingCanonical[1]}-S${suffix}` : "";
+  }
+  return canonicalStoragePlace(normalized.split(" ").filter(Boolean));
+}
+
+function canonicalStoragePlace(tokens) {
+  const cleanTokens = tokens.map(formatStoragePlaceToken).filter(Boolean);
+  if (!isStoragePlaceShape(cleanTokens)) return "";
+
+  const area = cleanTokens[0];
+  const hall = storageHallForArea(area);
+  if (!hall) return "";
+
+  const suffix = formatStoragePlaceSuffix(cleanTokens);
+  return suffix ? `002-${hall}-S${suffix}` : "";
+}
+
+function isStoragePlaceShape(tokens) {
+  if (tokens.length < 3) return false;
+  const [area, second, third] = tokens;
+  if (/^\d{1,3}$/.test(area)) return /^[A-Z]$/.test(second) && /^\d{1,3}$/.test(third);
+  if (/^[A-Z]$/.test(area) || /^A[N-T]$/.test(area)) return tokens.slice(1).every((token) => /^\d{1,3}$/.test(token));
+  return false;
+}
+
+function storageHallForArea(area) {
+  const numericArea = parsePositiveInteger(area);
+  if (numericArea >= 1 && numericArea <= 69) return "H7";
+  if (/^[A-Z]$/.test(area) && area >= "A" && area <= "N") return "H4";
+  if (/^[A-Z]$/.test(area) && area >= "O" && area <= "Z") return "H3";
+  if (/^A[N-T]$/.test(area)) return "H1";
+  return "";
+}
+
+function formatStoragePlaceToken(token) {
+  return String(token || "").trim().toUpperCase();
+}
+
+function formatStoragePlaceSuffix(tokens) {
+  return tokens.map(formatStoragePlaceToken).filter(Boolean).join("");
 }
 
 function detectMovementText(row, columns) {
@@ -827,11 +963,13 @@ function updateKrtFieldVisibility() {
 
 async function apiJson(url, options = {}) {
   const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
+  const warehouse = currentWarehouse();
   const { headers: extraHeaders, ...rest } = options;
   const response = await fetch(`${API_BASE}${url}`, {
     headers: {
       "Content-Type": "application/json",
       "X-User-Group": userGroup,
+      "X-Warehouse": warehouse,
       ...extraHeaders,
     },
     ...rest,

@@ -137,6 +137,11 @@ export function readBoolean(value, fallback = false) {
   return true;
 }
 
+export function normalizeWarehouse(value) {
+  const text = String(value || "SSI").trim().toUpperCase();
+  return text === "SI" ? "SI" : "SSI";
+}
+
 export function normalizeSearch(value) {
   return String(value || "")
     .toLowerCase()

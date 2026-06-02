@@ -1,22 +1,24 @@
 import { getDb } from "./db.mjs";
-import { createStorageId, createStorageMovementId, readInteger, normalizeSearch, httpError, withLineContext } from "./helpers.mjs";
+import { createStorageId, createStorageMovementId, readInteger, normalizeSearch, normalizeWarehouse, httpError, withLineContext } from "./helpers.mjs";
 import { readArticlesSync, findArticleByCode } from "./articles.mjs";
 
 // ── Locations ─────────────────────────────────────────────────────────────────
 
-export function readStorageLocations({ query = "", materialnummer = "" } = {}) {
+export function readStorageLocations({ query = "", materialnummer = "", warehouse = "SSI" } = {}) {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const articles = readArticlesSync(normalizedWarehouse);
+  const articleNames = new Map(articles.map((article) => [article.materialnummer, article.materialbezeichnung]));
   const rows = getDb()
     .prepare(
-      `SELECT lagerbestand.id, lagerbestand.materialnummer, artikel.materialbezeichnung,
+      `SELECT lagerbestand.id, lagerbestand.lager, lagerbestand.materialnummer,
               lagerbestand.lagerplatz, lagerbestand.le_nummer, lagerbestand.menge_stueck,
               lagerbestand.aktualisiert_am
        FROM lagerbestand
-       LEFT JOIN artikel ON artikel.id = lagerbestand.artikel_id
-       WHERE lagerbestand.menge_stueck > 0
+       WHERE lagerbestand.lager = ? AND lagerbestand.menge_stueck > 0
        ORDER BY lagerbestand.lagerplatz COLLATE NOCASE, lagerbestand.materialnummer COLLATE NOCASE, lagerbestand.le_nummer COLLATE NOCASE`
     )
-    .all()
-    .map(storageLocationFromRow);
+    .all(normalizedWarehouse)
+    .map((row) => storageLocationFromRow(row, articleNames));
 
   const materialFilter = String(materialnummer || "").trim().toLowerCase();
   const terms = normalizeSearch(query).split(" ").filter(Boolean);
@@ -31,20 +33,23 @@ export function readStorageLocations({ query = "", materialnummer = "" } = {}) {
 
 // ── Movements ─────────────────────────────────────────────────────────────────
 
-export function readStorageMovements({ query = "", limit = 100 } = {}) {
+export function readStorageMovements({ query = "", limit = 100, warehouse = "SSI" } = {}) {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const articles = readArticlesSync(normalizedWarehouse);
+  const articleNames = new Map(articles.map((article) => [article.materialnummer, article.materialbezeichnung]));
   const safeLimit = Math.min(Math.max(Number.isInteger(limit) && limit > 0 ? limit : 100, 1), 500);
   const rows = getDb()
     .prepare(
-      `SELECT lagerbewegung.id, lagerbewegung.materialnummer, artikel.materialbezeichnung,
+      `SELECT lagerbewegung.id, lagerbewegung.lager, lagerbewegung.materialnummer,
               lagerbewegung.bewegungsart, lagerbewegung.menge_stueck, lagerbewegung.lagerplatz,
               lagerbewegung.le_nummer, lagerbewegung.referenz, lagerbewegung.erstellt_am
        FROM lagerbewegung
-       LEFT JOIN artikel ON artikel.id = lagerbewegung.artikel_id
+       WHERE lagerbewegung.lager = ?
        ORDER BY lagerbewegung.erstellt_am DESC
        LIMIT ?`
     )
-    .all(safeLimit)
-    .map(storageMovementFromRow);
+    .all(normalizedWarehouse, safeLimit)
+    .map((row) => storageMovementFromRow(row, articleNames));
 
   const terms = normalizeSearch(query).split(" ").filter(Boolean);
   if (!terms.length) return rows;
@@ -58,16 +63,17 @@ export function readStorageMovements({ query = "", limit = 100 } = {}) {
 
 // ── Receipts ──────────────────────────────────────────────────────────────────
 
-export function bookStorageReceipt(receipt) {
-  const result = bookStorageReceipts([receipt]);
+export function bookStorageReceipt(receipt, warehouse = "SSI") {
+  const result = bookStorageReceipts([receipt], warehouse);
   return { movement: result.movements[0], location: result.locations[0] };
 }
 
-export function bookStorageReceipts(receipts) {
+export function bookStorageReceipts(receipts, warehouse = "SSI") {
   if (!Array.isArray(receipts) || !receipts.length)
     throw httpError(400, "Mindestens eine Buchungszeile ist erforderlich");
 
-  const articles = readArticlesSync();
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const articles = readArticlesSync(normalizedWarehouse);
   const db = getDb();
   const results = [];
 
@@ -78,7 +84,7 @@ export function bookStorageReceipts(receipts) {
         const normalized = normalizeStorageReceipt(receipt);
         const article = findArticleByCode(articles, normalized.materialnummer);
         if (!article) throw httpError(400, "Artikelnummer ist nicht im Artikelstamm vorhanden");
-        results.push(applyStorageReceipt(normalized, article, new Date().toISOString()));
+        results.push(applyStorageReceipt(normalized, article, new Date().toISOString(), normalizedWarehouse));
       } catch (error) {
         throw withLineContext(error, index);
       }
@@ -95,14 +101,14 @@ export function bookStorageReceipts(receipts) {
   };
 }
 
-function applyStorageReceipt(normalized, article, now) {
+function applyStorageReceipt(normalized, article, now, warehouse) {
   const db = getDb();
   const existing = db
     .prepare(
       `SELECT id, menge_stueck FROM lagerbestand
-       WHERE materialnummer = ? AND lagerplatz = ? AND le_nummer = ?`
+       WHERE lager = ? AND materialnummer = ? AND lagerplatz = ? AND le_nummer = ?`
     )
-    .get(article.materialnummer, normalized.lagerplatz, normalized.leNummer);
+    .get(warehouse, article.materialnummer, normalized.lagerplatz, normalized.leNummer);
 
   const bestandId = existing?.id || createStorageId();
   const bewegungId = createStorageMovementId();
@@ -115,16 +121,17 @@ function applyStorageReceipt(normalized, article, now) {
     );
   } else {
     db.prepare(
-      `INSERT INTO lagerbestand (id, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, aktualisiert_am)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(bestandId, article.id, article.materialnummer, normalized.lagerplatz, normalized.leNummer, normalized.mengeStueck, now);
+      `INSERT INTO lagerbestand (id, lager, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, aktualisiert_am)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(bestandId, warehouse, article.id, article.materialnummer, normalized.lagerplatz, normalized.leNummer, normalized.mengeStueck, now);
   }
 
   db.prepare(
-    `INSERT INTO lagerbewegung (id, artikel_id, materialnummer, bewegungsart, menge_stueck, lagerplatz, le_nummer, referenz, erstellt_am)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO lagerbewegung (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, lagerplatz, le_nummer, referenz, erstellt_am)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     bewegungId,
+    warehouse,
     article.id,
     article.materialnummer,
     "Wareneingang",
@@ -137,15 +144,16 @@ function applyStorageReceipt(normalized, article, now) {
 
   const location = db
     .prepare(
-      `SELECT lagerbestand.id, lagerbestand.materialnummer, artikel.materialbezeichnung,
+      `SELECT lagerbestand.id, lagerbestand.lager, lagerbestand.materialnummer,
               lagerbestand.lagerplatz, lagerbestand.le_nummer, lagerbestand.menge_stueck, lagerbestand.aktualisiert_am
-       FROM lagerbestand LEFT JOIN artikel ON artikel.id = lagerbestand.artikel_id WHERE lagerbestand.id = ?`
+       FROM lagerbestand WHERE lagerbestand.id = ?`
     )
     .get(bestandId);
 
   return {
     movement: {
       id: bewegungId,
+      lager: warehouse,
       bewegungsart: "Wareneingang",
       materialnummer: article.materialnummer,
       mengeStueck: normalized.mengeStueck,
@@ -154,22 +162,23 @@ function applyStorageReceipt(normalized, article, now) {
       referenz: normalized.referenz,
       erstelltAm: now,
     },
-    location: storageLocationFromRow(location),
+    location: storageLocationFromRow(location, new Map([[article.materialnummer, article.materialbezeichnung]])),
   };
 }
 
 // ── Issues ────────────────────────────────────────────────────────────────────
 
-export function bookStorageIssue(issue) {
-  const result = bookStorageIssues([issue]);
+export function bookStorageIssue(issue, warehouse = "SSI") {
+  const result = bookStorageIssues([issue], warehouse);
   return { movement: result.movements[0], location: result.locations[0] };
 }
 
-export function bookStorageIssues(issues) {
+export function bookStorageIssues(issues, warehouse = "SSI") {
   if (!Array.isArray(issues) || !issues.length)
     throw httpError(400, "Mindestens eine Buchungszeile ist erforderlich");
 
-  const articles = readArticlesSync();
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const articles = readArticlesSync(normalizedWarehouse);
   const db = getDb();
   const results = [];
 
@@ -180,7 +189,7 @@ export function bookStorageIssues(issues) {
         const normalized = normalizeStorageIssue(issue);
         const article = findArticleByCode(articles, normalized.materialnummer);
         if (!article) throw httpError(400, "Artikelnummer oder Barcode ist nicht im Artikelstamm vorhanden");
-        results.push(applyStorageIssue(normalized, article, new Date().toISOString()));
+        results.push(applyStorageIssue(normalized, article, new Date().toISOString(), normalizedWarehouse));
       } catch (error) {
         throw withLineContext(error, index);
       }
@@ -197,14 +206,36 @@ export function bookStorageIssues(issues) {
   };
 }
 
-function applyStorageIssue(normalized, article, now) {
+export function deleteStorageForMaterial(materialnummer, warehouse = "SSI") {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const material = String(materialnummer || "").trim();
+  if (!material) return { stockDeleted: 0, movementsDeleted: 0 };
+
+  const db = getDb();
+  db.exec("BEGIN");
+  try {
+    const stockDeleted = db
+      .prepare("DELETE FROM lagerbestand WHERE lager = ? AND materialnummer = ?")
+      .run(normalizedWarehouse, material).changes;
+    const movementsDeleted = db
+      .prepare("DELETE FROM lagerbewegung WHERE lager = ? AND materialnummer = ?")
+      .run(normalizedWarehouse, material).changes;
+    db.exec("COMMIT");
+    return { stockDeleted, movementsDeleted };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function applyStorageIssue(normalized, article, now, warehouse) {
   const db = getDb();
   const existing = db
     .prepare(
       `SELECT id, menge_stueck FROM lagerbestand
-       WHERE materialnummer = ? AND lagerplatz = ? AND le_nummer = ?`
+       WHERE lager = ? AND materialnummer = ? AND lagerplatz = ? AND le_nummer = ?`
     )
-    .get(article.materialnummer, normalized.lagerplatz, normalized.leNummer);
+    .get(warehouse, article.materialnummer, normalized.lagerplatz, normalized.leNummer);
 
   if (!existing) throw httpError(400, "Kein Bestand für diese Kombination aus Artikel, Lagerplatz und LE/HU vorhanden");
   if (Number(existing.menge_stueck) < normalized.mengeStueck) {
@@ -221,10 +252,11 @@ function applyStorageIssue(normalized, article, now) {
   );
 
   db.prepare(
-    `INSERT INTO lagerbewegung (id, artikel_id, materialnummer, bewegungsart, menge_stueck, lagerplatz, le_nummer, referenz, erstellt_am)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO lagerbewegung (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, lagerplatz, le_nummer, referenz, erstellt_am)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     bewegungId,
+    warehouse,
     article.id,
     article.materialnummer,
     "Warenausgang",
@@ -237,15 +269,16 @@ function applyStorageIssue(normalized, article, now) {
 
   const location = db
     .prepare(
-      `SELECT lagerbestand.id, lagerbestand.materialnummer, artikel.materialbezeichnung,
+      `SELECT lagerbestand.id, lagerbestand.lager, lagerbestand.materialnummer,
               lagerbestand.lagerplatz, lagerbestand.le_nummer, lagerbestand.menge_stueck, lagerbestand.aktualisiert_am
-       FROM lagerbestand LEFT JOIN artikel ON artikel.id = lagerbestand.artikel_id WHERE lagerbestand.id = ?`
+       FROM lagerbestand WHERE lagerbestand.id = ?`
     )
     .get(existing.id);
 
   return {
     movement: {
       id: bewegungId,
+      lager: warehouse,
       bewegungsart: "Warenausgang",
       materialnummer: article.materialnummer,
       mengeStueck: normalized.mengeStueck,
@@ -254,7 +287,7 @@ function applyStorageIssue(normalized, article, now) {
       referenz: normalized.referenz,
       erstelltAm: now,
     },
-    location: storageLocationFromRow(location),
+    location: storageLocationFromRow(location, new Map([[article.materialnummer, article.materialbezeichnung]])),
   };
 }
 
@@ -296,11 +329,12 @@ function normalizeStorageIssue(issue) {
 
 // ── Row mapping ───────────────────────────────────────────────────────────────
 
-function storageLocationFromRow(row) {
+function storageLocationFromRow(row, articleNames = new Map()) {
   return {
     id: String(row.id || ""),
+    lager: normalizeWarehouse(row.lager),
     materialnummer: String(row.materialnummer || ""),
-    materialbezeichnung: String(row.materialbezeichnung || ""),
+    materialbezeichnung: String(row.materialbezeichnung || articleNames.get(String(row.materialnummer || "")) || ""),
     lagerplatz: String(row.lagerplatz || ""),
     leNummer: String(row.le_nummer || ""),
     mengeStueck: Number(row.menge_stueck || 0),
@@ -308,11 +342,12 @@ function storageLocationFromRow(row) {
   };
 }
 
-function storageMovementFromRow(row) {
+function storageMovementFromRow(row, articleNames = new Map()) {
   return {
     id: String(row.id || ""),
+    lager: normalizeWarehouse(row.lager),
     materialnummer: String(row.materialnummer || ""),
-    materialbezeichnung: String(row.materialbezeichnung || ""),
+    materialbezeichnung: String(row.materialbezeichnung || articleNames.get(String(row.materialnummer || "")) || ""),
     bewegungsart: String(row.bewegungsart || ""),
     mengeStueck: Number(row.menge_stueck || 0),
     lagerplatz: String(row.lagerplatz || ""),

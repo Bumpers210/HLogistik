@@ -7,8 +7,8 @@
     <title>Buchung</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260531-2">
-    <script src="lager.js?v=20260531-3" defer></script>
+    <link rel="stylesheet" href="styles.css?v=20260602-2">
+    <script src="lager.js?v=20260602-4" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -21,6 +21,13 @@
           <span class="connection-dot" aria-hidden="true"></span>
           <span id="connectionText">Prüfe Verbindung</span>
         </div>
+        <label class="warehouse-picker">
+          Lager
+          <select id="warehouseSelect">
+            <option value="SSI">SSI</option>
+            <option value="SI">SI</option>
+          </select>
+        </label>
         <nav class="mode-nav" aria-label="Arbeitsbereich">
           <a class="mode-button" href="/">Kommissionierung</a>
           <span id="storageNavLabel" class="mode-button is-active">Buchung</span>

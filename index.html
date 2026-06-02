@@ -11,11 +11,11 @@
     <title>Kommissionier-App</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260602-1">
+    <link rel="stylesheet" href="styles.css?v=20260602-2">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
     <script src="offline-store.js" defer></script>
-    <script src="app.js?v=20260602-13" defer></script>
+    <script src="app.js?v=20260602-14" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -28,6 +28,13 @@
           <span class="connection-dot" aria-hidden="true"></span>
           <span id="connectionText">Prüfe Verbindung</span>
         </div>
+        <label class="warehouse-picker">
+          Lager
+          <select id="warehouseSelect">
+            <option value="SSI">SSI</option>
+            <option value="SI">SI</option>
+          </select>
+        </label>
         <nav class="mode-nav" aria-label="Arbeitsbereich">
           <button id="pickingModeButton" class="mode-button is-active" type="button">Kommissionierung</button>
           <button id="storageModeButton" class="mode-button" type="button">Einlagerung</button>

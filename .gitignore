@@ -1,7 +1,9 @@
 data/orders.json
 data/articles.json
 data/logistik.sqlite*
+data/artikel-*.sqlite*
 Exporte/
+Backups/
 tmp/
 node_modules/
 *.log

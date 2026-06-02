@@ -5,7 +5,7 @@ import { hostname, networkInterfaces } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { configure as configureDb, initializeDatabase } from "./server/db.mjs";
+import { configure as configureDb, configureArticleDatabases, initializeArticleDatabases, initializeDatabase } from "./server/db.mjs";
 import {
   sendJson,
   sendText,
@@ -14,6 +14,7 @@ import {
   readBody,
   safeResolve,
   readInteger,
+  normalizeWarehouse,
   httpError,
   createId,
   createArticleId,
@@ -23,11 +24,13 @@ import {
   writeArticles,
   findArticle,
   importArticles,
+  migrateMainArticlesToWarehouse,
   migrateLegacyArticles,
   searchArticles,
   findArticleByCode,
   normalizeArticle,
   validateArticle,
+  deleteArticle,
   articleSummary,
   articlesToCsv,
   calculatePackaging,
@@ -39,6 +42,7 @@ import {
   bookStorageReceipts,
   bookStorageIssue,
   bookStorageIssues,
+  deleteStorageForMaterial,
 } from "./server/storage.mjs";
 import {
   readOrders,
@@ -65,6 +69,7 @@ const databaseFile = path.join(dataDir, "logistik.sqlite");
 const port = Number(globalThis.process?.env?.PORT || 4174);
 const localHostname = readLocalHostname();
 const maxBodyBytes = 2 * 1024 * 1024;
+const articleDeletePassword = String(globalThis.process?.env?.ARTICLE_DELETE_PASSWORD || "HLogistik2026!");
 
 const publicStaticFiles = new Set([
   "/",
@@ -99,7 +104,10 @@ await mkdir(tempDir, { recursive: true });
 
 configureDb(databaseFile);
 initializeDatabase();
-await migrateLegacyArticles(legacyArticlesFile);
+configureArticleDatabases(dataDir);
+initializeArticleDatabases();
+await migrateMainArticlesToWarehouse("SSI");
+await migrateLegacyArticles(legacyArticlesFile, "SSI");
 await migrateOrdersFromJson(legacyOrdersFile);
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
@@ -130,11 +138,12 @@ server.listen(port, "0.0.0.0", () => {
 async function route(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
   const pathname = decodeURIComponent(url.pathname);
+  const warehouse = requestWarehouse(request, url);
   enforceSameOriginMutation(request);
 
   // Health
   if (pathname === "/api/health") {
-    sendJson(response, 200, { ok: true, host: hostname(), localHostname: localHostname || null, port, exportDir });
+    sendJson(response, 200, { ok: true, host: hostname(), localHostname: localHostname || null, port, exportDir, warehouse, warehouses: ["SSI", "SI"] });
     return;
   }
 
@@ -142,7 +151,7 @@ async function route(request, response) {
   if (pathname === "/api/storage/locations" && request.method === "GET") {
     const query = url.searchParams.get("q") || "";
     const materialnummer = url.searchParams.get("materialnummer") || "";
-    sendJson(response, 200, readStorageLocations({ query, materialnummer }));
+    sendJson(response, 200, readStorageLocations({ query, materialnummer, warehouse }));
     return;
   }
 
@@ -150,7 +159,7 @@ async function route(request, response) {
   if (pathname === "/api/storage/movements" && request.method === "GET") {
     const query = url.searchParams.get("q") || "";
     const limit = readInteger(url.searchParams.get("limit") || 100);
-    sendJson(response, 200, readStorageMovements({ query, limit }));
+    sendJson(response, 200, readStorageMovements({ query, limit, warehouse }));
     return;
   }
 
@@ -159,10 +168,10 @@ async function route(request, response) {
     requireGroup(request, ["buero", "tablet", "verwaltung"]);
     const body = await readBody(request, maxBodyBytes);
     if (Array.isArray(body.receipts)) {
-      sendJson(response, 200, { ok: true, ...bookStorageReceipts(body.receipts) });
+      sendJson(response, 200, { ok: true, ...bookStorageReceipts(body.receipts, warehouse) });
       return;
     }
-    sendJson(response, 200, { ok: true, ...bookStorageReceipt(body.receipt || body) });
+    sendJson(response, 200, { ok: true, ...bookStorageReceipt(body.receipt || body, warehouse) });
     return;
   }
 
@@ -171,16 +180,16 @@ async function route(request, response) {
     requireGroup(request, ["buero", "tablet", "verwaltung"]);
     const body = await readBody(request, maxBodyBytes);
     if (Array.isArray(body.issues)) {
-      sendJson(response, 200, { ok: true, ...bookStorageIssues(body.issues) });
+      sendJson(response, 200, { ok: true, ...bookStorageIssues(body.issues, warehouse) });
       return;
     }
-    sendJson(response, 200, { ok: true, ...bookStorageIssue(body.issue || body) });
+    sendJson(response, 200, { ok: true, ...bookStorageIssue(body.issue || body, warehouse) });
     return;
   }
 
   // Articles — list
   if (pathname === "/api/articles" && request.method === "GET") {
-    const articles = await readArticles();
+    const articles = await readArticles(warehouse);
     const query = url.searchParams.get("q") || "";
     const includeInactive = url.searchParams.get("includeInactive") === "1";
     sendJson(response, 200, searchArticles(articles, query, includeInactive).map(articleSummary));
@@ -191,7 +200,7 @@ async function route(request, response) {
   if (pathname === "/api/articles" && request.method === "POST") {
     requireGroup(request, ["buero", "verwaltung"]);
     const body = await readBody(request, maxBodyBytes);
-    const articles = await readArticles();
+    const articles = await readArticles(warehouse);
     const article = normalizeArticle(body.article || body);
     validateArticle(article);
     article.id = article.id || createArticleId();
@@ -202,7 +211,7 @@ async function route(request, response) {
       return;
     }
     articles.push(article);
-    await writeArticles(articles);
+    await writeArticles(articles, warehouse);
     sendJson(response, 200, { ok: true, article });
     return;
   }
@@ -212,21 +221,21 @@ async function route(request, response) {
     requireGroup(request, ["buero", "verwaltung"]);
     const body = await readBody(request, maxBodyBytes);
     const incoming = Array.isArray(body.articles) ? body.articles : [];
-    sendJson(response, 200, { ok: true, ...(await importArticles(incoming)) });
+    sendJson(response, 200, { ok: true, ...(await importArticles(incoming, warehouse)) });
     return;
   }
 
   // Articles — export CSV
   if (pathname === "/api/articles/export" && request.method === "GET") {
-    const articles = await readArticles();
-    sendCsv(response, 200, "artikelstamm.csv", articlesToCsv(articles));
+    const articles = await readArticles(warehouse);
+    sendCsv(response, 200, `artikelstamm-${warehouse}.csv`, articlesToCsv(articles));
     return;
   }
 
   // Articles — lookup by code
   const articleLookupMatch = pathname.match(/^\/api\/articles\/lookup\/([^/]+)$/);
   if (articleLookupMatch && request.method === "GET") {
-    const article = findArticleByCode(await readArticles(), articleLookupMatch[1]);
+    const article = findArticleByCode(await readArticles(warehouse), articleLookupMatch[1]);
     if (!article) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
     sendJson(response, 200, article);
     return;
@@ -235,7 +244,7 @@ async function route(request, response) {
   // Articles — calculate packaging
   if (pathname === "/api/articles/calculate-package" && request.method === "POST") {
     const body = await readBody(request, maxBodyBytes);
-    const article = findArticleByCode(await readArticles(), body.materialnummer || body.barcode || body.code);
+    const article = findArticleByCode(await readArticles(warehouse), body.materialnummer || body.barcode || body.code);
     if (!article) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
     sendJson(response, 200, {
       ok: true,
@@ -248,7 +257,7 @@ async function route(request, response) {
   // Articles — single get / update / delete
   const articleMatch = pathname.match(/^\/api\/articles\/([^/]+)$/);
   if (articleMatch && request.method === "GET") {
-    const article = await findArticle(articleMatch[1]);
+    const article = await findArticle(articleMatch[1], warehouse);
     if (!article) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
     sendJson(response, 200, article);
     return;
@@ -257,7 +266,7 @@ async function route(request, response) {
   if (articleMatch && request.method === "PUT") {
     requireGroup(request, ["buero", "verwaltung"]);
     const body = await readBody(request, maxBodyBytes);
-    const articles = await readArticles();
+    const articles = await readArticles(warehouse);
     const index = articles.findIndex((a) => a.id === articleMatch[1]);
     if (index < 0) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
     const article = normalizeArticle({ ...articles[index], ...(body.article || body), id: articleMatch[1] });
@@ -269,18 +278,32 @@ async function route(request, response) {
     article.erstelltAm = articles[index].erstelltAm || article.erstelltAm || new Date().toISOString();
     article.geaendertAm = new Date().toISOString();
     articles[index] = article;
-    await writeArticles(articles);
+    await writeArticles(articles, warehouse);
     sendJson(response, 200, { ok: true, article });
+    return;
+  }
+
+  const articlePermanentDeleteMatch = pathname.match(/^\/api\/articles\/([^/]+)\/permanent$/);
+  if (articlePermanentDeleteMatch && request.method === "DELETE") {
+    requireGroup(request, ["buero", "verwaltung"]);
+    const body = await readBody(request, maxBodyBytes);
+    requireArticleDeletePassword(body.password);
+    const article = await findArticle(articlePermanentDeleteMatch[1], warehouse);
+    if (!article) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
+
+    const storageDeleted = deleteStorageForMaterial(article.materialnummer, warehouse);
+    const deletedArticle = await deleteArticle(article.id, warehouse);
+    sendJson(response, 200, { ok: true, article: deletedArticle, ...storageDeleted });
     return;
   }
 
   if (articleMatch && request.method === "DELETE") {
     requireGroup(request, ["buero", "verwaltung"]);
-    const articles = await readArticles();
+    const articles = await readArticles(warehouse);
     const index = articles.findIndex((a) => a.id === articleMatch[1]);
     if (index < 0) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
     articles[index] = normalizeArticle({ ...articles[index], aktiv: false, geaendertAm: new Date().toISOString() });
-    await writeArticles(articles);
+    await writeArticles(articles, warehouse);
     sendJson(response, 200, { ok: true, article: articles[index] });
     return;
   }
@@ -471,6 +494,10 @@ function preserveClosedOrderStatus(order, existing) {
   }
 }
 
+function requestWarehouse(request, url) {
+  return normalizeWarehouse(request.headers["x-warehouse"] || url.searchParams.get("warehouse") || url.searchParams.get("lager"));
+}
+
 function orderFingerprint(text) {
   return String(text || "")
     .toLowerCase()
@@ -503,6 +530,12 @@ function requireGroup(request, allowedGroups) {
   const group = String(request.headers["x-user-group"] || "").trim().toLowerCase();
   if (!allowedGroups.includes(group)) {
     throw httpError(403, "Keine Berechtigung für diese Aktion");
+  }
+}
+
+function requireArticleDeletePassword(password) {
+  if (String(password || "") !== articleDeletePassword) {
+    throw httpError(403, "Passwort ist falsch");
   }
 }
 
