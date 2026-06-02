@@ -633,6 +633,11 @@ textarea[readonly] {
   padding: 12px;
 }
 
+.order-completion {
+  margin-top: 12px;
+  box-shadow: none;
+}
+
 .section-heading {
   display: flex;
   align-items: center;

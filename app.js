@@ -20,6 +20,7 @@ const state = {
   orderNumber: "",
   customerName: "",
   orderDate: new Date().toISOString().slice(0, 10),
+  orderTime: "",
   euroPallets: "",
   storageSpaces: "",
   orderNote: "",
@@ -35,6 +36,7 @@ const state = {
   exportedPdfFile: "",
   exportedPdfPath: "",
   orderType: "picking",
+  awaitingRelease: false,
   lines: []
 };
 
@@ -66,9 +68,9 @@ document.addEventListener("DOMContentLoaded", () => {
   registerServiceWorker();
   updateCurrentUserUi();
   render();
+  showLoginIfNeeded();
   initializeServer();
   startConnectionMonitor();
-  showLoginIfNeeded();
 });
 
 function bindElements() {
@@ -87,6 +89,7 @@ function bindElements() {
     "orderNumber",
     "customerName",
     "orderDate",
+    "orderTime",
     "euroPallets",
     "storageSpaces",
     "orderNote",
@@ -104,6 +107,7 @@ function bindElements() {
     "printReport",
     "orderSelect",
     "saveOrderButton",
+    "releaseOrderButton",
     "takeOverOrderButton",
     "refreshOrdersButton",
     "deleteOrderButton",
@@ -145,6 +149,7 @@ function bindEvents() {
   elements.exportButton.addEventListener("click", exportCsv);
   elements.pdfExportButton.addEventListener("click", exportPdf);
   elements.saveOrderButton.addEventListener("click", saveOrderNow);
+  elements.releaseOrderButton.addEventListener("click", releaseCurrentOrder);
   elements.takeOverOrderButton.addEventListener("click", takeOverCurrentOrder);
   elements.refreshOrdersButton.addEventListener("click", loadOrderList);
   elements.deleteOrderButton.addEventListener("click", deleteCurrentOrder);
@@ -169,7 +174,7 @@ function bindEvents() {
     saveAndRender();
   });
 
-  ["orderNumber", "customerName", "orderDate", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
+  ["orderNumber", "customerName", "orderDate", "orderTime", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
     elements[id].addEventListener("input", () => {
       state[id] = elements[id].value;
       markOrderTouched();
@@ -214,6 +219,12 @@ function modeLabel(mode = currentMode) {
 }
 
 function loadCurrentUser() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("login") || params.has("reset")) {
+    localStorage.removeItem(USER_KEY);
+    localStorage.removeItem(USER_GROUP_KEY);
+    localStorage.removeItem(MODE_KEY);
+  }
   currentUser.name = localStorage.getItem(USER_KEY) || "";
   currentUser.group = localStorage.getItem(USER_GROUP_KEY) || "";
 }
@@ -229,10 +240,6 @@ function setCurrentUser(value, groupValue) {
   localStorage.setItem(USER_GROUP_KEY, group);
   elements.loginOverlay.hidden = true;
   updateCurrentUserUi();
-  if (group === "tablet") {
-    window.location.href = "/tablet.html";
-    return;
-  }
   if (!applyUserAccess()) return;
 
   if (state.lines.length || state.id) {
@@ -251,7 +258,6 @@ function showLogin(force = false) {
 
 function showLoginIfNeeded() {
   if (!currentUser.name || !currentUser.group) showLogin(false);
-  else if (currentUser.group === "tablet") window.location.href = "/tablet.html";
   else applyUserAccess();
 }
 
@@ -286,7 +292,8 @@ function storageNavLabel(group) {
 function applyUserAccess() {
   const isWarehouse = currentUser.group === "lager";
   const isOffice = currentUser.group === "buero";
-  if (elements.storageModeButton) elements.storageModeButton.hidden = isOffice;
+  const isTablet = currentUser.group === "tablet";
+  if (elements.storageModeButton) elements.storageModeButton.hidden = isOffice || isTablet;
   if (elements.storageAppLink) {
     elements.storageAppLink.hidden = isWarehouse;
     elements.storageAppLink.textContent = storageNavLabel(currentUser.group);
@@ -294,7 +301,7 @@ function applyUserAccess() {
   if (elements.articleNavLink) elements.articleNavLink.hidden = isWarehouse;
 
   let changedMode = false;
-  if (isOffice && currentMode === "storage") {
+  if ((isOffice || isTablet) && currentMode === "storage") {
     currentMode = "picking";
     localStorage.setItem(MODE_KEY, currentMode);
     changedMode = true;
@@ -324,12 +331,14 @@ async function handlePdfUpload(event) {
     const pdf = await window.pdfjsLib.getDocument({ data }).promise;
     const fullText = await readPdfText(pdf);
     const imported = await chooseBestImportText(pdf, fullText);
-    const result = importText(imported.text, file.name, imported.parsed);
+    const result = await importText(imported.text, file.name, imported.parsed);
 
-    if (result.lines > 0) {
+    if (result.cancelled) {
+      setImportStatus(result.message || "Import abgebrochen.", "warning", 100);
+    } else if (result.lines > 0) {
       const suffix = imported.source === "ocr" ? " per OCR" : "";
       const pageNotice = imported.pageNotice ? ` ${imported.pageNotice}` : "";
-      setImportStatus(`${result.lines} Positionen${suffix} importiert.${pageNotice}`, imported.pageNotice?.startsWith("Achtung") ? "warning" : "ok", 100);
+      setImportStatus(`${result.lines} Positionen${suffix} als Entwurf importiert. Bitte prüfen und freigeben.${pageNotice}`, imported.pageNotice?.startsWith("Achtung") ? "warning" : "ok", 100);
     } else if (imported.text.trim()) {
       setImportStatus("Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
     } else {
@@ -339,8 +348,12 @@ async function handlePdfUpload(event) {
     console.error(error);
     const fallbackText = data ? extractTextFromSimplePdf(data) : "";
     if (fallbackText.trim()) {
-      const result = importText(fallbackText, file.name);
-      setImportStatus(`Fallback genutzt: ${result.lines} Positionen importiert.`, result.lines ? "ok" : "error", result.lines ? 100 : null);
+      const result = await importText(fallbackText, file.name);
+      setImportStatus(
+        result.cancelled ? result.message || "Import abgebrochen." : `Fallback genutzt: ${result.lines} Positionen als Entwurf importiert. Bitte prüfen und freigeben.`,
+        result.cancelled ? "warning" : result.lines ? "ok" : "error",
+        result.cancelled || result.lines ? 100 : null
+      );
     } else {
       setImportStatus(error.message || "PDF konnte nicht ausgelesen werden.", "error");
     }
@@ -367,9 +380,11 @@ async function handleImageUpload(event) {
   try {
     setImportStatus(`Lese Lieferschein ${file.name} per OCR ...`, "", 0);
     const { text, parsed, rotation } = await readBestStorageImageOcr(file);
-    const result = importStorageText(text, file.name, parsed);
+    const result = await importStorageText(text, file.name, parsed);
 
-    if (result.lines > 0) {
+    if (result.cancelled) {
+      setImportStatus(result.message || "Import abgebrochen.", "warning", 100);
+    } else if (result.lines > 0) {
       const rotationText = rotation ? `, Rotation ${rotation} Grad` : "";
       setImportStatus(`${result.lines} Einlagerungspositionen importiert${rotationText}.`, "ok", 100);
     } else if (text.trim()) {
@@ -639,12 +654,24 @@ function bestellscheinPageNotice(text, pdfPageCount) {
   return "";
 }
 
-function importText(text, fileName = "", parsed = parseOrderText(text)) {
+async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
+  const duplicate = await findDuplicateOrderForImport(parsed.orderNumber, "picking", text);
+  if (duplicate) {
+    return {
+      lines: 0,
+      cancelled: true,
+      message: `Auftrag ${duplicate.orderNumber || duplicate.id} wurde bereits eingelesen und wird nicht doppelt angelegt.`
+    };
+  }
+
   currentMode = "picking";
   localStorage.setItem(MODE_KEY, currentMode);
   clearCurrentOrder();
   state.orderType = "picking";
   state.rawText = text;
+  state.orderDate = new Date().toISOString().slice(0, 10);
+  state.orderTime = currentTimeValue();
+  state.awaitingRelease = true;
   state.createdBy = currentUser.name;
   state.lastEditedBy = currentUser.name;
   state.activeUser = currentUser.name;
@@ -654,24 +681,71 @@ function importText(text, fileName = "", parsed = parseOrderText(text)) {
   if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
 
   state.lines = parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })];
-  topControlsCollapsed = state.lines.length > 0;
-  saveAndRender();
+  topControlsCollapsed = false;
+  saveStateWithoutServer();
+  render();
   return { lines: parsed.lines.length };
 }
 
-function importStorageText(text, fileName = "", parsed = parseStorageSlipText(text, fileName)) {
+async function importStorageText(text, fileName = "", parsed = parseStorageSlipText(text, fileName)) {
+  const nextOrderNumber = parsed.orderNumber || fileName.replace(/\.[^.]+$/i, "") || `Einlagerung ${new Date().toLocaleDateString("de-DE")}`;
+  const duplicate = await findDuplicateOrderForImport(nextOrderNumber, "storage", text);
+  if (duplicate) {
+    return {
+      lines: 0,
+      cancelled: true,
+      message: `Einlagerung ${duplicate.orderNumber || duplicate.id} wurde bereits eingelesen und wird nicht doppelt angelegt.`
+    };
+  }
+
   currentMode = "storage";
   localStorage.setItem(MODE_KEY, currentMode);
   clearCurrentOrder();
   state.orderType = "storage";
   state.rawText = text;
-  state.orderNumber = parsed.orderNumber || fileName.replace(/\.[^.]+$/i, "") || `Einlagerung ${new Date().toLocaleDateString("de-DE")}`;
+  state.orderDate = new Date().toISOString().slice(0, 10);
+  state.orderTime = currentTimeValue();
+  state.orderNumber = nextOrderNumber;
   state.customerName = parsed.customerName || "Einlagerung";
   state.lines = parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })];
   topControlsCollapsed = state.lines.length > 0;
   markOrderTouched();
   saveAndRender();
   return { lines: parsed.lines.length };
+}
+
+async function findDuplicateOrderForImport(orderNumber, orderType, text = "") {
+  const normalizedOrderNumber = String(orderNumber || "").trim().toLowerCase();
+  const fingerprint = orderFingerprint(text);
+  if (!serverOnline || (!normalizedOrderNumber && !fingerprint)) return null;
+  try {
+    const params = new URLSearchParams();
+    if (normalizedOrderNumber) params.set("orderNumber", orderNumber);
+    if (orderType) params.set("orderType", orderType);
+    if (fingerprint) params.set("fingerprint", fingerprint);
+    const duplicate = await apiJson(`/api/orders/duplicate-check?${params}`);
+    if (duplicate?.duplicate) return duplicate.order;
+
+    const orders = await apiJson("/api/orders?includeExported=1");
+    return orders.find((order) => {
+      if (state.id && order.id === state.id) return false;
+      return String(order.orderNumber || "").trim().toLowerCase() === normalizedOrderNumber &&
+        String(order.orderType || "picking").trim().toLowerCase() === String(orderType || "picking").toLowerCase();
+    }) || null;
+  } catch {
+    return null;
+  }
+}
+
+function orderFingerprint(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/[^a-z0-9 ]/g, "")
+    .trim()
+    .slice(0, 2000);
 }
 
 function setImportStatus(message, type = "", progress = null) {
@@ -751,7 +825,7 @@ function parseOrderText(text) {
     };
   }
 
-  const tableRows = collectWarehouseRows(cleanedLines);
+  const tableRows = annotateDestinationExceptions(collectWarehouseRows(cleanedLines));
   const destinationCustomerName = destinationToCustomerName(tableRows);
   const customerName = destinationCustomerName || cleanCustomerName(explicitCustomerName || findCustomerFromHeader(cleanedLines));
 
@@ -930,7 +1004,9 @@ function parseWarehouseLine(line) {
   const unit = /^[A-Za-zÄÖÜäöü]{1,5}$/.test(tokens[cursor] || "") ? normalizeUnit(tokens[cursor++]) : "Stk";
   const remaining = tokens.slice(cursor);
 
-  if (!product || !targetQty || remaining.length === 0) return parseWarehouseLineLoose(normalizedLine);
+  if (!product || !targetQty || remaining.length === 0) {
+    return parseWarehouseLineByColumns(normalizedLine) || parseWarehouseLineLoose(normalizedLine);
+  }
   if (isSuspiciousMultiplierQuantity(targetQty)) return null;
 
   const remainingText = remaining.join(" ");
@@ -949,6 +1025,48 @@ function parseWarehouseLine(line) {
   };
 }
 
+function parseWarehouseLineByColumns(line) {
+  const tokens = warehouseTokens(normalizeOcrWarehouseLine(line));
+  const firstNumber = tokens.findIndex((token) => /^\d{6,}$/.test(token));
+  if (firstNumber === -1) return null;
+
+  const warehouseOrder = tokens[firstNumber];
+  const binIndex = tokens.findIndex((token, index) => index > firstNumber && Boolean(extractBin(token)));
+  if (binIndex === -1) return null;
+
+  const productInfo = parseProductTokens(tokens, binIndex + 1);
+  const product = productInfo.value;
+  if (!product) return null;
+
+  const unitIndex = tokens.findIndex((token, index) => index >= productInfo.next && isUnitToken(token));
+  if (unitIndex === -1) return null;
+
+  const quantityTokens = tokens
+    .slice(productInfo.next, unitIndex)
+    .map(parseQuantityToken)
+    .filter(Boolean);
+  const quantity = quantityTokens.at(-1);
+  if (!quantity || isSuspiciousMultiplierQuantity(quantity.value)) return null;
+
+  const fromHandlingUnit = extractHandlingUnit(tokens.slice(firstNumber + 1, binIndex).join(" "));
+  const fromBin = extractBin(tokens[binIndex]);
+  const unit = normalizeUnit(tokens[unitIndex]);
+  const remainingText = tokens.slice(unitIndex + 1).join(" ");
+  const toBin = extractDestinationBin(remainingText);
+  const description = cleanProductDescription(remainingText, toBin);
+
+  return {
+    warehouseOrder,
+    fromHandlingUnit,
+    fromBin,
+    product,
+    description,
+    targetQty: normalizeQuantity(quantity.value),
+    unit,
+    toBin
+  };
+}
+
 function destinationToCustomerName(lines) {
   const destinations = lines
     .map((line) => line.toBin)
@@ -956,6 +1074,30 @@ function destinationToCustomerName(lines) {
     .filter(Boolean);
 
   return destinations.find((value) => value === "9021-0OUT") || destinations[0] || "";
+}
+
+function annotateDestinationExceptions(lines) {
+  const defaultDestination = "9021-0OUT";
+  const hasDefaultDestination = lines.some((line) => normalizeDestinationName(line.toBin) === defaultDestination);
+  if (!hasDefaultDestination) return lines;
+
+  return lines.map((line) => {
+    const destination = normalizeDestinationName(line.toBin);
+    if (!destination || destination === defaultDestination) return line;
+
+    return {
+      ...line,
+      positionNote: appendPositionNote(line.positionNote, destination)
+    };
+  });
+}
+
+function appendPositionNote(note, addition) {
+  const current = String(note || "").trim();
+  const value = String(addition || "").trim();
+  if (!value) return current;
+  if (current.toUpperCase().includes(value.toUpperCase())) return current;
+  return current ? `${current}; ${value}` : value;
 }
 
 function normalizeDestinationName(value) {
@@ -968,6 +1110,7 @@ function normalizeDestinationName(value) {
 function collectWarehouseRows(lines) {
   const rows = [];
   const seen = new Set();
+  const seenHeaders = new Set();
   const rowTexts = [];
   const pendingHeaders = [];
   const pendingContinuations = [];
@@ -993,21 +1136,23 @@ function collectWarehouseRows(lines) {
       const header = parseWarehouseHeader(candidate);
       const continuations = extractWarehouseContinuations(candidate);
 
-      if (parsed && !seen.has(parsed.warehouseOrder) && (!pendingHeaders.length || continuations.length <= 1)) {
-        rows.push(parsed);
-        seen.add(parsed.warehouseOrder);
+      if (parsed && (!pendingHeaders.length || continuations.length <= 1)) {
+        addWarehouseRow(rows, seen, parsed);
         return;
       }
 
-      if (header && !seen.has(header.warehouseOrder)) pendingHeaders.push(header);
+      if (header) {
+        const headerKey = warehouseHeaderKey(header);
+        if (!seenHeaders.has(headerKey)) {
+          pendingHeaders.push(header);
+          seenHeaders.add(headerKey);
+        }
+      }
 
       continuations.forEach((continuation) => {
         if (pendingHeaders.length) {
           const line = { ...pendingHeaders.shift(), ...continuation };
-          if (!seen.has(line.warehouseOrder)) {
-            rows.push(line);
-            seen.add(line.warehouseOrder);
-          }
+          addWarehouseRow(rows, seen, line);
         } else {
           pendingContinuations.push(continuation);
         }
@@ -1015,15 +1160,42 @@ function collectWarehouseRows(lines) {
 
       while (pendingHeaders.length && pendingContinuations.length) {
         const line = { ...pendingHeaders.shift(), ...pendingContinuations.shift() };
-        if (!seen.has(line.warehouseOrder)) {
-          rows.push(line);
-          seen.add(line.warehouseOrder);
-        }
+        addWarehouseRow(rows, seen, line);
       }
     });
   });
 
   return rows;
+}
+
+function addWarehouseRow(rows, seen, line) {
+  const key = warehouseLineKey(line);
+  if (seen.has(key)) return false;
+  rows.push(line);
+  seen.add(key);
+  return true;
+}
+
+function warehouseLineKey(line) {
+  return [
+    line.warehouseOrder,
+    line.fromHandlingUnit,
+    line.fromBin,
+    line.product,
+    line.targetQty,
+    line.unit,
+    line.toBin,
+    line.description
+  ].map((value) => String(value || "").trim().toUpperCase()).join("|");
+}
+
+function warehouseHeaderKey(line) {
+  return [
+    line.warehouseOrder,
+    line.fromHandlingUnit,
+    line.fromBin,
+    line.product
+  ].map((value) => String(value || "").trim().toUpperCase()).join("|");
 }
 
 function isWarehouseRowStart(line) {
@@ -1044,7 +1216,7 @@ function splitPossibleMergedWarehouseRows(text) {
 function normalizeOcrWarehouseLine(line) {
   return line
     .replace(/[|Â¦]/g, " ")
-    .replace(/[(){}\[\]]/g, " ")
+    .replace(/[()[\]{}]/g, " ")
     .replace(/_+/g, " ")
     .replace(/[Â¢Â©]/g, "C")
     .replace(/[â€”â€“]/g, "-")
@@ -1249,7 +1421,7 @@ function extractDestinationBin(text) {
   const matches = [...source.matchAll(/9\d{3,4}-[A-Z0-9]+/gi)];
   const match = matches.at(-1);
   if (match) return normalizeDestinationName(match[0]);
-  const fallback = source.match(/(\d{3,5}-[A-Z0-9]+(?:[ -][A-Z0-9]+)*)\s*$/i);
+  const fallback = source.match(/((?:9\d{3,4}|\d{4})[ -][A-Z0-9]+(?:[ -][A-Z0-9]+)*)\s*$/i);
   return fallback ? normalizeDestinationName(fallback[1]) : "";
 }
 
@@ -1263,7 +1435,7 @@ function cleanProductDescription(value, toBin = "") {
   return description
     .replace(/^\s*[_|.-]+\s*/, "")
     .replace(/\(\s*-/g, "-")
-    .replace(/[(){}\[\]|_]+/g, " ")
+    .replace(/[()[\]{}|_]+/g, " ")
     .replace(/^\s*(?:STK?|SI|S1|5T|KAR|PCK|PAK|VE)\b\s*/i, "")
     .replace(/^\s*(?:[\\/]+|[IVLJX17][\\/]+|[IVLJX])\s+(?=\d|[A-ZÄÖÜ])/i, "")
     .replace(/\s+/g, " ")
@@ -1301,6 +1473,10 @@ function normalizeUnit(unit) {
   if (["pck", "pak"].includes(value)) return "Pck";
   if (value === "ve") return "VE";
   return unit;
+}
+
+function isUnitToken(value) {
+  return /^(?:ST|SI|S1|5T|STK|STÃ¼CK|PCK|PAK|VE|KG|G|M|L|PAL)$/i.test(String(value || ""));
 }
 
 function findCustomerFromHeader(lines) {
@@ -1366,6 +1542,7 @@ function setHandlingUnitEditMode(input, canEdit) {
 
 function render() {
   renderModeControls();
+  renderReleaseButton();
   renderTakeOverButton();
   renderDeleteOrderButton();
   syncFields();
@@ -1608,6 +1785,19 @@ function renderTakeOverButton() {
     : "Bearbeitung übernehmen";
 }
 
+function renderReleaseButton() {
+  if (!elements.releaseOrderButton) return;
+  const isDraft = Boolean(
+    currentUser.group === "buero" &&
+    (state.orderType || currentMode) === "picking" &&
+    state.awaitingRelease &&
+    state.lines.length &&
+    !state.id
+  );
+  elements.releaseOrderButton.hidden = !isDraft;
+  elements.releaseOrderButton.disabled = !isDraft || !serverOnline || !currentUser.name;
+}
+
 function renderDeleteOrderButton() {
   if (!elements.deleteOrderButton) return;
   const hasSavedOrder = Boolean(state.id);
@@ -1617,12 +1807,13 @@ function renderDeleteOrderButton() {
 
 function renderTopControls() {
   const canCollapse = state.lines.length > 0;
-  topControlsCollapsed = canCollapse && topControlsCollapsed;
+  topControlsCollapsed = canCollapse && topControlsCollapsed && !state.awaitingRelease;
   elements.topControls.classList.toggle("is-collapsed", topControlsCollapsed);
   elements.topToggleButton.hidden = !canCollapse;
   elements.topToggleButton.querySelector("span").textContent = topControlsCollapsed ? "v" : "^";
   elements.topToggleButton.title = topControlsCollapsed ? "Kopfleiste anzeigen" : "Kopfleiste einklappen";
   elements.topToggleButton.setAttribute("aria-label", elements.topToggleButton.title);
+  elements.saveOrderButton.textContent = state.awaitingRelease ? "Entwurf lokal speichern" : "Auftrag speichern";
 }
 
 function setTopControlsCollapsed(collapsed) {
@@ -1660,7 +1851,7 @@ function compareStorageBins(left, right, importOrder) {
 }
 
 function syncFields() {
-  ["orderNumber", "customerName", "orderDate", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
+  ["orderNumber", "customerName", "orderDate", "orderTime", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
     if (elements[id].value !== state[id]) elements[id].value = state[id] || "";
   });
 }
@@ -1685,6 +1876,12 @@ function markOrderTouched() {
 }
 
 function updateCompletionFields() {
+  if (state.awaitingRelease) {
+    state.completedBy = "";
+    state.completedAt = "";
+    return;
+  }
+
   const isComplete = state.lines.length > 0 && state.lines.every((line) => line.picked);
   if (isComplete) {
     state.completedBy = state.completedBy || currentUser.name;
@@ -1779,7 +1976,7 @@ async function loadOrderListFromCache() {
   if (!window.OfflineStore) return false;
   try {
     const cached = (await OfflineStore.loadOrderSummaries())
-      .filter((o) => (o.orderType || "picking") === currentMode && !o.exportedAt);
+      .filter((o) => (o.orderType || "picking") === currentMode && isOpenOrderSummary(o));
     if (!cached.length) return false;
     renderOrderListItems(cached);
     return true;
@@ -1812,9 +2009,11 @@ function startOrderListRefresh() {
 
 function startActivityHeartbeat() {
   if (activityTimer) return;
-  activityTimer = setInterval(() => {
+  activityTimer = setInterval(async () => {
     if (!serverOnline || !currentUser.name) return;
     if (state.id && state.lines.length && state.activeUser === currentUser.name) {
+      const stillOpen = await ensureCurrentOrderStillOpen({ refreshList: false });
+      if (!stillOpen) return;
       saveOrderNow(true);
       return;
     }
@@ -1829,10 +2028,14 @@ async function loadOrderList() {
   }
   try {
     const orders = (await apiJson("/api/orders"))
-      .filter((order) => (order.orderType || "picking") === currentMode && !order.exportedAt);
+      .filter((order) => (order.orderType || "picking") === currentMode && isOpenOrderSummary(order));
     const newOrders = findNewOrders(orders);
     rememberKnownOrders(orders);
     renderOrderListItems(orders);
+    await ensureCurrentOrderStillOpen({ openOrders: orders, refreshList: false });
+    if (!orders.length) {
+      setServerStatus(`Server aktiv. Keine offenen ${modeLabel(currentMode).toLowerCase()}s-Aufträge gefunden.`, "ok");
+    }
     if (newOrders.length) showNewOrderNotice(newOrders);
     try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders); } catch { /* non-critical */ }
   } catch (error) {
@@ -1846,10 +2049,16 @@ function renderOrderListItems(orders) {
     const option = document.createElement("option");
     option.value = order.id;
     const activity = orderActivityLabel(order);
-    option.textContent = `${order.orderNumber || order.id} - ${order.customerName || modeLabel(order.orderType).toLowerCase()} (${order.picked}/${order.total}) - ${activity}`;
+    const createdTime = formatOrderCreatedAt(order.createdAt || order.updatedAt);
+    const timeText = createdTime ? `${createdTime} - ` : "";
+    option.textContent = `${timeText}${order.orderNumber || order.id} - ${order.customerName || modeLabel(order.orderType).toLowerCase()} (${order.picked}/${order.total}) - ${activity}`;
     if (order.id === state.id) option.selected = true;
     elements.orderSelect.appendChild(option);
   });
+}
+
+function isOpenOrderSummary(order) {
+  return !order.exportedAt && !order.completedAt;
 }
 
 function findNewOrders(orders) {
@@ -1914,6 +2123,20 @@ function orderActivityLabel(order) {
   return "frei";
 }
 
+function formatOrderCreatedAt(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+}
+
+function currentTimeValue() {
+  const now = new Date();
+  const hours = String(now.getHours()).padStart(2, "0");
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
 function isOrderRecentlyActive(order) {
   if (!order.activeUser || !order.activeUserAt) return false;
   const activeAt = Date.parse(order.activeUserAt);
@@ -1933,6 +2156,7 @@ async function loadOrder(id) {
         return;
       }
       Object.assign(state, cached);
+      state.awaitingRelease = false;
       currentMode = state.orderType === "storage" ? "storage" : "picking";
       localStorage.setItem(MODE_KEY, currentMode);
       state.collapseDone = true;
@@ -1950,6 +2174,7 @@ async function loadOrder(id) {
     if (state.id && state.id !== id) await releaseCurrentOrderActivity();
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
     Object.assign(state, order);
+    state.awaitingRelease = false;
     currentMode = state.orderType === "storage" ? "storage" : "picking";
     localStorage.setItem(MODE_KEY, currentMode);
     state.collapseDone = true;
@@ -1990,6 +2215,7 @@ async function takeOverCurrentOrder() {
 }
 
 function scheduleServerSave() {
+  if (state.awaitingRelease) return;
   if (!serverOnline || saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
@@ -1997,13 +2223,18 @@ function scheduleServerSave() {
   }, 700);
 }
 
-async function saveOrderNow(silent = false) {
+async function saveOrderNow(silent = false, { allowDraftRelease = false, touch = true } = {}) {
   if (!requireCurrentUser()) return false;
+
+  if (state.awaitingRelease && !allowDraftRelease) {
+    saveDraftState(silent ? "Entwurf lokal gespeichert." : "Entwurf lokal gespeichert. Mit \"Auftrag freigeben\" in die Auftragsliste übernehmen.");
+    return false;
+  }
 
   if (!serverOnline) {
     if (window.OfflineStore) {
       try {
-        const payload = currentOrderPayload();
+        const payload = currentOrderPayload({ touch });
         const endpoint = state.id ? `/api/orders/${encodeURIComponent(state.id)}` : "/api/orders";
         const method = state.id ? "PUT" : "POST";
         await OfflineStore.enqueue(method, endpoint, JSON.stringify({ order: payload }));
@@ -2019,7 +2250,11 @@ async function saveOrderNow(silent = false) {
   }
 
   try {
-    const payload = currentOrderPayload();
+    if (state.id) {
+      const stillOpen = await ensureCurrentOrderStillOpen({ refreshList: false });
+      if (!stillOpen) return false;
+    }
+    const payload = currentOrderPayload({ touch });
     const endpoint = state.id ? `/api/orders/${encodeURIComponent(state.id)}` : "/api/orders";
     const method = state.id ? "PUT" : "POST";
     const result = await apiJson(endpoint, { method, body: JSON.stringify({ order: payload }) });
@@ -2032,6 +2267,75 @@ async function saveOrderNow(silent = false) {
     if (!silent) setServerStatus(`Speichern fehlgeschlagen: ${error.message}`, "error");
     return false;
   }
+}
+
+async function ensureCurrentOrderStillOpen({ openOrders = null, refreshList = true } = {}) {
+  if (!serverOnline || !state.id) return true;
+  if (Array.isArray(openOrders) && openOrders.some((order) => order.id === state.id)) return true;
+
+  try {
+    const serverOrder = await apiJson(`/api/orders/${encodeURIComponent(state.id)}`);
+    if (isOpenOrderSummary(serverOrder) || isOwnCompletedOrder(serverOrder)) return true;
+
+    clearCurrentOrder();
+    topControlsCollapsed = false;
+    elements.pdfInput.value = "";
+    elements.imageInput.value = "";
+    saveStateWithoutServer();
+    render();
+    setServerStatus("Dieser Auftrag wurde auf einem anderen Gerät abgeschlossen oder exportiert und lokal geschlossen.", "ok");
+    if (refreshList) await loadOrderList();
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isOwnCompletedOrder(order) {
+  if (!order.completedAt || order.exportedAt) return false;
+  return Boolean(currentUser.name && order.completedBy === currentUser.name);
+}
+
+async function releaseCurrentOrder() {
+  if (!requireCurrentUser()) return;
+  if (!state.awaitingRelease || !state.lines.length) {
+    setServerStatus("Kein Entwurf zur Freigabe vorhanden.", "error");
+    return;
+  }
+  if (!serverOnline) {
+    setServerStatus("Server nicht verbunden. Der Auftrag bleibt als Entwurf lokal gespeichert.", "error");
+    return;
+  }
+
+  const duplicate = await findDuplicateOrderForImport(state.orderNumber, state.orderType || "picking", state.rawText);
+  if (duplicate) {
+    setServerStatus(`Auftrag ${duplicate.orderNumber || duplicate.id} wurde bereits eingelesen und wird nicht doppelt angelegt.`, "error");
+    return;
+  }
+
+  state.awaitingRelease = false;
+  state.createdBy = state.createdBy || currentUser.name;
+  state.lastEditedBy = currentUser.name;
+  state.activeUser = currentUser.name;
+  state.activeUserAt = new Date().toISOString();
+  state.completedBy = "";
+  state.completedAt = "";
+  const saved = await saveOrderNow(false, { allowDraftRelease: true, touch: false });
+  if (!saved) {
+    state.awaitingRelease = true;
+    saveStateWithoutServer();
+    render();
+    return;
+  }
+
+  setImportStatus("Auftrag freigegeben und in die Auftragsliste übernommen.", "ok", 100);
+  setServerStatus("Auftrag freigegeben und in die Auftragsliste übernommen.", "ok");
+  clearCurrentOrder();
+  topControlsCollapsed = false;
+  elements.pdfInput.value = "";
+  elements.imageInput.value = "";
+  saveStateWithoutServer();
+  render();
 }
 
 async function deleteCurrentOrder() {
@@ -2096,6 +2400,7 @@ function currentOrderPayload({ touch = true } = {}) {
     orderNumber: state.orderNumber,
     customerName: state.customerName,
     orderDate: state.orderDate,
+    orderTime: state.orderTime,
     euroPallets: state.euroPallets,
     storageSpaces: state.storageSpaces,
     orderNote: state.orderNote,
@@ -2152,6 +2457,11 @@ function saveState() {
   scheduleServerSave();
 }
 
+function saveDraftState(message = "Entwurf lokal gespeichert. Bitte pruefen und dann freigeben.") {
+  saveStateWithoutServer();
+  setServerStatus(message, "ok");
+}
+
 function loadState() {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (!saved) return;
@@ -2169,6 +2479,7 @@ function clearCurrentOrder() {
     orderNumber: "",
     customerName: "",
     orderDate: new Date().toISOString().slice(0, 10),
+    orderTime: "",
     euroPallets: "",
     storageSpaces: "",
     orderNote: "",
@@ -2184,6 +2495,7 @@ function clearCurrentOrder() {
     exportedPdfFile: "",
     exportedPdfPath: "",
     orderType: currentMode,
+    awaitingRelease: false,
     lines: []
   });
 }
@@ -2208,6 +2520,7 @@ function exportCsv() {
     ["Auftrag", state.orderNumber],
     ["Kunde", state.customerName],
     ["Datum", state.orderDate],
+    ["Uhrzeit", state.orderTime],
     ["Erstellt von", state.createdBy],
     ["Zuletzt bearbeitet von", state.lastEditedBy],
     ["Abgeschlossen von", state.completedBy],
@@ -2320,6 +2633,7 @@ function renderPrintReport(fileName) {
       </div>
       <div>
         <p><strong>Datum:</strong> ${escapeHtml(formatDateForDisplay(state.orderDate))}</p>
+        <p><strong>Uhrzeit:</strong> ${escapeHtml(state.orderTime || "-")}</p>
         <p><strong>Erledigt:</strong> ${picked}/${state.lines.length}</p>
         <p><strong>Abgeschlossen:</strong> ${escapeHtml(state.completedBy || "-")}</p>
         <p><strong>Dateiname:</strong> ${escapeHtml(fileName)}</p>
@@ -2391,7 +2705,7 @@ function createPdfDocument() {
     y -= 22;
     text(ops, margin, y, `Auftrag: ${state.orderNumber || "-"}`, 10);
     text(ops, 220, y, `Kunde: ${state.customerName || "-"}`, 10);
-    text(ops, 430, y, `Datum: ${formatDateForDisplay(state.orderDate)}`, 10);
+    text(ops, 430, y, `Datum: ${formatDateForDisplay(state.orderDate)} ${state.orderTime || ""}`.trim(), 10);
     y -= 18;
     text(ops, margin, y, `Europaletten: ${state.euroPallets || "0"}`, 10);
     text(ops, 220, y, `Stellplätze: ${state.storageSpaces || "0"}`, 10);

@@ -6,9 +6,8 @@
     <meta name="theme-color" content="#167a58">
     <title>Tablet Pickliste</title>
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="tablet.css?v=20260529-6">
-    <script src="offline-store.js"></script>
-    <script src="tablet.js?v=20260531-1"></script>
+    <link rel="stylesheet" href="tablet.css?v=20260602-2">
+    <script src="tablet-legacy.js?v=20260602-2"></script>
   </head>
   <body>
     <header class="tablet-header">
@@ -61,6 +60,20 @@
           </div>
         </div>
         <section id="lineList" class="line-list"></section>
+      </section>
+      <section class="tablet-completion" aria-label="Abschluss">
+        <label>
+          Europaletten
+          <input id="euroPalletsInput" type="number" inputmode="decimal" min="0" step="0.5" placeholder="0">
+        </label>
+        <label>
+          Stellplätze
+          <input id="storageSpacesInput" type="number" inputmode="decimal" min="0" step="0.5" placeholder="0">
+        </label>
+        <label>
+          Notiz
+          <textarea id="orderNoteInput" rows="3" placeholder="Schäden, Fehlmengen, Besonderheiten"></textarea>
+        </label>
       </section>
     </main>
   </body>

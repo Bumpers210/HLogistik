@@ -68,6 +68,7 @@ export function initializeDatabase() {
       auftragsnummer TEXT NOT NULL DEFAULT '',
       kundenname TEXT NOT NULL DEFAULT '',
       auftragsdatum TEXT NOT NULL DEFAULT '',
+      auftragszeit TEXT NOT NULL DEFAULT '',
       euro_paletten TEXT NOT NULL DEFAULT '',
       stellplaetze TEXT NOT NULL DEFAULT '',
       auftrags_notiz TEXT NOT NULL DEFAULT '',
@@ -92,6 +93,7 @@ export function initializeDatabase() {
   `);
 
   ensureArticleColumn("gebinde_art", "TEXT NOT NULL DEFAULT 'STK'");
+  ensureOrderColumn("auftragszeit", "TEXT NOT NULL DEFAULT ''");
 }
 
 export function ensureArticleColumn(name, definition) {
@@ -99,5 +101,13 @@ export function ensureArticleColumn(name, definition) {
   const columns = db.prepare("PRAGMA table_info(artikel)").all().map((col) => col.name);
   if (columns.includes(name)) return false;
   db.exec(`ALTER TABLE artikel ADD COLUMN ${name} ${definition}`);
+  return true;
+}
+
+export function ensureOrderColumn(name, definition) {
+  const db = getDb();
+  const columns = db.prepare("PRAGMA table_info(auftraege)").all().map((col) => col.name);
+  if (columns.includes(name)) return false;
+  db.exec(`ALTER TABLE auftraege ADD COLUMN ${name} ${definition}`);
   return true;
 }

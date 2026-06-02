@@ -11,15 +11,17 @@ export default [
         ...globals.browser,
         ...globals.node,
         ...globals.serviceworker,
+        OfflineStore: "readonly",
       },
     },
     rules: {
       "no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],
       "no-console": "off",
+      "no-control-regex": "off",
       "prefer-const": "warn",
     },
   },
   {
-    ignores: ["pdf.min.js", "pdf.worker.min.js", "node_modules/**"],
+    ignores: ["pdf.min.js", "pdf.worker.min.js", "xlsx.full.min.js", "node_modules/**"],
   },
 ];

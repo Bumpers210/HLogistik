@@ -156,12 +156,10 @@ export function csvCell(value) {
 // ── String helpers ────────────────────────────────────────────────────────────
 
 export function sanitizeFileName(value) {
-  // eslint-disable-next-line no-control-regex
   return String(value).replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").slice(0, 140);
 }
 
 export function sanitizeFileNamePart(value) {
-  // eslint-disable-next-line no-control-regex
   return (
     String(value || "")
       .trim()

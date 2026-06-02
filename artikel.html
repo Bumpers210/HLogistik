@@ -8,7 +8,8 @@
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css?v=20260529-5">
-    <script src="artikel.js?v=20260531-1" defer></script>
+    <script src="xlsx.full.min.js" defer></script>
+    <script src="artikel.js?v=20260601-4" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -46,8 +47,8 @@
         <div class="stacked-actions">
           <button id="newArticleButton" class="primary-button" type="button">Neuer Artikel</button>
           <label class="secondary-button file-button">
-            CSV importieren
-            <input id="csvInput" type="file" accept=".csv,text/csv">
+            Excel/CSV importieren
+            <input id="csvInput" type="file" accept=".xls,.xlsx,.csv,.html,.htm,text/csv">
           </label>
           <a id="exportLink" class="secondary-button link-button" href="/api/articles/export">CSV exportieren</a>
         </div>
@@ -69,6 +70,7 @@
                   <th>Gebinde</th>
                   <th>KRT</th>
                   <th>Palette</th>
+                  <th>Gesamtstückzahl</th>
                   <th>Status</th>
                 </tr>
               </thead>

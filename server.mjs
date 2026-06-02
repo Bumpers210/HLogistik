@@ -56,7 +56,7 @@ import { exportPdf } from "./server/export.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(root, "data");
-const exportDir = path.join(root, "Exporte");
+const exportDir = readExportDir();
 const tempDir = path.join(root, "tmp");
 const legacyOrdersFile = path.join(dataDir, "orders.json");
 const legacyArticlesFile = path.join(dataDir, "articles.json");
@@ -73,11 +73,14 @@ const publicStaticFiles = new Set([
   "/tablet.html",
   "/app.js",
   "/artikel.js",
+  "/xlsx.full.min.js",
   "/lager.js",
   "/tablet.js",
+  "/tablet-legacy.js",
   "/styles.css",
   "/tablet.css",
   "/manifest.webmanifest",
+  "/service-worker.js",
   "/app-icon.svg",
   "/offline-store.js",
   "/pdf.min.js",
@@ -282,11 +285,24 @@ async function route(request, response) {
 
   // Orders — list
   if (pathname === "/api/orders" && request.method === "GET") {
+    const includeExported = url.searchParams.get("includeExported") === "1";
     const orders = readOrders()
-      .filter((order) => !order.exportedAt)
+      .filter((order) => includeExported || isOpenOrder(order))
       .map(orderSummary)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     sendJson(response, 200, orders);
+    return;
+  }
+
+  // Orders â€” duplicate check
+  if (pathname === "/api/orders/duplicate-check" && request.method === "GET") {
+    const probe = normalizeOrder({
+      orderNumber: url.searchParams.get("orderNumber") || "",
+      orderType: url.searchParams.get("orderType") || "picking",
+      rawText: url.searchParams.get("fingerprint") || "",
+    });
+    const duplicate = findDuplicateOrder(probe);
+    sendJson(response, 200, { ok: true, duplicate: Boolean(duplicate), order: duplicate ? orderSummary(duplicate) : null });
     return;
   }
 
@@ -294,6 +310,11 @@ async function route(request, response) {
   if (pathname === "/api/orders" && request.method === "POST") {
     const body = await readBody(request, maxBodyBytes);
     const order = normalizeOrder(body.order || body);
+    const duplicate = findDuplicateOrder(order);
+    if (duplicate) {
+      sendJson(response, 409, { ok: false, error: `Auftrag ${duplicate.orderNumber || duplicate.id} wurde bereits eingelesen` });
+      return;
+    }
     order.id = order.id || createId();
     order.createdAt = order.createdAt || new Date().toISOString();
     order.updatedAt = new Date().toISOString();
@@ -314,7 +335,18 @@ async function route(request, response) {
   if (orderMatch && request.method === "PUT") {
     const body = await readBody(request, maxBodyBytes);
     const existing = findOrder(orderMatch[1]) || {};
+    const incoming = normalizeOrder({ ...(body.order || body), id: orderMatch[1] });
+    if (isStaleClosedOrderWrite(incoming, existing)) {
+      sendJson(response, 200, { ok: true, ignored: true, order: orderSummary(existing) });
+      return;
+    }
     const order = normalizeOrder({ ...existing, ...(body.order || body), id: orderMatch[1] });
+    preserveClosedOrderStatus(order, existing);
+    const duplicate = findDuplicateOrder(order, orderMatch[1]);
+    if (duplicate) {
+      sendJson(response, 409, { ok: false, error: `Auftrag ${duplicate.orderNumber || duplicate.id} wurde bereits eingelesen` });
+      return;
+    }
     order.createdAt = existing.createdAt || order.createdAt || new Date().toISOString();
     order.updatedAt = new Date().toISOString();
     upsertOrder(order);
@@ -379,6 +411,62 @@ async function sendExportFile(response, requestPath) {
 
 // ── Security helpers ──────────────────────────────────────────────────────────
 
+function findDuplicateOrder(order, excludeId = "") {
+  const orderNumber = String(order.orderNumber || "").trim().toLowerCase();
+  const orderType = String(order.orderType || "picking").trim().toLowerCase();
+  const fingerprint = orderFingerprint(order.rawText);
+  if (!orderNumber && !fingerprint) return null;
+
+  return readOrders().find((entry) => {
+    if (excludeId && entry.id === excludeId) return false;
+    if (String(entry.orderType || "picking").trim().toLowerCase() !== orderType) return false;
+
+    const entryOrderNumber = String(entry.orderNumber || "").trim().toLowerCase();
+    if (orderNumber && entryOrderNumber && entryOrderNumber === orderNumber) return true;
+
+    const entryFingerprint = orderFingerprint(entry.rawText);
+    return Boolean(fingerprint && entryFingerprint && entryFingerprint === fingerprint);
+  }) || null;
+}
+
+function isOpenOrder(order) {
+  return !order.exportedAt && !order.completedAt;
+}
+
+function isStaleClosedOrderWrite(incoming, existing) {
+  if (!existing || !existing.id || isOpenOrder(existing)) return false;
+
+  const reopensCompleted = Boolean(existing.completedAt && !incoming.completedAt);
+  const reopensExported = Boolean(existing.exportedAt && !incoming.exportedAt);
+  return reopensCompleted || reopensExported;
+}
+
+function preserveClosedOrderStatus(order, existing) {
+  if (!existing || !existing.id) return;
+
+  if (existing.completedAt && !order.completedAt) {
+    order.completedAt = existing.completedAt;
+    order.completedBy = existing.completedBy || order.completedBy;
+  }
+
+  if (existing.exportedAt && !order.exportedAt) {
+    order.exportedAt = existing.exportedAt;
+    order.exportedPdfFile = existing.exportedPdfFile || order.exportedPdfFile;
+    order.exportedPdfPath = existing.exportedPdfPath || order.exportedPdfPath;
+  }
+}
+
+function orderFingerprint(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/[^a-z0-9 ]/g, "")
+    .trim()
+    .slice(0, 2000);
+}
+
 function enforceSameOriginMutation(request) {
   if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) return;
   const origin = request.headers.origin;
@@ -430,6 +518,20 @@ function readLocalHostname() {
     .map((line) => line.trim())
     .find((line) => line && !line.startsWith("#"));
   return sanitizeHostname(raw || "");
+}
+
+function readExportDir() {
+  const fromEnv = String(globalThis.process?.env?.HLOGISTIK_EXPORT_DIR || globalThis.process?.env?.EXPORT_DIR || "").trim();
+  if (fromEnv) return path.resolve(fromEnv);
+
+  const configFile = path.join(root, "export-path.txt");
+  if (!existsSync(configFile)) return path.join(root, "Exporte");
+
+  const raw = readFileSync(configFile, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith("#"));
+  return raw ? path.resolve(raw) : path.join(root, "Exporte");
 }
 
 function sanitizeHostname(value) {

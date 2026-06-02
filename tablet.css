@@ -12,6 +12,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: #f4f6f3;
@@ -112,7 +116,10 @@ button {
 }
 
 .tablet-controls input,
-.tablet-controls select {
+.tablet-controls select,
+.tablet-controls textarea,
+.tablet-completion input,
+.tablet-completion textarea {
   display: block;
   width: 100%;
   min-height: 36px;
@@ -124,6 +131,30 @@ button {
   background: #fff;
   color: #17211b;
   color: var(--ink);
+}
+
+.tablet-completion {
+  margin-top: 10px;
+  padding: 10px;
+  background: #ffffff;
+  background: var(--panel);
+  border: 1px solid #d8e0db;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.tablet-completion label {
+  display: block;
+  margin-bottom: 8px;
+  color: #65726c;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.tablet-completion textarea {
+  min-height: 72px;
+  resize: vertical;
 }
 
 .tablet-controls button {
@@ -229,7 +260,7 @@ button {
 }
 
 .pick-column-header > span {
-  width: 36px;
+  width: 52px;
 }
 
 .pick-column-grid {
@@ -298,25 +329,28 @@ button {
 
 .check-target {
   position: relative;
-  width: 36px;
+  width: 52px;
+  min-height: 48px;
   padding-top: 2px;
+  cursor: pointer;
+  touch-action: manipulation;
 }
 
 .picked-input {
   position: absolute;
   left: 0;
-  top: 2px;
+  top: 0;
   z-index: 2;
-  width: 28px;
-  height: 28px;
+  width: 48px;
+  height: 48px;
   margin: 0;
   opacity: 0;
 }
 
 .checkmark {
   display: block;
-  width: 28px;
-  height: 28px;
+  width: 42px;
+  height: 42px;
   border: 2px solid #167a58;
   border: 2px solid var(--accent);
   border-radius: 6px;
@@ -332,9 +366,9 @@ button {
   content: "OK";
   display: block;
   color: #fff;
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 700;
-  line-height: 24px;
+  line-height: 38px;
   text-align: center;
 }
 
@@ -447,7 +481,7 @@ button {
     position: absolute;
     left: 8px;
     top: 8px;
-    width: 30px;
+    width: 52px;
   }
 
   .line-top label,

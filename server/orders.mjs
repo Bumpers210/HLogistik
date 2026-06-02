@@ -8,7 +8,7 @@ import { createId } from "./helpers.mjs";
 export function readOrders() {
   return getDb()
     .prepare(
-      `SELECT id, auftragsnummer, kundenname, auftragsdatum, euro_paletten, stellplaetze,
+      `SELECT id, auftragsnummer, kundenname, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
               auftrags_notiz, rohtext, collapse_done, auftrags_typ, erstellt_von,
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
               abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
@@ -22,7 +22,7 @@ export function readOrders() {
 export function findOrder(id) {
   const row = getDb()
     .prepare(
-      `SELECT id, auftragsnummer, kundenname, auftragsdatum, euro_paletten, stellplaetze,
+      `SELECT id, auftragsnummer, kundenname, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
               auftrags_notiz, rohtext, collapse_done, auftrags_typ, erstellt_von,
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
               abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
@@ -37,16 +37,17 @@ export function upsertOrder(order) {
   getDb()
     .prepare(
       `INSERT INTO auftraege
-         (id, auftragsnummer, kundenname, auftragsdatum, euro_paletten, stellplaetze,
+         (id, auftragsnummer, kundenname, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
           auftrags_notiz, rohtext, collapse_done, auftrags_typ, erstellt_von,
           zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
           abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
           exportiert_pdf_pfad, positionen, erstellt_am, aktualisiert_am)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET
          auftragsnummer = excluded.auftragsnummer,
          kundenname = excluded.kundenname,
          auftragsdatum = excluded.auftragsdatum,
+         auftragszeit = excluded.auftragszeit,
          euro_paletten = excluded.euro_paletten,
          stellplaetze = excluded.stellplaetze,
          auftrags_notiz = excluded.auftrags_notiz,
@@ -71,6 +72,7 @@ export function upsertOrder(order) {
       order.orderNumber,
       order.customerName,
       order.orderDate,
+      order.orderTime,
       order.euroPallets,
       order.storageSpaces,
       order.orderNote,
@@ -145,6 +147,7 @@ export function normalizeOrder(order) {
     orderNumber: String(order.orderNumber || ""),
     customerName: String(order.customerName || ""),
     orderDate: String(order.orderDate || new Date().toISOString().slice(0, 10)),
+    orderTime: String(order.orderTime || ""),
     euroPallets: String(order.euroPallets || ""),
     storageSpaces: String(order.storageSpaces || ""),
     orderNote: String(order.orderNote || ""),
@@ -172,6 +175,7 @@ export function orderSummary(order) {
     orderNumber: order.orderNumber || order.id,
     customerName: order.customerName || "",
     orderDate: order.orderDate || "",
+    orderTime: order.orderTime || "",
     total: order.lines.length,
     picked: order.lines.filter((line) => line.picked).length,
     createdBy: order.createdBy || "",
@@ -182,6 +186,7 @@ export function orderSummary(order) {
     completedAt: order.completedAt || "",
     exportedAt: order.exportedAt || "",
     orderType: order.orderType || "picking",
+    createdAt: order.createdAt || "",
     updatedAt: order.updatedAt || "",
   };
 }
@@ -200,6 +205,7 @@ function orderFromRow(row) {
     orderNumber: String(row.auftragsnummer || ""),
     customerName: String(row.kundenname || ""),
     orderDate: String(row.auftragsdatum || ""),
+    orderTime: String(row.auftragszeit || ""),
     euroPallets: String(row.euro_paletten || ""),
     storageSpaces: String(row.stellplaetze || ""),
     orderNote: String(row.auftrags_notiz || ""),

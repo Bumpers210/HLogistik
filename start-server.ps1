@@ -1,8 +1,14 @@
 ﻿#Requires -Version 5.1
 
+param(
+    [string]$ExportDir = ""
+)
+
 # WinForms braucht STA. Falls MTA: Skript im STA-Modus neu starten.
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne "STA") {
-    Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path
+    $staArgs = @("-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", $MyInvocation.MyCommand.Path)
+    if ($ExportDir) { $staArgs += @("-ExportDir", $ExportDir) }
+    Start-Process powershell -WindowStyle Hidden -ArgumentList $staArgs
     exit
 }
 
@@ -35,6 +41,7 @@ $root      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $hostsPath = "$env:Windir\System32\drivers\etc\hosts"
 $dataDir   = Join-Path $root "data"
 $backupDir = Join-Path $root "Backups"
+$exportPathFile = Join-Path $root "export-path.txt"
 $databaseFile = Join-Path $dataDir "logistik.sqlite"
 $logFile = Join-Path $dataDir "server.log"
 $errorLogFile = Join-Path $dataDir "server-error.log"
@@ -163,6 +170,44 @@ function Backup-Database {
     ) | Out-Null
 }
 
+function Get-ConfiguredExportDir {
+    if ($ExportDir) { return [System.IO.Path]::GetFullPath($ExportDir) }
+    if (Test-Path $exportPathFile) {
+        $line = Get-Content $exportPathFile |
+            Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") } |
+            Select-Object -First 1
+        if ($line) { return [System.IO.Path]::GetFullPath($line.Trim()) }
+    }
+    return (Join-Path $root "Exporte")
+}
+
+function Save-ConfiguredExportDir ([string]$path) {
+    if (-not $path) { return }
+    Set-Content -Path $exportPathFile -Value $path -Encoding UTF8
+}
+
+function Select-ExportDirAtStartup ([string]$currentPath) {
+    $message = "Aktueller Export-Pfad:`n$currentPath`n`nMoechtest du den Export-Pfad fuer diesen Serverstart aendern?"
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        $message,
+        "HLogistik Export-Pfad",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return $currentPath }
+
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = "Exportordner fuer PDFs auswaehlen"
+    $dialog.ShowNewFolderButton = $true
+    if (Test-Path $currentPath) { $dialog.SelectedPath = $currentPath }
+    $result = $dialog.ShowDialog()
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK -or -not $dialog.SelectedPath) { return $currentPath }
+
+    New-Item -ItemType Directory -Force -Path $dialog.SelectedPath | Out-Null
+    Save-ConfiguredExportDir $dialog.SelectedPath
+    return $dialog.SelectedPath
+}
+
 function New-AppIcon {
     $bitmap = New-Object System.Drawing.Bitmap 32, 32
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -235,6 +280,7 @@ Write-ManagerLog "Hosts-Eintrag geprueft"
 
 $script:existingServerPid = 0
 $script:stopRequested = $false
+$script:exportDir = Get-ConfiguredExportDir
 
 $ownerPid = Get-PortOwnerPid 4174
 Write-ManagerLog "Port 4174 OwnerPid: $ownerPid"
@@ -253,6 +299,15 @@ if ($ownerPid -gt 0) {
             Start-Sleep -Milliseconds 700
         } else { exit 0 }
     }
+}
+
+if ($script:existingServerPid -eq 0) {
+    $script:exportDir = Select-ExportDirAtStartup $script:exportDir
+    New-Item -ItemType Directory -Force -Path $script:exportDir | Out-Null
+    Save-ConfiguredExportDir $script:exportDir
+    Write-ManagerLog "Export-Pfad: $script:exportDir"
+} else {
+    Write-ManagerLog "Bestehender Server erkannt. Export-Pfad wird vom laufenden Server verwendet."
 }
 
 # ── Log-Queue (thread-sicher, kein form.Invoke noetig) ─────────────────────────
@@ -316,7 +371,7 @@ $pnlHeader.add_Resize({
 $form.Controls.Add($pnlHeader)
 
 # -- URLs --
-$urlCount          = if ($localHostname) { 3 } else { 2 }
+$urlCount          = if ($localHostname) { 4 } else { 3 }
 $pnlUrls           = New-Object System.Windows.Forms.Panel
 $pnlUrls.Dock      = "Top"
 $pnlUrls.Height    = 10 + $urlCount * 26
@@ -346,6 +401,10 @@ if ($localHostname) {
     $lnkHn = New-UrlLink $hnTarget 60 $false
     $lnkHn.add_LinkClicked([scriptblock]::Create("Start-Process '$hnTarget'"))
 }
+
+$exportY = if ($localHostname) { 86 } else { 60 }
+$lnkExport = New-UrlLink "Export: $script:exportDir" $exportY $false
+$lnkExport.add_LinkClicked({ if (Test-Path $script:exportDir) { Start-Process $script:exportDir } })
 
 $form.Controls.Add($pnlUrls)
 
@@ -572,6 +631,7 @@ if ($script:existingServerPid -gt 0) {
         $script:errorLogPosition = 0L
         $script:serverExitedHandled = $false
         $serverScript = Join-Path $root "server.mjs"
+        $env:HLOGISTIK_EXPORT_DIR = $script:exportDir
         $global:serverProc = Start-Process `
             -FilePath $nodeExe `
             -ArgumentList "`"$serverScript`"" `

@@ -5,3 +5,4 @@ Exporte/
 tmp/
 node_modules/
 *.log
+export-path.txt

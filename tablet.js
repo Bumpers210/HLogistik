@@ -76,14 +76,16 @@ async function initialize() {
     setConnectionStatus(true);
     await flushSyncQueue();
     loadOrderList();
-    orderListTimer = window.setInterval(loadOrderList, ORDER_LIST_REFRESH_MS);
-    saveTimer = window.setInterval(async () => {
-      if (dirty) await saveOrder(true);
-      if (!serverOnline) return;
-      // Retry queue after auto-save interval when back online
-      const pending = window.OfflineStore ? await OfflineStore.getPending().catch(() => []) : [];
-      if (pending.length) await flushSyncQueue();
-    }, AUTO_SAVE_MS);
+    if (!orderListTimer) orderListTimer = window.setInterval(loadOrderList, ORDER_LIST_REFRESH_MS);
+    if (!saveTimer) {
+      saveTimer = window.setInterval(async () => {
+        if (dirty) await saveOrder(true);
+        if (!serverOnline) return;
+        // Retry queue after auto-save interval when back online
+        const pending = window.OfflineStore ? await OfflineStore.getPending().catch(() => []) : [];
+        if (pending.length) await flushSyncQueue();
+      }, AUTO_SAVE_MS);
+    }
   } catch {
     serverOnline = false;
     setConnectionStatus(false);
@@ -271,6 +273,12 @@ function renderLine(line) {
   checkmark.className = "checkmark";
   checkmark.setAttribute("aria-hidden", "true");
   checkWrap.appendChild(checkmark);
+  checkWrap.addEventListener("click", (event) => {
+    if (event.target === checkbox) return;
+    event.preventDefault();
+    checkbox.checked = !checkbox.checked;
+    checkbox.dispatchEvent(new Event("change"));
+  });
   card.appendChild(checkWrap);
 
   const body = document.createElement("div");

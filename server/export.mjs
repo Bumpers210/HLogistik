@@ -80,6 +80,7 @@ function printableHtml(order, fileName) {
       </div>
       <div>
         <p><strong>Datum:</strong> ${escapeHtml(formatDate(order.orderDate))}</p>
+        <p><strong>Uhrzeit:</strong> ${escapeHtml(order.orderTime || "-")}</p>
         <p><strong>Erledigt:</strong> ${picked}/${order.lines.length}</p>
         <p><strong>Abgeschlossen:</strong> ${escapeHtml(order.completedBy || "-")}</p>
         <p><strong>Dateiname:</strong> ${escapeHtml(fileName)}</p>
@@ -116,7 +117,8 @@ function printableHtml(order, fileName) {
 function pdfFileBase(order) {
   const orderNumber = sanitizeFileNamePart(order.orderNumber || order.id || "auftrag");
   const orderDate = sanitizeFileNamePart(order.orderDate || new Date().toISOString().slice(0, 10));
-  return sanitizeFileName(`kommissionierung-${orderNumber}-${orderDate}`);
+  const orderTime = sanitizeFileNamePart(String(order.orderTime || "").replace(":", "-"));
+  return sanitizeFileName(["kommissionierung", orderNumber, orderDate, orderTime].filter(Boolean).join("-"));
 }
 
 export function findBrowser() {
