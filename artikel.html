@@ -7,9 +7,9 @@
     <title>Artikelstamm</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260602-5">
+    <link rel="stylesheet" href="styles.css?v=20260602-6">
     <script src="xlsx.full.min.js" defer></script>
-    <script src="artikel.js?v=20260602-7" defer></script>
+    <script src="artikel.js?v=20260602-8" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -76,7 +76,7 @@
                   <th>Material</th>
                   <th>Bezeichnung</th>
                   <th>Gebinde</th>
-                  <th>KRT</th>
+                  <th>Menge Gebinde</th>
                   <th>Palette</th>
                   <th>Gesamtstückzahl</th>
                   <th>Status</th>
@@ -110,7 +110,7 @@
             </label>
             <div class="two-columns">
               <label id="mengeProKartonField" hidden>
-                Menge pro KRT
+                <span id="mengeProKartonLabel">Menge pro KRT</span>
                 <input id="mengeProKartonInput" name="mengeProKarton" type="number" inputmode="numeric" min="1" step="1">
               </label>
               <label>

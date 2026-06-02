@@ -161,7 +161,7 @@ export function articlesToCsv(articles) {
     "Materialnummer",
     "Materialbezeichnung",
     "Gebinde",
-    "Menge pro KRT",
+    "Menge pro Gebinde",
     "Menge pro Palette",
     "Barcode",
     "Lagerplatz",
@@ -173,7 +173,7 @@ export function articlesToCsv(articles) {
     article.materialnummer,
     article.materialbezeichnung,
     article.gebindeArt,
-    article.gebindeArt === "KRT" ? article.mengeProKarton : "",
+    supportsPackageQuantity(article.gebindeArt) ? article.mengeProKarton || "" : "",
     article.mengeProPalette,
     article.barcode,
     article.lagerplatz,
@@ -230,7 +230,11 @@ export function calculatePackaging(article, quantity) {
 export function normalizeArticle(article) {
   const gebindeArt = normalizeGebindeArt(article.gebindeArt ?? article.gebinde_art ?? article.Gebinde ?? article.Gebindeart);
   const mengeProKarton = readInteger(
-    article.mengeProKarton ?? article.menge_pro_karton ?? article["Menge pro KRT"] ?? article["Menge pro Karton"]
+    article.mengeProKarton ??
+      article.menge_pro_karton ??
+      article["Menge pro Gebinde"] ??
+      article["Menge pro KRT"] ??
+      article["Menge pro Karton"]
   );
   const mengeProPalette = readInteger(article.mengeProPalette ?? article.menge_pro_palette ?? article["Menge pro Palette"]);
 
@@ -239,7 +243,7 @@ export function normalizeArticle(article) {
     materialnummer: String(article.materialnummer ?? article.materialNumber ?? article.Materialnummer ?? "").trim(),
     materialbezeichnung: String(article.materialbezeichnung ?? article.materialDescription ?? article.Materialbezeichnung ?? "").trim(),
     gebindeArt,
-    mengeProKarton: gebindeArt === "KRT" ? mengeProKarton : 0,
+    mengeProKarton: supportsPackageQuantity(gebindeArt) ? mengeProKarton : 0,
     mengeProPalette,
     barcode: String(article.barcode ?? article.Barcode ?? "").trim(),
     lagerplatz: String(article.lagerplatz ?? article.Lagerplatz ?? "").trim(),
@@ -255,8 +259,8 @@ export function validateArticle(article) {
   if (!article.materialnummer) throw new Error("Materialnummer fehlt");
   if (!article.materialbezeichnung) throw new Error("Materialbezeichnung fehlt");
   if (!["C1", "C2", "A1", "KRT", "STK"].includes(article.gebindeArt)) throw new Error("Gebindeart ist ungültig");
-  if (article.gebindeArt === "KRT" && (!Number.isInteger(article.mengeProKarton) || article.mengeProKarton <= 0))
-    throw new Error("Menge pro KRT muss größer 0 sein");
+  if (requiresPackageQuantity(article.gebindeArt) && (!Number.isInteger(article.mengeProKarton) || article.mengeProKarton <= 0))
+    throw new Error(`Menge pro ${article.gebindeArt} muss größer 0 sein`);
   if (!Number.isInteger(article.mengeProPalette) || article.mengeProPalette <= 0)
     throw new Error("Menge pro Palette muss größer 0 sein");
 }
@@ -306,5 +310,13 @@ export function sortArticles(articles) {
 function normalizeGebindeArt(value) {
   const text = String(value || "STK").trim().toUpperCase();
   return ["C1", "C2", "A1", "KRT", "STK"].includes(text) ? text : "STK";
+}
+
+function requiresPackageQuantity(gebindeArt) {
+  return String(gebindeArt || "").trim().toUpperCase() === "KRT";
+}
+
+function supportsPackageQuantity(gebindeArt) {
+  return ["KRT", "A1"].includes(String(gebindeArt || "").trim().toUpperCase());
 }
 

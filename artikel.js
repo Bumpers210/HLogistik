@@ -39,6 +39,7 @@ function bindElements() {
     "materialbezeichnungInput",
     "gebindeArtInput",
     "mengeProKartonField",
+    "mengeProKartonLabel",
     "mengeProKartonInput",
     "mengeProPaletteInput",
     "artikelgruppeInput",
@@ -182,7 +183,7 @@ function renderArticles() {
       <td>${escapeHtml(article.materialnummer)}</td>
       <td>${escapeHtml(article.materialbezeichnung)}</td>
       <td>${escapeHtml(article.gebindeArt || "STK")}</td>
-      <td class="num">${article.gebindeArt === "KRT" ? escapeHtml(article.mengeProKarton) : ""}</td>
+      <td class="num">${supportsPackageQuantity(article.gebindeArt) ? escapeHtml(article.mengeProKarton || "") : ""}</td>
       <td class="num">${escapeHtml(article.mengeProPalette)}</td>
       <td class="num">${escapeHtml(stockTotalsByMaterial.get(article.materialnummer) || 0)}</td>
       <td>${article.aktiv ? "Aktiv" : "Inaktiv"}</td>
@@ -658,7 +659,7 @@ function rowToArticle(row, columns, defaultMaterial, fileName) {
     materialnummer,
     materialbezeichnung,
     gebindeArt,
-    mengeProKarton: gebindeArt === "KRT" ? mengeProKarton || 1 : "",
+    mengeProKarton: supportsPackageQuantity(gebindeArt) ? mengeProKarton || "" : "",
     mengeProPalette,
     barcode: getCell(row, columns.barcode),
     lagerplatz: getCell(row, columns.location) || findStoragePlace(row),
@@ -951,7 +952,7 @@ function formArticle() {
     materialnummer: elements.materialnummerInput.value,
     materialbezeichnung: elements.materialbezeichnungInput.value,
     gebindeArt: elements.gebindeArtInput.value,
-    mengeProKarton: elements.gebindeArtInput.value === "KRT" ? elements.mengeProKartonInput.value : "",
+    mengeProKarton: supportsPackageQuantity(elements.gebindeArtInput.value) ? elements.mengeProKartonInput.value : "",
     mengeProPalette: elements.mengeProPaletteInput.value,
     artikelgruppe: elements.artikelgruppeInput.value,
     bemerkung: elements.bemerkungInput.value,
@@ -960,10 +961,21 @@ function formArticle() {
 }
 
 function updateKrtFieldVisibility() {
-  const isKrt = elements.gebindeArtInput.value === "KRT";
-  elements.mengeProKartonField.hidden = !isKrt;
-  elements.mengeProKartonInput.required = isKrt;
-  if (!isKrt) elements.mengeProKartonInput.value = "";
+  const gebindeArt = elements.gebindeArtInput.value;
+  const showQuantity = supportsPackageQuantity(gebindeArt);
+  const needsQuantity = requiresPackageQuantity(gebindeArt);
+  elements.mengeProKartonField.hidden = !showQuantity;
+  elements.mengeProKartonInput.required = needsQuantity;
+  if (elements.mengeProKartonLabel) elements.mengeProKartonLabel.textContent = `Menge pro ${gebindeArt}`;
+  if (!showQuantity) elements.mengeProKartonInput.value = "";
+}
+
+function requiresPackageQuantity(gebindeArt) {
+  return String(gebindeArt || "").trim().toUpperCase() === "KRT";
+}
+
+function supportsPackageQuantity(gebindeArt) {
+  return ["KRT", "A1"].includes(String(gebindeArt || "").trim().toUpperCase());
 }
 
 async function apiJson(url, options = {}) {

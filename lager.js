@@ -12,8 +12,11 @@ const elements = {};
 let serverOnline = false;
 let searchTimer = null;
 let movementSearchTimer = null;
+let articleOverviewSearchTimer = null;
 let receiptLineCounter = 0;
 let issueLineCounter = 0;
+let loadedLocations = [];
+const expandedOverviewMaterials = new Set();
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -50,7 +53,12 @@ function bindElements() {
     "refreshLocationsButton",
     "locationCount",
     "locationTableBody",
+    "articleOverviewSearchInput",
     "articleOverviewCount",
+    "articleOverviewMetricArticles",
+    "articleOverviewMetricPieces",
+    "articleOverviewMetricPallets",
+    "articleOverviewMetricPlaces",
     "articleOverviewTableBody",
     "movementSearchInput",
     "refreshMovementsButton",
@@ -89,6 +97,11 @@ function bindEvents() {
   }
   elements.refreshLocationsButton.addEventListener("click", loadLocations);
   elements.refreshMovementsButton.addEventListener("click", loadMovements);
+  elements.articleOverviewSearchInput.addEventListener("input", () => {
+    window.clearTimeout(articleOverviewSearchTimer);
+    articleOverviewSearchTimer = window.setTimeout(() => renderArticleOverview(loadedLocations), SEARCH_DEBOUNCE_MS);
+  });
+  elements.articleOverviewTableBody.addEventListener("click", handleArticleOverviewAction);
   elements.locationSearchInput.addEventListener("input", () => {
     window.clearTimeout(searchTimer);
     searchTimer = window.setTimeout(loadLocations, SEARCH_DEBOUNCE_MS);
@@ -147,6 +160,7 @@ function currentStorageView() {
 
 function applyStorageView() {
   const isOverview = currentStorageView() === "overview";
+  document.body.classList.toggle("is-article-overview-view", isOverview);
   elements.storageBookingLink?.classList.toggle("is-active", !isOverview);
   elements.articleOverviewNavLink?.classList.toggle("is-active", isOverview);
   if (elements.storageBookingPanel) elements.storageBookingPanel.hidden = isOverview;
@@ -345,6 +359,7 @@ async function loadLocations() {
     const query = elements.locationSearchInput.value.trim();
     if (query) params.set("q", query);
     const locations = await apiJson(`/api/storage/locations${params.toString() ? `?${params}` : ""}`);
+    loadedLocations = locations;
     renderLocations(locations);
     renderArticleOverview(locations);
   } catch (error) {
@@ -394,26 +409,81 @@ function renderLocations(locations) {
 
 function renderArticleOverview(locations) {
   elements.articleOverviewTableBody.innerHTML = "";
-  const overview = buildArticleOverview(locations);
+  const overview = filterArticleOverview(buildArticleOverview(locations));
   elements.articleOverviewCount.textContent = `${overview.length} Artikel`;
+  updateArticleOverviewMetrics(overview);
 
   if (!overview.length) {
     const row = document.createElement("tr");
-    row.innerHTML = `<td colspan="5" class="empty-cell">Keine Artikel mit Bestand gefunden.</td>`;
+    row.innerHTML = `<td colspan="6" class="empty-cell">Keine Artikel mit Bestand gefunden.</td>`;
     elements.articleOverviewTableBody.appendChild(row);
     return;
   }
 
   overview.forEach((article) => {
+    const isExpanded = expandedOverviewMaterials.has(article.materialnummer);
     const row = document.createElement("tr");
+    row.className = `article-overview-summary-row${isExpanded ? " is-expanded" : ""}`;
     row.innerHTML = `
-      <td>${escapeHtml(article.materialnummer)}</td>
+      <td><strong>${escapeHtml(article.materialnummer)}</strong></td>
       <td>${escapeHtml(article.materialbezeichnung)}</td>
       <td class="num">${escapeHtml(formatNumber(article.gesamtStueck))}</td>
       <td class="num">${escapeHtml(formatNumber(article.palettenGesamt))}</td>
-      <td>${renderStoragePlaces(article.locations)}</td>
+      <td class="num">${escapeHtml(formatNumber(article.locations.length))}</td>
+      <td>
+        <button class="secondary-button overview-toggle-button" type="button" data-overview-toggle="${escapeHtml(article.materialnummer)}" aria-expanded="${isExpanded}">
+          ${isExpanded ? "Ausblenden" : "Anzeigen"}
+        </button>
+      </td>
     `;
     elements.articleOverviewTableBody.appendChild(row);
+
+    if (isExpanded) {
+      const detailRow = document.createElement("tr");
+      detailRow.className = "article-overview-detail-row";
+      detailRow.innerHTML = `<td colspan="6">${renderArticleOverviewDetails(article)}</td>`;
+      elements.articleOverviewTableBody.appendChild(detailRow);
+    }
+  });
+}
+
+function updateArticleOverviewMetrics(overview) {
+  const totalPieces = overview.reduce((sum, article) => sum + Number(article.gesamtStueck || 0), 0);
+  const totalPallets = overview.reduce((sum, article) => sum + Number(article.palettenGesamt || 0), 0);
+  const totalPlaces = overview.reduce((sum, article) => sum + article.locations.length, 0);
+  elements.articleOverviewMetricArticles.textContent = formatNumber(overview.length);
+  elements.articleOverviewMetricPieces.textContent = formatNumber(totalPieces);
+  elements.articleOverviewMetricPallets.textContent = formatNumber(totalPallets);
+  elements.articleOverviewMetricPlaces.textContent = formatNumber(totalPlaces);
+}
+
+function handleArticleOverviewAction(event) {
+  const target = event.target instanceof Element ? event.target : event.target.parentElement;
+  const toggle = target?.closest("[data-overview-toggle]");
+  if (!toggle) return;
+  const materialnummer = toggle.dataset.overviewToggle;
+  if (expandedOverviewMaterials.has(materialnummer)) {
+    expandedOverviewMaterials.delete(materialnummer);
+  } else {
+    expandedOverviewMaterials.add(materialnummer);
+  }
+  renderArticleOverview(loadedLocations);
+}
+
+function filterArticleOverview(overview) {
+  const terms = normalizeSearch(elements.articleOverviewSearchInput?.value || "").split(" ").filter(Boolean);
+  if (!terms.length) return overview;
+  return overview.filter((article) => {
+    const haystack = normalizeSearch(
+      [
+        article.materialnummer,
+        article.materialbezeichnung,
+        article.gesamtStueck,
+        article.palettenGesamt,
+        ...article.locations.flatMap((location) => [location.lagerplatz, location.leNummer, location.mengeStueck])
+      ].join(" ")
+    );
+    return terms.every((term) => haystack.includes(term));
   });
 }
 
@@ -450,14 +520,35 @@ function buildArticleOverview(locations) {
     .sort((a, b) => String(a.materialnummer).localeCompare(String(b.materialnummer), "de", { numeric: true }));
 }
 
-function renderStoragePlaces(locations) {
+function renderArticleOverviewDetails(article) {
   const unit = storageUnitLabels().short;
-  return `<div class="storage-place-list">${locations
+  return `
+    <table class="overview-location-table">
+      <thead>
+        <tr>
+          <th>Stellplatz</th>
+          <th>${escapeHtml(unit)}</th>
+          <th>Stück</th>
+          <th>Paletten</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${article.locations
     .map((location) => {
-      const unitText = location.leNummer ? ` <span class="muted-count">${escapeHtml(unit)} ${escapeHtml(location.leNummer)}</span>` : "";
-      return `<div>${escapeHtml(location.lagerplatz)} - ${escapeHtml(formatNumber(location.mengeStueck))} St&uuml;ck${unitText}</div>`;
+      const palletCount = calculatePalletCount(location.mengeStueck, article.mengeProPalette, 1);
+      return `
+        <tr>
+          <td>${escapeHtml(location.lagerplatz)}</td>
+          <td>${escapeHtml(location.leNummer || "-")}</td>
+          <td class="num">${escapeHtml(formatNumber(location.mengeStueck))}</td>
+          <td class="num">${escapeHtml(formatNumber(palletCount))}</td>
+        </tr>
+      `;
     })
-    .join("")}</div>`;
+    .join("")}
+      </tbody>
+    </table>
+  `;
 }
 
 function renderMovements(movements) {
@@ -543,6 +634,15 @@ function sumQuantity(movements) {
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString("de-DE");
+}
+
+function normalizeSearch(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function calculatePalletCount(total, perPalette, fallback) {

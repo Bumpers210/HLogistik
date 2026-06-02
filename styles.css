@@ -270,15 +270,48 @@ h2 {
   color: #fff;
 }
 
-.storage-place-list {
-  display: grid;
-  gap: 3px;
-  min-width: 220px;
-  line-height: 1.35;
-}
-
 .article-overview-table td:last-child {
   white-space: normal;
+}
+
+.article-overview-summary-row.is-expanded {
+  background: #eef7f2;
+}
+
+.overview-toggle-button {
+  min-height: 30px;
+  padding: 0 10px;
+}
+
+.article-overview-detail-row td {
+  padding-top: 0;
+  background: #fbfdfb;
+}
+
+.article-overview-detail-row,
+.storage-table .overview-location-table tr {
+  cursor: default;
+}
+
+.overview-location-table {
+  width: 100%;
+  margin: 4px 0 8px;
+  border-collapse: collapse;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.overview-location-table th,
+.overview-location-table td {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+}
+
+.overview-location-table th {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-align: left;
+  background: #f4f7f5;
 }
 
 .link-button,
@@ -939,6 +972,49 @@ textarea[readonly] {
   align-items: start;
 }
 
+.is-article-overview-view .storage-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.is-article-overview-view .article-overview-panel {
+  width: 100%;
+}
+
+.article-overview-search {
+  grid-template-columns: minmax(260px, 1fr);
+}
+
+.article-overview-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  margin: 8px 0 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f6f9f7;
+}
+
+.article-overview-metrics div {
+  display: grid;
+  gap: 2px;
+  padding: 9px 12px;
+  border-right: 1px solid var(--line);
+}
+
+.article-overview-metrics div:last-child {
+  border-right: 0;
+}
+
+.article-overview-metrics strong {
+  font-size: 1.12rem;
+}
+
+.article-overview-metrics span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
 .storage-search {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(140px, 0.2fr);
@@ -1095,8 +1171,18 @@ textarea[readonly] {
   .article-layout,
   .article-toolbar,
   .storage-layout,
+  .article-overview-metrics,
   .storage-search {
     grid-template-columns: 1fr;
+  }
+
+  .article-overview-metrics div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .article-overview-metrics div:last-child {
+    border-bottom: 0;
   }
 
   .storage-editor {

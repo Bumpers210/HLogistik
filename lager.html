@@ -7,8 +7,8 @@
     <title>Buchung</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260602-5">
-    <script src="lager.js?v=20260602-7" defer></script>
+    <link rel="stylesheet" href="styles.css?v=20260602-7">
+    <script src="lager.js?v=20260602-9" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -153,15 +153,40 @@
             <h2>Artikelübersicht</h2>
             <span id="articleOverviewCount" class="muted-count">0 Artikel</span>
           </div>
+          <div class="article-overview-metrics" aria-label="Bestandskennzahlen">
+            <div>
+              <strong id="articleOverviewMetricArticles">0</strong>
+              <span>Artikel</span>
+            </div>
+            <div>
+              <strong id="articleOverviewMetricPieces">0</strong>
+              <span>Gesamtstückzahl</span>
+            </div>
+            <div>
+              <strong id="articleOverviewMetricPallets">0</strong>
+              <span>Paletten gesamt</span>
+            </div>
+            <div>
+              <strong id="articleOverviewMetricPlaces">0</strong>
+              <span>Stellplätze</span>
+            </div>
+          </div>
+          <div class="storage-search article-overview-search">
+            <label>
+              Artikelsuche
+              <input id="articleOverviewSearchInput" type="search" autocomplete="off" placeholder="Artikelnummer, Bezeichnung oder Stellplatz">
+            </label>
+          </div>
           <div class="article-table-wrap">
             <table class="article-table storage-table article-overview-table">
               <thead>
                 <tr>
                   <th>Artikel</th>
                   <th>Bezeichnung</th>
-                  <th>Gesamtstückzahl</th>
-                  <th>Paletten gesamt</th>
+                  <th>Bestand</th>
+                  <th>Paletten</th>
                   <th>Stellplätze</th>
+                  <th>Details</th>
                 </tr>
               </thead>
               <tbody id="articleOverviewTableBody"></tbody>
