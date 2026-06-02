@@ -11,11 +11,11 @@
     <title>Kommissionier-App</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260602-2">
+    <link rel="stylesheet" href="styles.css?v=20260602-5">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
     <script src="offline-store.js" defer></script>
-    <script src="app.js?v=20260602-14" defer></script>
+    <script src="app.js?v=20260602-15" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -39,6 +39,7 @@
           <button id="pickingModeButton" class="mode-button is-active" type="button">Kommissionierung</button>
           <button id="storageModeButton" class="mode-button" type="button">Einlagerung</button>
           <a id="storageAppLink" class="mode-button" href="/lager.html">Einlagern</a>
+          <a id="articleOverviewNavLink" class="mode-button" href="/lager.html?ansicht=artikeluebersicht">Artikelübersicht</a>
           <a id="articleNavLink" class="mode-button" href="/artikel.html">Artikelstamm</a>
         </nav>
         <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">

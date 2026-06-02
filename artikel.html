@@ -7,9 +7,9 @@
     <title>Artikelstamm</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260602-3">
+    <link rel="stylesheet" href="styles.css?v=20260602-5">
     <script src="xlsx.full.min.js" defer></script>
-    <script src="artikel.js?v=20260602-6" defer></script>
+    <script src="artikel.js?v=20260602-7" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -32,6 +32,7 @@
         <nav class="mode-nav" aria-label="Arbeitsbereich">
           <a class="mode-button" href="/">Kommissionierung</a>
           <a id="storageAppLink" class="mode-button" href="/lager.html">Einlagern</a>
+          <a class="mode-button" href="/lager.html?ansicht=artikeluebersicht">Artikelübersicht</a>
           <span class="mode-button is-active">Artikelstamm</span>
         </nav>
         <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">
@@ -102,6 +103,7 @@
               <select id="gebindeArtInput" name="gebindeArt" required>
                 <option value="C1">C1</option>
                 <option value="C2">C2</option>
+                <option value="A1">A1</option>
                 <option value="KRT">KRT</option>
                 <option value="STK">STK</option>
               </select>

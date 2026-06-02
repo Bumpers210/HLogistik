@@ -270,6 +270,17 @@ h2 {
   color: #fff;
 }
 
+.storage-place-list {
+  display: grid;
+  gap: 3px;
+  min-width: 220px;
+  line-height: 1.35;
+}
+
+.article-overview-table td:last-child {
+  white-space: normal;
+}
+
 .link-button,
 .file-button {
   display: inline-flex;

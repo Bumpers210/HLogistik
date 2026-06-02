@@ -88,6 +88,7 @@ function bindElements() {
     "pickingModeButton",
     "storageModeButton",
     "storageAppLink",
+    "articleOverviewNavLink",
     "articleNavLink",
     "orderNumber",
     "customerName",
@@ -330,6 +331,7 @@ function applyUserAccess() {
     elements.storageAppLink.textContent = storageNavLabel(currentUser.group);
   }
   if (elements.articleNavLink) elements.articleNavLink.hidden = isWarehouse;
+  if (elements.articleOverviewNavLink) elements.articleOverviewNavLink.hidden = isWarehouse;
 
   let changedMode = false;
   if ((isOffice || isTablet) && currentMode === "storage") {

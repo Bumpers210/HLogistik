@@ -50,12 +50,19 @@ function bindElements() {
     "refreshLocationsButton",
     "locationCount",
     "locationTableBody",
+    "articleOverviewCount",
+    "articleOverviewTableBody",
     "movementSearchInput",
     "refreshMovementsButton",
     "movementCount",
     "movementTableBody",
     "storagePageTitle",
-    "storageNavLabel"
+    "storageBookingLink",
+    "articleOverviewNavLink",
+    "storageBookingPanel",
+    "storageLocationsPanel",
+    "articleOverviewPanel",
+    "storageHistoryPanel"
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
   });
@@ -74,6 +81,7 @@ function bindEvents() {
   if (elements.warehouseSelect) {
     elements.warehouseSelect.addEventListener("change", async () => {
       saveCurrentWarehouse();
+      updateUnitLabels();
       resetBookingLines("receipt");
       resetBookingLines("issue");
       if (serverOnline) await refreshStorageViews();
@@ -94,6 +102,8 @@ function bindEvents() {
 async function initialize() {
   if (!enforceStorageAccess()) return;
   applyWarehouseSelection();
+  updateUnitLabels();
+  applyStorageView();
   try {
     setConnectionStatus(null);
     await apiJson("/api/health");
@@ -124,10 +134,25 @@ function enforceStorageAccess() {
 }
 
 function applyStoragePageLabels(userGroup) {
-  const label = storagePageLabel(userGroup);
+  const label = currentStorageView() === "overview" ? "Artikelübersicht" : storagePageLabel(userGroup);
   document.title = label;
   if (elements.storagePageTitle) elements.storagePageTitle.textContent = label;
-  if (elements.storageNavLabel) elements.storageNavLabel.textContent = label;
+  if (elements.storageBookingLink) elements.storageBookingLink.textContent = storagePageLabel(userGroup);
+}
+
+function currentStorageView() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("ansicht") === "artikeluebersicht" ? "overview" : "booking";
+}
+
+function applyStorageView() {
+  const isOverview = currentStorageView() === "overview";
+  elements.storageBookingLink?.classList.toggle("is-active", !isOverview);
+  elements.articleOverviewNavLink?.classList.toggle("is-active", isOverview);
+  if (elements.storageBookingPanel) elements.storageBookingPanel.hidden = isOverview;
+  if (elements.storageLocationsPanel) elements.storageLocationsPanel.hidden = isOverview;
+  if (elements.articleOverviewPanel) elements.articleOverviewPanel.hidden = !isOverview;
+  if (elements.storageHistoryPanel) elements.storageHistoryPanel.hidden = isOverview;
 }
 
 function switchUser() {
@@ -152,6 +177,26 @@ function applyWarehouseSelection() {
 
 function normalizeWarehouse(value) {
   return String(value || "SSI").trim().toUpperCase() === "SI" ? "SI" : "SSI";
+}
+
+function storageUnitLabels() {
+  return currentWarehouse() === "SSI"
+    ? { singular: "HU-Nummer", plural: "HU-Nummern", short: "HU" }
+    : { singular: "LE-Nummer", plural: "LE-Nummern", short: "LE" };
+}
+
+function updateUnitLabels() {
+  const labels = storageUnitLabels();
+  document.querySelectorAll("[data-unit-label]").forEach((element) => {
+    const type = element.dataset.unitLabel || "singular";
+    element.textContent = labels[type] || labels.singular;
+  });
+  if (elements.locationSearchInput) {
+    elements.locationSearchInput.placeholder = `Artikelnummer, Lagerplatz oder ${labels.singular}`;
+  }
+  if (elements.movementSearchInput) {
+    elements.movementSearchInput.placeholder = `Artikel, Lagerplatz, ${labels.short} oder Referenz`;
+  }
 }
 
 function switchStorageTab(type) {
@@ -237,7 +282,7 @@ function addBookingLine(type, values = {}) {
       <input data-field="mengeStueck" name="${type}-menge-${id}" type="number" inputmode="numeric" min="1" step="1" value="${escapeAttribute(values.mengeStueck)}" required>
     </td>
     <td>
-      <input data-field="leNummer" name="${type}-le-${id}" type="text" autocomplete="off" value="${escapeAttribute(values.leNummer)}" required>
+      <input data-field="leNummer" name="${type}-le-${id}" type="text" autocomplete="off" value="${escapeAttribute(values.leNummer)}">
     </td>
     <td>
       <button class="icon-button compact remove-booking-line" type="button" aria-label="Zeile entfernen">×</button>
@@ -285,6 +330,10 @@ function bookingLinesBody(type) {
 }
 
 async function refreshStorageViews() {
+  if (currentStorageView() === "overview") {
+    await loadLocations();
+    return;
+  }
   await Promise.all([loadLocations(), loadMovements()]);
 }
 
@@ -297,6 +346,7 @@ async function loadLocations() {
     if (query) params.set("q", query);
     const locations = await apiJson(`/api/storage/locations${params.toString() ? `?${params}` : ""}`);
     renderLocations(locations);
+    renderArticleOverview(locations);
   } catch (error) {
     setStatus(elements.storageStatus, `Stellplätze konnten nicht geladen werden: ${error.message}`, "error");
   }
@@ -340,6 +390,74 @@ function renderLocations(locations) {
     row.addEventListener("click", () => fillIssueFromLocation(location));
     elements.locationTableBody.appendChild(row);
   });
+}
+
+function renderArticleOverview(locations) {
+  elements.articleOverviewTableBody.innerHTML = "";
+  const overview = buildArticleOverview(locations);
+  elements.articleOverviewCount.textContent = `${overview.length} Artikel`;
+
+  if (!overview.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td colspan="5" class="empty-cell">Keine Artikel mit Bestand gefunden.</td>`;
+    elements.articleOverviewTableBody.appendChild(row);
+    return;
+  }
+
+  overview.forEach((article) => {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${escapeHtml(article.materialnummer)}</td>
+      <td>${escapeHtml(article.materialbezeichnung)}</td>
+      <td class="num">${escapeHtml(formatNumber(article.gesamtStueck))}</td>
+      <td class="num">${escapeHtml(formatNumber(article.palettenGesamt))}</td>
+      <td>${renderStoragePlaces(article.locations)}</td>
+    `;
+    elements.articleOverviewTableBody.appendChild(row);
+  });
+}
+
+function buildArticleOverview(locations) {
+  const byMaterial = new Map();
+  locations.forEach((location) => {
+    const materialnummer = String(location.materialnummer || "").trim();
+    if (!materialnummer) return;
+    if (!byMaterial.has(materialnummer)) {
+      byMaterial.set(materialnummer, {
+        materialnummer,
+        materialbezeichnung: location.materialbezeichnung || "",
+        mengeProPalette: Number(location.mengeProPalette || 0),
+        gesamtStueck: 0,
+        locations: []
+      });
+    }
+
+    const article = byMaterial.get(materialnummer);
+    const mengeStueck = Number(location.mengeStueck || 0);
+    article.gesamtStueck += mengeStueck;
+    article.locations.push({ ...location, mengeStueck });
+  });
+
+  return Array.from(byMaterial.values())
+    .map((article) => ({
+      ...article,
+      palettenGesamt: calculatePalletCount(article.gesamtStueck, article.mengeProPalette, article.locations.length),
+      locations: article.locations.sort((a, b) =>
+        String(a.lagerplatz).localeCompare(String(b.lagerplatz), "de", { numeric: true }) ||
+        String(a.leNummer).localeCompare(String(b.leNummer), "de", { numeric: true })
+      )
+    }))
+    .sort((a, b) => String(a.materialnummer).localeCompare(String(b.materialnummer), "de", { numeric: true }));
+}
+
+function renderStoragePlaces(locations) {
+  const unit = storageUnitLabels().short;
+  return `<div class="storage-place-list">${locations
+    .map((location) => {
+      const unitText = location.leNummer ? ` <span class="muted-count">${escapeHtml(unit)} ${escapeHtml(location.leNummer)}</span>` : "";
+      return `<div>${escapeHtml(location.lagerplatz)} - ${escapeHtml(formatNumber(location.mengeStueck))} St&uuml;ck${unitText}</div>`;
+    })
+    .join("")}</div>`;
 }
 
 function renderMovements(movements) {
@@ -400,7 +518,8 @@ async function apiJson(url, options = {}) {
     },
     ...rest,
   });
-  const data = await response.json();
+  const contentType = response.headers.get("content-type") || "";
+  const data = contentType.includes("application/json") ? await response.json() : { error: (await response.text()).trim() };
   if (!response.ok || data.ok === false) throw new Error(data.error || "Serverfehler");
   return data;
 }
@@ -420,6 +539,16 @@ function setStatus(element, message, type = "") {
 
 function sumQuantity(movements) {
   return movements.reduce((sum, movement) => sum + Number(movement.mengeStueck || 0), 0);
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString("de-DE");
+}
+
+function calculatePalletCount(total, perPalette, fallback) {
+  const paletteSize = Number(perPalette || 0);
+  if (!paletteSize) return Number(fallback || 0);
+  return Math.ceil(Number(total || 0) / paletteSize);
 }
 
 function formatDateTime(value) {

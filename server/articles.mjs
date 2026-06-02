@@ -254,7 +254,7 @@ export function normalizeArticle(article) {
 export function validateArticle(article) {
   if (!article.materialnummer) throw new Error("Materialnummer fehlt");
   if (!article.materialbezeichnung) throw new Error("Materialbezeichnung fehlt");
-  if (!["C1", "C2", "KRT", "STK"].includes(article.gebindeArt)) throw new Error("Gebindeart ist ungültig");
+  if (!["C1", "C2", "A1", "KRT", "STK"].includes(article.gebindeArt)) throw new Error("Gebindeart ist ungültig");
   if (article.gebindeArt === "KRT" && (!Number.isInteger(article.mengeProKarton) || article.mengeProKarton <= 0))
     throw new Error("Menge pro KRT muss größer 0 sein");
   if (!Number.isInteger(article.mengeProPalette) || article.mengeProPalette <= 0)
@@ -305,6 +305,6 @@ export function sortArticles(articles) {
 
 function normalizeGebindeArt(value) {
   const text = String(value || "STK").trim().toUpperCase();
-  return ["C1", "C2", "KRT", "STK"].includes(text) ? text : "STK";
+  return ["C1", "C2", "A1", "KRT", "STK"].includes(text) ? text : "STK";
 }
 

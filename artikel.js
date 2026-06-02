@@ -417,6 +417,20 @@ async function inspectStorageReceipts(receipts) {
       .filter((receipt) => receipt.materialnummer === materialnummer)
       .forEach((receipt) => {
         if (existingKeys.has(storageReceiptKey(receipt))) duplicates.push(receipt);
+        if (!receipt.leNummer) {
+          const generatedLocation = existing.find((location) => {
+            return (
+              String(location.materialnummer || "").trim().toLowerCase() === String(receipt.materialnummer || "").trim().toLowerCase() &&
+              String(location.lagerplatz || "").trim().toUpperCase() === String(receipt.lagerplatz || "").trim().toUpperCase() &&
+              /^EXCEL-/i.test(String(location.leNummer || location.le_nummer || "").trim())
+            );
+          });
+          const generatedKey = generatedLocation ? storageReceiptKey(generatedLocation) : "";
+          if (generatedLocation && !legacyKeys.has(generatedKey)) {
+            legacyKeys.add(generatedKey);
+            legacyBaseLocations.push(generatedLocation);
+          }
+        }
         if (receipt.originalLe && receipt.originalLe !== receipt.leNummer) {
           const legacyLocation = byLegacyKey.get(storageLegacyKey({ ...receipt, leNummer: receipt.originalLe }));
           const legacyKey = legacyLocation ? storageReceiptKey(legacyLocation) : "";
@@ -611,18 +625,10 @@ function stockLineReceipt(line, materialnummer, fileName) {
   return {
     materialnummer,
     lagerplatz: line.location,
-    leNummer: excelStockLeNumber(materialnummer, line.location),
+    leNummer: "",
     mengeStueck: line.quantity,
     referenz: `Excel-Import ${fileName}`
   };
-}
-
-function excelStockLeNumber(materialnummer, location) {
-  return `EXCEL-${materialnummer}-${String(location || "")
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")}`;
 }
 
 function mostFrequentNumber(values) {
@@ -746,7 +752,7 @@ function findArticleDescription(row, columns) {
 
 function normalizeGebindeArt(value) {
   const normalized = String(value || "").trim().toUpperCase();
-  return ["C1", "C2", "KRT", "STK"].includes(normalized) ? normalized : "STK";
+  return ["C1", "C2", "A1", "KRT", "STK"].includes(normalized) ? normalized : "STK";
 }
 
 function parsePositiveInteger(value) {
@@ -974,7 +980,8 @@ async function apiJson(url, options = {}) {
     },
     ...rest,
   });
-  const data = await response.json();
+  const contentType = response.headers.get("content-type") || "";
+  const data = contentType.includes("application/json") ? await response.json() : { error: (await response.text()).trim() };
   if (!response.ok || data.ok === false) throw new Error(data.error || "Serverfehler");
   return data;
 }

@@ -7,7 +7,7 @@ import { readArticlesSync, findArticleByCode } from "./articles.mjs";
 export function readStorageLocations({ query = "", materialnummer = "", warehouse = "SSI" } = {}) {
   const normalizedWarehouse = normalizeWarehouse(warehouse);
   const articles = readArticlesSync(normalizedWarehouse);
-  const articleNames = new Map(articles.map((article) => [article.materialnummer, article.materialbezeichnung]));
+  const articleInfo = new Map(articles.map((article) => [article.materialnummer, article]));
   const rows = getDb()
     .prepare(
       `SELECT lagerbestand.id, lagerbestand.lager, lagerbestand.materialnummer,
@@ -18,7 +18,7 @@ export function readStorageLocations({ query = "", materialnummer = "", warehous
        ORDER BY lagerbestand.lagerplatz COLLATE NOCASE, lagerbestand.materialnummer COLLATE NOCASE, lagerbestand.le_nummer COLLATE NOCASE`
     )
     .all(normalizedWarehouse)
-    .map((row) => storageLocationFromRow(row, articleNames));
+    .map((row) => storageLocationFromRow(row, articleInfo));
 
   const materialFilter = String(materialnummer || "").trim().toLowerCase();
   const terms = normalizeSearch(query).split(" ").filter(Boolean);
@@ -36,7 +36,7 @@ export function readStorageLocations({ query = "", materialnummer = "", warehous
 export function readStorageMovements({ query = "", limit = 100, warehouse = "SSI" } = {}) {
   const normalizedWarehouse = normalizeWarehouse(warehouse);
   const articles = readArticlesSync(normalizedWarehouse);
-  const articleNames = new Map(articles.map((article) => [article.materialnummer, article.materialbezeichnung]));
+  const articleInfo = new Map(articles.map((article) => [article.materialnummer, article]));
   const safeLimit = Math.min(Math.max(Number.isInteger(limit) && limit > 0 ? limit : 100, 1), 500);
   const rows = getDb()
     .prepare(
@@ -49,7 +49,7 @@ export function readStorageMovements({ query = "", limit = 100, warehouse = "SSI
        LIMIT ?`
     )
     .all(normalizedWarehouse, safeLimit)
-    .map((row) => storageMovementFromRow(row, articleNames));
+    .map((row) => storageMovementFromRow(row, articleInfo));
 
   const terms = normalizeSearch(query).split(" ").filter(Boolean);
   if (!terms.length) return rows;
@@ -162,7 +162,7 @@ function applyStorageReceipt(normalized, article, now, warehouse) {
       referenz: normalized.referenz,
       erstelltAm: now,
     },
-    location: storageLocationFromRow(location, new Map([[article.materialnummer, article.materialbezeichnung]])),
+    location: storageLocationFromRow(location, new Map([[article.materialnummer, article]])),
   };
 }
 
@@ -287,7 +287,7 @@ function applyStorageIssue(normalized, article, now, warehouse) {
       referenz: normalized.referenz,
       erstelltAm: now,
     },
-    location: storageLocationFromRow(location, new Map([[article.materialnummer, article.materialbezeichnung]])),
+    location: storageLocationFromRow(location, new Map([[article.materialnummer, article]])),
   };
 }
 
@@ -303,7 +303,6 @@ function normalizeStorageReceipt(receipt) {
   };
   if (!normalized.materialnummer) throw httpError(400, "Artikelnummer fehlt");
   if (!normalized.lagerplatz) throw httpError(400, "Lagerplatz fehlt");
-  if (!normalized.leNummer) throw httpError(400, "LE-Nummer fehlt");
   if (!Number.isInteger(normalized.mengeStueck) || normalized.mengeStueck <= 0)
     throw httpError(400, "Stückzahl muss größer 0 sein");
   return normalized;
@@ -321,7 +320,6 @@ function normalizeStorageIssue(issue) {
   };
   if (!normalized.materialnummer) throw httpError(400, "Artikelnummer oder Barcode fehlt");
   if (!normalized.lagerplatz) throw httpError(400, "Lagerplatz fehlt");
-  if (!normalized.leNummer) throw httpError(400, "LE-Nummer/HU fehlt");
   if (!Number.isInteger(normalized.mengeStueck) || normalized.mengeStueck <= 0)
     throw httpError(400, "Stückzahl muss größer 0 sein");
   return normalized;
@@ -329,12 +327,14 @@ function normalizeStorageIssue(issue) {
 
 // ── Row mapping ───────────────────────────────────────────────────────────────
 
-function storageLocationFromRow(row, articleNames = new Map()) {
+function storageLocationFromRow(row, articleInfo = new Map()) {
+  const article = articleInfo.get(String(row.materialnummer || "")) || {};
   return {
     id: String(row.id || ""),
     lager: normalizeWarehouse(row.lager),
     materialnummer: String(row.materialnummer || ""),
-    materialbezeichnung: String(row.materialbezeichnung || articleNames.get(String(row.materialnummer || "")) || ""),
+    materialbezeichnung: String(row.materialbezeichnung || article.materialbezeichnung || ""),
+    mengeProPalette: Number(article.mengeProPalette || 0),
     lagerplatz: String(row.lagerplatz || ""),
     leNummer: String(row.le_nummer || ""),
     mengeStueck: Number(row.menge_stueck || 0),
@@ -342,12 +342,13 @@ function storageLocationFromRow(row, articleNames = new Map()) {
   };
 }
 
-function storageMovementFromRow(row, articleNames = new Map()) {
+function storageMovementFromRow(row, articleInfo = new Map()) {
+  const article = articleInfo.get(String(row.materialnummer || "")) || {};
   return {
     id: String(row.id || ""),
     lager: normalizeWarehouse(row.lager),
     materialnummer: String(row.materialnummer || ""),
-    materialbezeichnung: String(row.materialbezeichnung || articleNames.get(String(row.materialnummer || "")) || ""),
+    materialbezeichnung: String(row.materialbezeichnung || article.materialbezeichnung || ""),
     bewegungsart: String(row.bewegungsart || ""),
     mengeStueck: Number(row.menge_stueck || 0),
     lagerplatz: String(row.lagerplatz || ""),

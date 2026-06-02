@@ -7,8 +7,8 @@
     <title>Buchung</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260602-2">
-    <script src="lager.js?v=20260602-4" defer></script>
+    <link rel="stylesheet" href="styles.css?v=20260602-5">
+    <script src="lager.js?v=20260602-7" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -30,7 +30,8 @@
         </label>
         <nav class="mode-nav" aria-label="Arbeitsbereich">
           <a class="mode-button" href="/">Kommissionierung</a>
-          <span id="storageNavLabel" class="mode-button is-active">Buchung</span>
+          <a id="storageBookingLink" class="mode-button is-active" href="/lager.html">Buchung</a>
+          <a id="articleOverviewNavLink" class="mode-button" href="/lager.html?ansicht=artikeluebersicht">Artikelübersicht</a>
           <a class="mode-button" href="/artikel.html">Artikelstamm</a>
         </nav>
         <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">
@@ -42,7 +43,7 @@
 
     <main class="app-shell storage-shell">
       <section class="storage-layout">
-        <aside class="summary-box storage-editor storage-booking-panel">
+        <aside id="storageBookingPanel" class="summary-box storage-editor storage-booking-panel">
           <div class="storage-tabs" role="tablist" aria-label="Buchungsart">
             <button id="receiptTabButton" class="storage-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="receiptTabPanel" data-storage-tab="receipt">Wareneingang</button>
             <button id="issueTabButton" class="storage-tab" type="button" role="tab" aria-selected="false" aria-controls="issueTabPanel" data-storage-tab="issue">Warenausgang</button>
@@ -61,7 +62,7 @@
               </label>
 
               <div class="booking-lines-heading">
-                <h3>Stellplätze und LE-Nummern</h3>
+                <h3>Stellplätze und <span data-unit-label="plural">HU-Nummern</span></h3>
                 <button id="addReceiptLineButton" class="secondary-button" type="button">Zeile hinzufügen</button>
               </div>
               <div class="booking-lines-wrap">
@@ -70,7 +71,7 @@
                     <tr>
                       <th>Lagerplatz</th>
                       <th>Stückzahl</th>
-                      <th>LE-Nummer / HU</th>
+                      <th data-unit-label="singular">HU-Nummer</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -96,7 +97,7 @@
               </label>
 
               <div class="booking-lines-heading">
-                <h3>Stellplätze und LE-Nummern</h3>
+                <h3>Stellplätze und <span data-unit-label="plural">HU-Nummern</span></h3>
                 <button id="addIssueLineButton" class="secondary-button" type="button">Zeile hinzufügen</button>
               </div>
               <div class="booking-lines-wrap">
@@ -105,7 +106,7 @@
                     <tr>
                       <th>Lagerplatz</th>
                       <th>Stückzahl</th>
-                      <th>LE-Nummer / HU</th>
+                      <th data-unit-label="singular">HU-Nummer</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -119,7 +120,7 @@
           </section>
         </aside>
 
-        <section class="list-panel">
+        <section id="storageLocationsPanel" class="list-panel">
           <div class="section-heading">
             <h2>Stellplätze</h2>
             <span id="locationCount" class="muted-count">0 Einträge</span>
@@ -127,7 +128,7 @@
           <div class="storage-search">
             <label>
               Abrufen
-              <input id="locationSearchInput" type="search" autocomplete="off" placeholder="Artikelnummer, Lagerplatz oder LE-Nummer">
+              <input id="locationSearchInput" type="search" autocomplete="off" placeholder="Artikelnummer, Lagerplatz oder HU-Nummer">
             </label>
             <button id="refreshLocationsButton" class="secondary-button" type="button">Aktualisieren</button>
           </div>
@@ -139,7 +140,7 @@
                   <th>Bezeichnung</th>
                   <th>Lagerplatz</th>
                   <th>Stück</th>
-                  <th>LE-Nummer</th>
+                  <th data-unit-label="singular">HU-Nummer</th>
                 </tr>
               </thead>
               <tbody id="locationTableBody"></tbody>
@@ -147,7 +148,28 @@
           </div>
         </section>
 
-        <section class="list-panel storage-history-panel">
+        <section id="articleOverviewPanel" class="list-panel article-overview-panel" hidden>
+          <div class="section-heading">
+            <h2>Artikelübersicht</h2>
+            <span id="articleOverviewCount" class="muted-count">0 Artikel</span>
+          </div>
+          <div class="article-table-wrap">
+            <table class="article-table storage-table article-overview-table">
+              <thead>
+                <tr>
+                  <th>Artikel</th>
+                  <th>Bezeichnung</th>
+                  <th>Gesamtstückzahl</th>
+                  <th>Paletten gesamt</th>
+                  <th>Stellplätze</th>
+                </tr>
+              </thead>
+              <tbody id="articleOverviewTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="storageHistoryPanel" class="list-panel storage-history-panel">
           <div class="section-heading">
             <h2>Historie</h2>
             <span id="movementCount" class="muted-count">0 Buchungen</span>
@@ -155,7 +177,7 @@
           <div class="storage-search">
             <label>
               Historie suchen
-              <input id="movementSearchInput" type="search" autocomplete="off" placeholder="Artikel, Lagerplatz, LE oder Referenz">
+              <input id="movementSearchInput" type="search" autocomplete="off" placeholder="Artikel, Lagerplatz, HU oder Referenz">
             </label>
             <button id="refreshMovementsButton" class="secondary-button" type="button">Aktualisieren</button>
           </div>
@@ -167,7 +189,7 @@
                   <th>Art</th>
                   <th>Artikel</th>
                   <th>Lagerplatz</th>
-                  <th>LE/HU</th>
+                  <th data-unit-label="singular">HU-Nummer</th>
                   <th>Menge</th>
                   <th>Referenz</th>
                 </tr>
