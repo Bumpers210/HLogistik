@@ -312,6 +312,10 @@ async function route(request, response) {
   if (pathname === "/api/orders" && request.method === "POST") {
     const body = await readBody(request, maxBodyBytes);
     const order = normalizeOrder(body.order || body);
+    if (!order.lines.length) {
+      sendJson(response, 400, { ok: false, error: "Leere Auftraege ohne Positionen werden nicht gespeichert" });
+      return;
+    }
     const duplicate = findDuplicateOrder(order);
     if (duplicate) {
       sendJson(response, 409, { ok: false, error: `Auftrag ${duplicate.orderNumber || duplicate.id} wurde bereits eingelesen` });
@@ -343,6 +347,10 @@ async function route(request, response) {
       return;
     }
     const order = normalizeOrder({ ...existing, ...(body.order || body), id: orderMatch[1] });
+    if (!order.lines.length) {
+      sendJson(response, 400, { ok: false, error: "Leere Auftraege ohne Positionen werden nicht gespeichert" });
+      return;
+    }
     preserveClosedOrderStatus(order, existing);
     const duplicate = findDuplicateOrder(order, orderMatch[1]);
     if (duplicate) {
@@ -415,20 +423,25 @@ async function sendExportFile(response, requestPath) {
 
 function findDuplicateOrder(order, excludeId = "") {
   const orderNumber = String(order.orderNumber || "").trim().toLowerCase();
+  const checkOrderNumber = orderNumber && !isReusableOrderNumber(orderNumber);
   const orderType = String(order.orderType || "picking").trim().toLowerCase();
   const fingerprint = orderFingerprint(order.rawText);
-  if (!orderNumber && !fingerprint) return null;
+  if (!checkOrderNumber && !fingerprint) return null;
 
   return readOrders().find((entry) => {
     if (excludeId && entry.id === excludeId) return false;
     if (String(entry.orderType || "picking").trim().toLowerCase() !== orderType) return false;
 
     const entryOrderNumber = String(entry.orderNumber || "").trim().toLowerCase();
-    if (orderNumber && entryOrderNumber && entryOrderNumber === orderNumber) return true;
+    if (checkOrderNumber && entryOrderNumber && entryOrderNumber === orderNumber) return true;
 
     const entryFingerprint = orderFingerprint(entry.rawText);
     return Boolean(fingerprint && entryFingerprint && entryFingerprint === fingerprint);
   }) || null;
+}
+
+function isReusableOrderNumber(orderNumber) {
+  return String(orderNumber || "").trim().toLowerCase() === "ssi";
 }
 
 function isOpenOrder(order) {

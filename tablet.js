@@ -1,5 +1,6 @@
 const API_BASE = "";
 const USER_KEY = "tablet-pick-user-v1";
+const SORT_MODE_KEY = "tablet-pick-sort-mode-v1";
 const MAIN_USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const ORDER_LIST_REFRESH_MS = 120000;
@@ -28,6 +29,7 @@ function bindElements() {
     "connectionStatus",
     "userNameInput",
     "orderSelect",
+    "sortModeSelect",
     "refreshButton",
     "takeOverButton",
     "saveButton",
@@ -56,6 +58,10 @@ function bindEvents() {
       return;
     }
     resetToStart("Bitte Auftrag wählen.");
+  });
+  elements.sortModeSelect.addEventListener("change", () => {
+    saveSortMode();
+    renderOrder();
   });
   elements.refreshButton.addEventListener("click", loadOrderList);
   elements.takeOverButton.addEventListener("click", takeOverCurrentOrder);
@@ -146,8 +152,10 @@ function renderCachedOrderList(orders) {
 function loadUser() {
   try {
     elements.userNameInput.value = localStorage.getItem(USER_KEY) || localStorage.getItem(MAIN_USER_KEY) || "";
+    elements.sortModeSelect.value = localStorage.getItem(SORT_MODE_KEY) || "fromBin";
   } catch {
     elements.userNameInput.value = "";
+    elements.sortModeSelect.value = "fromBin";
   }
 }
 
@@ -158,6 +166,14 @@ function saveUser() {
     localStorage.setItem(MAIN_USER_KEY, name);
   } catch {
     // Alte Browser können lokalen Speicher blockieren; die Pickliste bleibt trotzdem nutzbar.
+  }
+}
+
+function saveSortMode() {
+  try {
+    localStorage.setItem(SORT_MODE_KEY, elements.sortModeSelect.value || "fromBin");
+  } catch {
+    // Sortierung bleibt auch ohne lokalen Speicher fuer die aktuelle Sitzung aktiv.
   }
 }
 
@@ -243,11 +259,24 @@ function renderOrder() {
   }
   elements.pickHeader.hidden = false;
 
-  const sorted = currentOrder.lines.slice().sort((a, b) =>
-    String(a.fromBin || "").localeCompare(String(b.fromBin || ""))
-  );
+  const sorted = sortOrderLines(currentOrder.lines);
   sorted.forEach((line) => elements.lineList.appendChild(renderLine(line)));
   updateCounts();
+}
+
+function sortOrderLines(lines) {
+  const sortMode = elements.sortModeSelect.value || "fromBin";
+  const primary = sortMode === "product" ? "product" : "fromBin";
+  const secondary = primary === "product" ? "fromBin" : "product";
+  return lines.slice().sort((left, right) =>
+    compareLineValue(left[primary], right[primary]) ||
+    compareLineValue(left[secondary], right[secondary]) ||
+    compareLineValue(left.description, right.description)
+  );
+}
+
+function compareLineValue(left, right) {
+  return String(left || "").localeCompare(String(right || ""), "de", { numeric: true, sensitivity: "base" });
 }
 
 function renderLine(line) {

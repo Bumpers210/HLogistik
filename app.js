@@ -108,6 +108,7 @@ function bindElements() {
     "orderSelect",
     "saveOrderButton",
     "releaseOrderButton",
+    "discardDraftButton",
     "takeOverOrderButton",
     "refreshOrdersButton",
     "deleteOrderButton",
@@ -150,6 +151,7 @@ function bindEvents() {
   elements.pdfExportButton.addEventListener("click", exportPdf);
   elements.saveOrderButton.addEventListener("click", saveOrderNow);
   elements.releaseOrderButton.addEventListener("click", releaseCurrentOrder);
+  elements.discardDraftButton.addEventListener("click", discardCurrentDraft);
   elements.takeOverOrderButton.addEventListener("click", takeOverCurrentOrder);
   elements.refreshOrdersButton.addEventListener("click", loadOrderList);
   elements.deleteOrderButton.addEventListener("click", deleteCurrentOrder);
@@ -674,8 +676,8 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
   state.awaitingRelease = true;
   state.createdBy = currentUser.name;
   state.lastEditedBy = currentUser.name;
-  state.activeUser = currentUser.name;
-  state.activeUserAt = new Date().toISOString();
+  state.activeUser = "";
+  state.activeUserAt = "";
 
   if (parsed.orderNumber) state.orderNumber = parsed.orderNumber;
   if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
@@ -716,17 +718,19 @@ async function importStorageText(text, fileName = "", parsed = parseStorageSlipT
 
 async function findDuplicateOrderForImport(orderNumber, orderType, text = "") {
   const normalizedOrderNumber = String(orderNumber || "").trim().toLowerCase();
+  const checkOrderNumber = normalizedOrderNumber && !isReusableOrderNumber(normalizedOrderNumber);
   const fingerprint = orderFingerprint(text);
-  if (!serverOnline || (!normalizedOrderNumber && !fingerprint)) return null;
+  if (!serverOnline || (!checkOrderNumber && !fingerprint)) return null;
   try {
     const params = new URLSearchParams();
-    if (normalizedOrderNumber) params.set("orderNumber", orderNumber);
+    if (checkOrderNumber) params.set("orderNumber", orderNumber);
     if (orderType) params.set("orderType", orderType);
     if (fingerprint) params.set("fingerprint", fingerprint);
     const duplicate = await apiJson(`/api/orders/duplicate-check?${params}`);
     if (duplicate?.duplicate) return duplicate.order;
 
     const orders = await apiJson("/api/orders?includeExported=1");
+    if (!checkOrderNumber) return null;
     return orders.find((order) => {
       if (state.id && order.id === state.id) return false;
       return String(order.orderNumber || "").trim().toLowerCase() === normalizedOrderNumber &&
@@ -735,6 +739,10 @@ async function findDuplicateOrderForImport(orderNumber, orderType, text = "") {
   } catch {
     return null;
   }
+}
+
+function isReusableOrderNumber(orderNumber) {
+  return String(orderNumber || "").trim().toLowerCase() === "ssi";
 }
 
 function orderFingerprint(text) {
@@ -826,18 +834,29 @@ function parseOrderText(text) {
   }
 
   const tableRows = annotateDestinationExceptions(collectWarehouseRows(cleanedLines));
-  const destinationCustomerName = destinationToCustomerName(tableRows);
+  const stackedRows = tableRows.length ? [] : annotateDestinationExceptions(collectStackedWarehouseRows(cleanedLines));
+  const splitRows = tableRows.length || stackedRows.length ? [] : annotateDestinationExceptions(collectSplitWarehouseRows(cleanedLines));
+  const warehouseRows = tableRows.length ? tableRows : stackedRows.length ? stackedRows : splitRows;
+  const destinationCustomerName = destinationToCustomerName(warehouseRows);
   const customerName = destinationCustomerName || cleanCustomerName(explicitCustomerName || findCustomerFromHeader(cleanedLines));
 
-  if (tableRows.length) {
+  if (warehouseRows.length) {
     return {
       orderNumber: "",
       customerName: customerName || "",
-      lines: tableRows.map((line) => createLine({
+      lines: warehouseRows.map((line) => createLine({
         ...line,
         actualQty: line.targetQty,
         fromHandlingUnitEditable: !String(line.fromHandlingUnit || "").trim()
       }))
+    };
+  }
+
+  if (cleanedLines.some((line) => /lageraufg/i.test(line))) {
+    return {
+      orderNumber: orderNumber || "",
+      customerName: customerName || "",
+      lines: []
     };
   }
 
@@ -1033,6 +1052,7 @@ function parseWarehouseLineByColumns(line) {
   const warehouseOrder = tokens[firstNumber];
   const binIndex = tokens.findIndex((token, index) => index > firstNumber && Boolean(extractBin(token)));
   if (binIndex === -1) return null;
+  if (!hasIntermediateWarehouseColumn(tokens, firstNumber, binIndex)) return null;
 
   const productInfo = parseProductTokens(tokens, binIndex + 1);
   const product = productInfo.value;
@@ -1065,6 +1085,13 @@ function parseWarehouseLineByColumns(line) {
     unit,
     toBin
   };
+}
+
+function hasIntermediateWarehouseColumn(tokens, firstNumber, binIndex) {
+  const intermediateTokens = tokens.slice(firstNumber + 1, binIndex);
+  if (!intermediateTokens.length) return false;
+  if (extractHandlingUnit(intermediateTokens.join(" "))) return false;
+  return intermediateTokens.some((token) => /^\d{2,6}$/.test(String(token || "")));
 }
 
 function destinationToCustomerName(lines) {
@@ -1166,6 +1193,107 @@ function collectWarehouseRows(lines) {
   });
 
   return rows;
+}
+
+function collectStackedWarehouseRows(lines) {
+  const rows = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const warehouseOrder = String(lines[index] || "").trim();
+    if (!/^\d{6,}$/.test(warehouseOrder)) {
+      index += 1;
+      continue;
+    }
+
+    const parsed = parseStackedWarehouseRow(lines, index);
+    if (parsed) {
+      rows.push(parsed.line);
+      index = parsed.nextIndex;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return rows;
+}
+
+function parseStackedWarehouseRow(lines, startIndex) {
+  const warehouseOrder = String(lines[startIndex] || "").trim();
+  let cursor = startIndex + 1;
+  const fromHandlingUnit = extractHandlingUnit(lines[cursor] || "");
+  if (!fromHandlingUnit) return null;
+  cursor += 1;
+
+  const fromBin = extractBin(lines[cursor] || "");
+  if (!fromBin) return null;
+  cursor += 1;
+
+  const productInfo = parseProductTokens([lines[cursor] || ""], 0);
+  if (!productInfo.value) return null;
+  cursor += 1;
+
+  if (isOcrQuantityMarker(lines[cursor] || "")) cursor += 1;
+  const quantity = parseQuantityToken(lines[cursor] || "");
+  if (!quantity || isSuspiciousMultiplierQuantity(quantity.value)) return null;
+  cursor += 1;
+
+  const unit = isUnitToken(lines[cursor] || "") ? normalizeUnit(lines[cursor] || "") : "Stk";
+  if (isUnitToken(lines[cursor] || "")) cursor += 1;
+
+  const descriptionParts = [];
+  let toBin = "";
+  while (cursor < lines.length) {
+    const value = String(lines[cursor] || "").trim();
+    const destination = extractDestinationBin(value);
+    if (destination) {
+      toBin = destination;
+      cursor += 1;
+      break;
+    }
+    if (/^\d{6,}$/.test(value)) break;
+    descriptionParts.push(value);
+    cursor += 1;
+  }
+
+  if (!descriptionParts.length && !toBin) return null;
+
+  const remainingText = descriptionParts.join(" ");
+  return {
+    nextIndex: cursor,
+    line: {
+      warehouseOrder,
+      fromHandlingUnit,
+      fromBin,
+      product: productInfo.value,
+      description: cleanProductDescription(remainingText, toBin),
+      targetQty: quantity.value,
+      unit,
+      toBin
+    }
+  };
+}
+
+function collectSplitWarehouseRows(lines) {
+  const headers = [];
+  const continuations = [];
+
+  lines.forEach((line) => {
+    const header = parseWarehouseHeader(line);
+    if (header) headers.push(header);
+
+    extractWarehouseContinuations(line).forEach((continuation) => {
+      if (continuation.description || continuation.toBin) continuations.push(continuation);
+    });
+  });
+
+  if (!headers.length || headers.length !== continuations.length) return [];
+
+  return headers.map((header, index) => ({
+    ...header,
+    ...continuations[index]
+  }));
 }
 
 function addWarehouseRow(rows, seen, line) {
@@ -1291,12 +1419,16 @@ function parseHandlingUnitTokens(tokens, cursor) {
   const current = normalizeHandlingUnitToken(tokens[cursor] || "");
   const next = normalizeHandlingUnitToken(tokens[cursor + 1] || "");
 
-  if (current.length >= 8 && next && `${current}${next}`.length <= 20) {
+  if (current.length >= 8 && next && isHandlingUnitContinuationToken(tokens[cursor + 1]) && `${current}${next}`.length <= 20) {
     return { value: `${current}${next}`, next: cursor + 2 };
   }
-  if (current.length >= 10) return { value: current, next: cursor + 1 };
+  if (current.length >= 8) return { value: current, next: cursor + 1 };
 
   return { value: "", next: cursor };
+}
+
+function isHandlingUnitContinuationToken(value) {
+  return /^[0-9OoQD]{1,12}$/.test(String(value || ""));
 }
 
 function normalizeHandlingUnitToken(value) {
@@ -1796,6 +1928,10 @@ function renderReleaseButton() {
   );
   elements.releaseOrderButton.hidden = !isDraft;
   elements.releaseOrderButton.disabled = !isDraft || !serverOnline || !currentUser.name;
+  if (elements.discardDraftButton) {
+    elements.discardDraftButton.hidden = !isDraft;
+    elements.discardDraftButton.disabled = !isDraft;
+  }
 }
 
 function renderDeleteOrderButton() {
@@ -1853,6 +1989,12 @@ function compareStorageBins(left, right, importOrder) {
 function syncFields() {
   ["orderNumber", "customerName", "orderDate", "orderTime", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
     if (elements[id].value !== state[id]) elements[id].value = state[id] || "";
+  });
+}
+
+function syncStateFromFields() {
+  ["orderNumber", "customerName", "orderDate", "orderTime", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
+    if (elements[id]) state[id] = elements[id].value;
   });
 }
 
@@ -2225,9 +2367,15 @@ function scheduleServerSave() {
 
 async function saveOrderNow(silent = false, { allowDraftRelease = false, touch = true } = {}) {
   if (!requireCurrentUser()) return false;
+  syncStateFromFields();
 
   if (state.awaitingRelease && !allowDraftRelease) {
     saveDraftState(silent ? "Entwurf lokal gespeichert." : "Entwurf lokal gespeichert. Mit \"Auftrag freigeben\" in die Auftragsliste übernehmen.");
+    return false;
+  }
+
+  if (!state.lines.length) {
+    if (!silent) setServerStatus("Leere Auftraege ohne Positionen werden nicht gespeichert.", "error");
     return false;
   }
 
@@ -2293,6 +2441,7 @@ function isOwnCompletedOrder(order) {
 
 async function releaseCurrentOrder() {
   if (!requireCurrentUser()) return;
+  syncStateFromFields();
   if (!state.awaitingRelease || !state.lines.length) {
     setServerStatus("Kein Entwurf zur Freigabe vorhanden.", "error");
     return;
@@ -2311,8 +2460,8 @@ async function releaseCurrentOrder() {
   state.awaitingRelease = false;
   state.createdBy = state.createdBy || currentUser.name;
   state.lastEditedBy = currentUser.name;
-  state.activeUser = currentUser.name;
-  state.activeUserAt = new Date().toISOString();
+  state.activeUser = "";
+  state.activeUserAt = "";
   state.completedBy = "";
   state.completedAt = "";
   const saved = await saveOrderNow(false, { allowDraftRelease: true, touch: false });
@@ -2327,6 +2476,17 @@ async function releaseCurrentOrder() {
   setServerStatus("Auftrag freigegeben und in die Auftragsliste übernommen.", "ok");
   resetCurrentOrderView();
   await loadOrderList();
+}
+
+function discardCurrentDraft() {
+  if (!state.awaitingRelease && !state.lines.length) {
+    resetCurrentOrderView();
+    return;
+  }
+
+  if (!confirm("Importierten Entwurf verwerfen und Seite leeren?")) return;
+  resetCurrentOrderView();
+  setServerStatus("Entwurf verworfen. Die Kommissionier-Seite wurde geleert.", "ok");
 }
 
 async function deleteCurrentOrder() {

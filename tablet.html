@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#167a58">
     <title>Tablet Pickliste</title>
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="tablet.css?v=20260602-2">
-    <script src="tablet-legacy.js?v=20260602-2"></script>
+    <link rel="stylesheet" href="tablet.css?v=20260602-3">
+    <script src="tablet-legacy.js?v=20260602-3"></script>
   </head>
   <body>
     <header class="tablet-header">
@@ -28,6 +28,13 @@
           Auftrag
           <select id="orderSelect">
             <option value="">Auftrag wählen</option>
+          </select>
+        </label>
+        <label>
+          Sortierung
+          <select id="sortModeSelect">
+            <option value="fromBin">Lagerplatz</option>
+            <option value="product">Artikelnummer</option>
           </select>
         </label>
         <button id="refreshButton" type="button">Aktualisieren</button>
@@ -51,7 +58,7 @@
         <div id="pickHeader" class="pick-column-header" hidden>
           <span></span>
           <div class="pick-column-grid">
-            <span>Produkt</span>
+            <span>Artikelnummer</span>
             <span>Lagerplatz</span>
             <span>Produktbeschreibung</span>
             <span>Soll</span>

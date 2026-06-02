@@ -1,5 +1,6 @@
 var API_BASE = "";
 var USER_KEY = "tablet-pick-user-v1";
+var SORT_MODE_KEY = "tablet-pick-sort-mode-v1";
 var MAIN_USER_KEY = "kommissionier-app-user-v1";
 var USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 var ORDER_LIST_REFRESH_MS = 120000;
@@ -23,6 +24,7 @@ function bindElements() {
     "connectionStatus",
     "userNameInput",
     "orderSelect",
+    "sortModeSelect",
     "refreshButton",
     "takeOverButton",
     "saveButton",
@@ -55,6 +57,10 @@ function bindEvents() {
     } else {
       resetToStart("Bitte Auftrag waehlen.");
     }
+  };
+  elements.sortModeSelect.onchange = function () {
+    saveSortMode();
+    renderOrder();
   };
   elements.refreshButton.onclick = loadOrderList;
   elements.takeOverButton.onclick = takeOverCurrentOrder;
@@ -90,10 +96,12 @@ function initialize() {
 function loadUser() {
   try {
     elements.userNameInput.value = localStorage.getItem(USER_KEY) || localStorage.getItem(MAIN_USER_KEY) || "";
+    elements.sortModeSelect.value = localStorage.getItem(SORT_MODE_KEY) || "fromBin";
     if (!localStorage.getItem(USER_GROUP_KEY)) localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch (error) {
     void error;
     elements.userNameInput.value = "";
+    elements.sortModeSelect.value = "fromBin";
   }
 }
 
@@ -106,6 +114,14 @@ function saveUser() {
   } catch (error) {
     void error;
     // Lokaler Speicher ist auf alten Browsern manchmal eingeschraenkt.
+  }
+}
+
+function saveSortMode() {
+  try {
+    localStorage.setItem(SORT_MODE_KEY, elements.sortModeSelect.value || "fromBin");
+  } catch (error) {
+    void error;
   }
 }
 
@@ -185,13 +201,26 @@ function renderOrder() {
   }
   setHidden(elements.pickHeader, false);
 
-  var sorted = currentOrder.lines.slice().sort(function (left, right) {
-    return String(left.fromBin || "").localeCompare(String(right.fromBin || ""));
-  });
+  var sorted = sortOrderLines(currentOrder.lines);
   for (var index = 0; index < sorted.length; index += 1) {
     elements.lineList.appendChild(renderLine(sorted[index]));
   }
   updateCounts();
+}
+
+function sortOrderLines(lines) {
+  var sortMode = elements.sortModeSelect.value || "fromBin";
+  var primary = sortMode === "product" ? "product" : "fromBin";
+  var secondary = primary === "product" ? "fromBin" : "product";
+  return lines.slice().sort(function (left, right) {
+    return compareLineValue(left[primary], right[primary]) ||
+      compareLineValue(left[secondary], right[secondary]) ||
+      compareLineValue(left.description, right.description);
+  });
+}
+
+function compareLineValue(left, right) {
+  return String(left || "").localeCompare(String(right || ""));
 }
 
 function renderLine(line) {

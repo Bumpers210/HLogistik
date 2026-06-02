@@ -74,7 +74,7 @@ function printableHtml(order, fileName) {
       p { margin: 0 0 4px; }
       .meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 18px; margin-bottom: 10px; font-size: 11px; }
       .note { min-height: 28px; margin-bottom: 10px; padding: 6px; border: 1px solid #777; }
-      table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+      table { width: calc(100% - 50mm); border-collapse: collapse; table-layout: fixed; }
       th, td { padding: 4px 3px; border: 1px solid #555; vertical-align: top; overflow-wrap: anywhere; }
       th { background: #e8eee9; text-align: left; font-size: 9px; }
       td { font-size: 9px; }
