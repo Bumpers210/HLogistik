@@ -85,7 +85,7 @@ async function initialize() {
     await apiJson("/api/health");
     serverOnline = true;
     setConnectionStatus(true);
-    await loadArticles();
+    await loadArticles("");
   } catch {
     serverOnline = false;
     setConnectionStatus(false);
@@ -121,11 +121,10 @@ function switchUser() {
   window.location.replace("/");
 }
 
-async function loadArticles() {
+async function loadArticles(query = "") {
   if (!serverOnline) return;
   try {
     const params = new URLSearchParams();
-    const query = elements.searchInput.value.trim();
     if (query) params.set("q", query);
     if (elements.includeInactiveInput.checked) params.set("includeInactive", "1");
     const [loadedArticles, locations] = await Promise.all([
