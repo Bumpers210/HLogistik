@@ -173,6 +173,206 @@ export function bookStorageIssue(issue, warehouse = "SSI") {
   return { movement: result.movements[0], location: result.locations[0] };
 }
 
+export function bookPickingOrderIssues(order, warehouse = "SSI") {
+  const lines = Array.isArray(order?.lines) ? order.lines : [];
+  const result = { booked: 0, errors: [] };
+
+  lines.forEach((line, index) => {
+    const materialnummer = String(line.product || "").trim();
+    const lagerplatz = String(line.fromBin || "").trim();
+    const quantitySource = line.actualQty !== undefined && line.actualQty !== null && String(line.actualQty).trim() !== ""
+      ? line.actualQty
+      : line.targetQty;
+    const mengeStueck = readPickingQuantity(quantitySource);
+
+    if (!materialnummer || !lagerplatz || mengeStueck <= 0) {
+      result.errors.push(pickingIssueError(line, index, "Artikelnummer, Lagerplatz oder Menge fehlt"));
+      return;
+    }
+
+    try {
+      bookPickingIssueIgnoringHandlingUnit({
+        materialnummer,
+        lagerplatz,
+        mengeStueck,
+        referenz: `Kommissionierung ${order.orderNumber || order.id || ""}`.trim()
+      }, warehouse);
+      result.booked += 1;
+    } catch (error) {
+      result.errors.push(pickingIssueError(line, index, error.message || "Bestand konnte nicht abgebucht werden"));
+    }
+  });
+
+  return result;
+}
+
+export function logPickingIssueErrors(order, stockIssue, exportResult = {}, warehouse = "SSI") {
+  const errors = Array.isArray(stockIssue?.errors) ? stockIssue.errors : [];
+  if (!errors.length) return [];
+
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const now = new Date().toISOString();
+  const insert = getDb().prepare(
+    `INSERT INTO bestandsbuchung_fehler
+       (id, lager, auftrag_id, auftragsnummer, position, lagerauftrag, materialnummer, lagerplatz,
+        le_nummer, menge, fehler, exportiert_pdf_datei, erstellt_am)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  return errors.map((error) => {
+    const entry = {
+      id: createStorageMovementId(),
+      lager: normalizedWarehouse,
+      auftragId: String(order?.id || ""),
+      auftragsnummer: String(order?.orderNumber || ""),
+      position: Number(error.position || 0),
+      lagerauftrag: String(error.warehouseOrder || ""),
+      materialnummer: String(error.materialnummer || ""),
+      lagerplatz: String(error.lagerplatz || ""),
+      leNummer: String(error.leNummer || ""),
+      menge: String(error.menge || ""),
+      fehler: String(error.message || ""),
+      exportiertPdfDatei: String(exportResult.file || ""),
+      erstelltAm: now
+    };
+
+    insert.run(
+      entry.id,
+      entry.lager,
+      entry.auftragId,
+      entry.auftragsnummer,
+      entry.position,
+      entry.lagerauftrag,
+      entry.materialnummer,
+      entry.lagerplatz,
+      entry.leNummer,
+      entry.menge,
+      entry.fehler,
+      entry.exportiertPdfDatei,
+      entry.erstelltAm
+    );
+    return entry;
+  });
+}
+
+export function listPickingIssueErrorLog({ warehouse = "SSI", limit = 200, orderId = "", orderNumber = "" } = {}) {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const safeLimit = Math.max(1, Math.min(1000, Number(limit) || 200));
+  const where = ["lager = ?"];
+  const params = [normalizedWarehouse];
+
+  if (orderId) {
+    where.push("auftrag_id = ?");
+    params.push(String(orderId));
+  }
+  if (orderNumber) {
+    where.push("auftragsnummer = ?");
+    params.push(String(orderNumber));
+  }
+
+  return getDb()
+    .prepare(
+      `SELECT id, lager, auftrag_id, auftragsnummer, position, lagerauftrag, materialnummer,
+              lagerplatz, le_nummer, menge, fehler, exportiert_pdf_datei, erstellt_am
+       FROM bestandsbuchung_fehler
+       WHERE ${where.join(" AND ")}
+       ORDER BY erstellt_am DESC, position ASC
+       LIMIT ?`
+    )
+    .all(...params, safeLimit)
+    .map((row) => ({
+      id: String(row.id || ""),
+      lager: String(row.lager || ""),
+      auftragId: String(row.auftrag_id || ""),
+      auftragsnummer: String(row.auftragsnummer || ""),
+      position: Number(row.position || 0),
+      lagerauftrag: String(row.lagerauftrag || ""),
+      materialnummer: String(row.materialnummer || ""),
+      lagerplatz: String(row.lagerplatz || ""),
+      leNummer: String(row.le_nummer || ""),
+      menge: String(row.menge || ""),
+      fehler: String(row.fehler || ""),
+      exportiertPdfDatei: String(row.exportiert_pdf_datei || ""),
+      erstelltAm: String(row.erstellt_am || "")
+    }));
+}
+
+function bookPickingIssueIgnoringHandlingUnit(issue, warehouse = "SSI") {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const articles = readArticlesSync(normalizedWarehouse);
+  const article = findArticleByCode(articles, issue.materialnummer);
+  if (!article) throw httpError(400, "Artikelnummer ist nicht im Artikelstamm vorhanden");
+
+  const lagerplatz = String(issue.lagerplatz || "").trim().toUpperCase();
+  const mengeStueck = readInteger(issue.mengeStueck);
+  if (!lagerplatz) throw httpError(400, "Lagerplatz fehlt");
+  if (!Number.isInteger(mengeStueck) || mengeStueck <= 0) throw httpError(400, "Stückzahl muss größer 0 sein");
+
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id, le_nummer, menge_stueck FROM lagerbestand
+       WHERE lager = ? AND materialnummer = ? AND lagerplatz = ? AND menge_stueck > 0
+       ORDER BY le_nummer COLLATE NOCASE`
+    )
+    .all(normalizedWarehouse, article.materialnummer, lagerplatz);
+  const available = rows.reduce((sum, row) => sum + Number(row.menge_stueck || 0), 0);
+  if (available < mengeStueck) throw httpError(400, `Nicht genug Bestand vorhanden. Bestand: ${available} Stück`);
+
+  let remaining = mengeStueck;
+  const now = new Date().toISOString();
+  db.exec("BEGIN");
+  try {
+    rows.forEach((row) => {
+      if (remaining <= 0) return;
+      const current = Number(row.menge_stueck || 0);
+      const booked = Math.min(current, remaining);
+      const rest = current - booked;
+      remaining -= booked;
+
+      db.prepare(`UPDATE lagerbestand SET menge_stueck = ?, aktualisiert_am = ? WHERE id = ?`).run(rest, now, row.id);
+      db.prepare(
+        `INSERT INTO lagerbewegung (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, lagerplatz, le_nummer, referenz, erstellt_am)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        createStorageMovementId(),
+        normalizedWarehouse,
+        article.id,
+        article.materialnummer,
+        "Warenausgang",
+        booked,
+        lagerplatz,
+        String(row.le_nummer || ""),
+        issue.referenz,
+        now
+      );
+    });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function pickingIssueError(line, index, message) {
+  return {
+    position: index + 1,
+    warehouseOrder: String(line?.warehouseOrder || ""),
+    materialnummer: String(line?.product || ""),
+    lagerplatz: String(line?.fromBin || ""),
+    leNummer: String(line?.fromHandlingUnit || ""),
+    menge: String(line?.actualQty || line?.targetQty || ""),
+    message
+  };
+}
+
+function readPickingQuantity(value) {
+  const text = String(value ?? "").trim();
+  const multiplier = text.replace(/\s+/g, "").match(/^(\d+)x([\d.,]+)$/i);
+  if (multiplier) return readInteger(multiplier[1]) * readInteger(multiplier[2]);
+  return readInteger(text);
+}
+
 export function bookStorageIssues(issues, warehouse = "SSI") {
   if (!Array.isArray(issues) || !issues.length)
     throw httpError(400, "Mindestens eine Buchungszeile ist erforderlich");

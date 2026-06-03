@@ -9,7 +9,7 @@
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css?v=20260602-6">
     <script src="xlsx.full.min.js" defer></script>
-    <script src="artikel.js?v=20260602-8" defer></script>
+    <script src="artikel.js?v=20260603-5" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -56,7 +56,7 @@
           <button id="newArticleButton" class="primary-button" type="button">Neuer Artikel</button>
           <label class="secondary-button file-button">
             Excel/CSV importieren
-            <input id="csvInput" type="file" accept=".xls,.xlsx,.csv,.html,.htm,text/csv">
+            <input id="csvInput" type="file" accept=".xls,.xlsx,.csv,.html,.htm,text/csv" multiple>
           </label>
           <a id="exportLink" class="secondary-button link-button" href="/api/articles/export">CSV exportieren</a>
         </div>
@@ -73,11 +73,11 @@
             <table class="article-table">
               <thead>
                 <tr>
-                  <th>Material</th>
-                  <th>Bezeichnung</th>
-                  <th>Gebinde</th>
-                  <th>Menge Gebinde</th>
-                  <th>Palette</th>
+                  <th>Artikelnummer</th>
+                  <th>Artikelbezeichnung</th>
+                  <th>Gebindeart</th>
+                  <th>Menge pro Gebinde</th>
+                  <th>Menge pro Palette</th>
                   <th>Gesamtstückzahl</th>
                   <th>Status</th>
                 </tr>

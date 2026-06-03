@@ -192,7 +192,7 @@ async function loadOrderList() {
       addOption(
         elements.orderSelect,
         order.id,
-        `${order.orderNumber || order.id} - ${order.customerName || ""} (${order.picked}/${order.total})`
+        formatOrderOptionLabel(order)
       );
     });
     elements.orderSelect.value = selected;
@@ -277,6 +277,17 @@ function sortOrderLines(lines) {
 
 function compareLineValue(left, right) {
   return String(left || "").localeCompare(String(right || ""), "de", { numeric: true, sensitivity: "base" });
+}
+
+function formatOrderOptionLabel(order) {
+  const status = orderStatusText(order);
+  return `${order.orderNumber || order.id} - ${order.customerName || ""} [${status}] (${order.picked}/${order.total})`;
+}
+
+function orderStatusText(order) {
+  const activeUser = String(order?.activeUser || "").trim();
+  if (!activeUser) return "Frei";
+  return activeUser === currentUserName() ? "Bearbeitet von mir" : `Bearbeitet von ${activeUser}`;
 }
 
 function renderLine(line) {

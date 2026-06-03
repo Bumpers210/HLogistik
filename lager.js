@@ -64,12 +64,18 @@ function bindElements() {
     "refreshMovementsButton",
     "movementCount",
     "movementTableBody",
+    "refreshIssueErrorsButton",
+    "issueErrorSortSelect",
+    "issueErrorCount",
+    "issueErrorTableBody",
     "storagePageTitle",
     "storageBookingLink",
     "articleOverviewNavLink",
+    "issueLogNavLink",
     "storageBookingPanel",
     "storageLocationsPanel",
     "articleOverviewPanel",
+    "issueLogPanel",
     "storageHistoryPanel"
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
@@ -97,6 +103,8 @@ function bindEvents() {
   }
   elements.refreshLocationsButton.addEventListener("click", loadLocations);
   elements.refreshMovementsButton.addEventListener("click", loadMovements);
+  elements.refreshIssueErrorsButton.addEventListener("click", loadIssueErrors);
+  elements.issueErrorSortSelect.addEventListener("change", loadIssueErrors);
   elements.articleOverviewSearchInput.addEventListener("input", () => {
     window.clearTimeout(articleOverviewSearchTimer);
     articleOverviewSearchTimer = window.setTimeout(() => renderArticleOverview(loadedLocations), SEARCH_DEBOUNCE_MS);
@@ -147,7 +155,8 @@ function enforceStorageAccess() {
 }
 
 function applyStoragePageLabels(userGroup) {
-  const label = currentStorageView() === "overview" ? "Artikelübersicht" : storagePageLabel(userGroup);
+  const view = currentStorageView();
+  const label = view === "overview" ? "Artikelübersicht" : view === "issueLog" ? "Buchungsfehler" : storagePageLabel(userGroup);
   document.title = label;
   if (elements.storagePageTitle) elements.storagePageTitle.textContent = label;
   if (elements.storageBookingLink) elements.storageBookingLink.textContent = storagePageLabel(userGroup);
@@ -155,18 +164,25 @@ function applyStoragePageLabels(userGroup) {
 
 function currentStorageView() {
   const params = new URLSearchParams(window.location.search);
-  return params.get("ansicht") === "artikeluebersicht" ? "overview" : "booking";
+  if (params.get("ansicht") === "artikeluebersicht") return "overview";
+  if (params.get("ansicht") === "buchungsfehler") return "issueLog";
+  return "booking";
 }
 
 function applyStorageView() {
-  const isOverview = currentStorageView() === "overview";
+  const view = currentStorageView();
+  const isOverview = view === "overview";
+  const isIssueLog = view === "issueLog";
   document.body.classList.toggle("is-article-overview-view", isOverview);
-  elements.storageBookingLink?.classList.toggle("is-active", !isOverview);
+  document.body.classList.toggle("is-issue-log-view", isIssueLog);
+  elements.storageBookingLink?.classList.toggle("is-active", view === "booking");
   elements.articleOverviewNavLink?.classList.toggle("is-active", isOverview);
-  if (elements.storageBookingPanel) elements.storageBookingPanel.hidden = isOverview;
-  if (elements.storageLocationsPanel) elements.storageLocationsPanel.hidden = isOverview;
+  elements.issueLogNavLink?.classList.toggle("is-active", isIssueLog);
+  if (elements.storageBookingPanel) elements.storageBookingPanel.hidden = view !== "booking";
+  if (elements.storageLocationsPanel) elements.storageLocationsPanel.hidden = true;
   if (elements.articleOverviewPanel) elements.articleOverviewPanel.hidden = !isOverview;
-  if (elements.storageHistoryPanel) elements.storageHistoryPanel.hidden = isOverview;
+  if (elements.issueLogPanel) elements.issueLogPanel.hidden = !isIssueLog;
+  if (elements.storageHistoryPanel) elements.storageHistoryPanel.hidden = view !== "booking";
 }
 
 function switchUser() {
@@ -348,7 +364,11 @@ async function refreshStorageViews() {
     await loadLocations();
     return;
   }
-  await Promise.all([loadLocations(), loadMovements()]);
+  if (currentStorageView() === "issueLog") {
+    await loadIssueErrors();
+    return;
+  }
+  await loadMovements();
 }
 
 async function loadLocations() {
@@ -379,6 +399,17 @@ async function loadMovements() {
     renderMovements(movements);
   } catch (error) {
     setStatus(elements.issueStatus, `Historie konnte nicht geladen werden: ${error.message}`, "error");
+  }
+}
+
+async function loadIssueErrors() {
+  if (!serverOnline) return;
+
+  try {
+    const errors = await apiJson("/api/storage/issue-errors?limit=300");
+    renderIssueErrors(errors);
+  } catch (error) {
+    setStatus(elements.storageStatus, `Buchungsfehler konnten nicht geladen werden: ${error.message}`, "error");
   }
 }
 
@@ -575,6 +606,68 @@ function renderMovements(movements) {
       <td>${escapeHtml(movement.referenz)}</td>
     `;
     elements.movementTableBody.appendChild(row);
+  });
+}
+
+function renderIssueErrors(errors) {
+  const sortedErrors = sortIssueErrors(errors);
+  elements.issueErrorTableBody.innerHTML = "";
+  elements.issueErrorCount.textContent = `${sortedErrors.length} Fehler`;
+
+  if (!sortedErrors.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td colspan="8" class="empty-cell">Keine Buchungsfehler gefunden.</td>`;
+    elements.issueErrorTableBody.appendChild(row);
+    return;
+  }
+
+  sortedErrors.forEach((entry) => {
+    const row = document.createElement("tr");
+    row.className = "is-issue";
+    row.innerHTML = `
+      <td>${escapeHtml(formatDateTime(entry.erstelltAm))}</td>
+      <td>${escapeHtml(entry.auftragsnummer || entry.auftragId || "-")}</td>
+      <td>${escapeHtml(entry.position || "")}</td>
+      <td>${escapeHtml(entry.materialnummer)}</td>
+      <td>${escapeHtml(entry.lagerplatz)}</td>
+      <td class="num">${escapeHtml(entry.menge)}</td>
+      <td>${escapeHtml(entry.fehler)}</td>
+      <td>${escapeHtml(entry.exportiertPdfDatei)}</td>
+    `;
+    elements.issueErrorTableBody.appendChild(row);
+  });
+}
+
+function sortIssueErrors(errors) {
+  const sortMode = elements.issueErrorSortSelect?.value || "time";
+  const sorted = Array.isArray(errors) ? errors.slice() : [];
+  const textCompare = (left, right) => String(left || "").localeCompare(String(right || ""), "de", { numeric: true, sensitivity: "base" });
+
+  return sorted.sort((left, right) => {
+    if (sortMode === "error") {
+      return textCompare(left.fehler, right.fehler) ||
+        textCompare(left.materialnummer, right.materialnummer) ||
+        textCompare(left.auftragsnummer || left.auftragId, right.auftragsnummer || right.auftragId) ||
+        textCompare(right.erstelltAm, left.erstelltAm);
+    }
+    if (sortMode === "material") {
+      return textCompare(left.materialnummer, right.materialnummer) ||
+        textCompare(left.fehler, right.fehler) ||
+        textCompare(right.erstelltAm, left.erstelltAm);
+    }
+    if (sortMode === "order") {
+      return textCompare(left.auftragsnummer || left.auftragId, right.auftragsnummer || right.auftragId) ||
+        Number(left.position || 0) - Number(right.position || 0) ||
+        textCompare(left.materialnummer, right.materialnummer);
+    }
+    if (sortMode === "location") {
+      return textCompare(left.lagerplatz, right.lagerplatz) ||
+        textCompare(left.materialnummer, right.materialnummer) ||
+        textCompare(left.fehler, right.fehler);
+    }
+    return textCompare(right.erstelltAm, left.erstelltAm) ||
+      textCompare(left.auftragsnummer || left.auftragId, right.auftragsnummer || right.auftragId) ||
+      Number(left.position || 0) - Number(right.position || 0);
   });
 }
 

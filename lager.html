@@ -7,8 +7,8 @@
     <title>Buchung</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260602-7">
-    <script src="lager.js?v=20260602-9" defer></script>
+    <link rel="stylesheet" href="styles.css?v=20260603-1">
+    <script src="lager.js?v=20260603-5" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -32,6 +32,7 @@
           <a class="mode-button" href="/">Kommissionierung</a>
           <a id="storageBookingLink" class="mode-button is-active" href="/lager.html">Buchung</a>
           <a id="articleOverviewNavLink" class="mode-button" href="/lager.html?ansicht=artikeluebersicht">Artikelübersicht</a>
+          <a id="issueLogNavLink" class="mode-button" href="/lager.html?ansicht=buchungsfehler">Buchungsfehler</a>
           <a class="mode-button" href="/artikel.html">Artikelstamm</a>
         </nav>
         <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">
@@ -181,10 +182,10 @@
             <table class="article-table storage-table article-overview-table">
               <thead>
                 <tr>
-                  <th>Artikel</th>
-                  <th>Bezeichnung</th>
-                  <th>Bestand</th>
-                  <th>Paletten</th>
+                  <th>Artikelnummer</th>
+                  <th>Artikelbezeichnung</th>
+                  <th>Gesamtstückzahl</th>
+                  <th>Paletten gesamt</th>
                   <th>Stellplätze</th>
                   <th>Details</th>
                 </tr>
@@ -220,6 +221,47 @@
                 </tr>
               </thead>
               <tbody id="movementTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="issueLogPanel" class="list-panel storage-history-panel" hidden>
+          <div class="section-heading">
+            <h2>Buchungsfehler</h2>
+            <span id="issueErrorCount" class="muted-count">0 Fehler</span>
+          </div>
+          <div class="storage-search">
+            <label>
+              Fehlerlog
+              <input type="text" value="Nicht gebuchte Artikel aus PDF-Exporten" readonly>
+            </label>
+            <label>
+              Sortierung
+              <select id="issueErrorSortSelect">
+                <option value="time">Zeit</option>
+                <option value="error">Fehler</option>
+                <option value="material">Artikel</option>
+                <option value="order">Auftrag</option>
+                <option value="location">Lagerplatz</option>
+              </select>
+            </label>
+            <button id="refreshIssueErrorsButton" class="secondary-button" type="button">Aktualisieren</button>
+          </div>
+          <div class="article-table-wrap">
+            <table class="article-table storage-table">
+              <thead>
+                <tr>
+                  <th>Zeit</th>
+                  <th>Auftrag</th>
+                  <th>Position</th>
+                  <th>Artikel</th>
+                  <th>Lagerplatz</th>
+                  <th>Menge</th>
+                  <th>Fehler</th>
+                  <th>PDF</th>
+                </tr>
+              </thead>
+              <tbody id="issueErrorTableBody"></tbody>
             </table>
           </div>
         </section>

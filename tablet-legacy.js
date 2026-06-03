@@ -144,7 +144,7 @@ function loadOrderList() {
       addOption(
         elements.orderSelect,
         order.id,
-        timeText + (order.orderNumber || order.id) + " - " + (order.customerName || "") + " (" + order.picked + "/" + order.total + ")"
+        formatOrderOptionLabel(order, timeText)
       );
       count += 1;
     }
@@ -168,6 +168,17 @@ function formatOrderCreatedAt(value) {
   if (hours.length < 2) hours = "0" + hours;
   if (minutes.length < 2) minutes = "0" + minutes;
   return hours + ":" + minutes;
+}
+
+function formatOrderOptionLabel(order, timeText) {
+  var status = orderStatusText(order);
+  return timeText + (order.orderNumber || order.id) + " - " + (order.customerName || "") + " [" + status + "] (" + order.picked + "/" + order.total + ")";
+}
+
+function orderStatusText(order) {
+  var activeUser = String(order && order.activeUser || "").trim();
+  if (!activeUser) return "Frei";
+  return activeUser === currentUserName() ? "Bearbeitet von mir" : "Bearbeitet von " + activeUser;
 }
 
 function loadOrder(id) {

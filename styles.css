@@ -976,7 +976,16 @@ textarea[readonly] {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.is-issue-log-view .storage-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .is-article-overview-view .article-overview-panel {
+  width: 100%;
+}
+
+.is-issue-log-view .storage-history-panel {
+  grid-column: 1;
   width: 100%;
 }
 

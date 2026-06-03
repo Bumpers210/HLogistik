@@ -42,6 +42,9 @@ import {
   bookStorageReceipts,
   bookStorageIssue,
   bookStorageIssues,
+  bookPickingOrderIssues,
+  logPickingIssueErrors,
+  listPickingIssueErrorLog,
   deleteStorageForMaterial,
 } from "./server/storage.mjs";
 import {
@@ -160,6 +163,15 @@ async function route(request, response) {
     const query = url.searchParams.get("q") || "";
     const limit = readInteger(url.searchParams.get("limit") || 100);
     sendJson(response, 200, readStorageMovements({ query, limit, warehouse }));
+    return;
+  }
+
+  // Stock issue error log
+  if (pathname === "/api/storage/issue-errors" && request.method === "GET") {
+    const limit = readInteger(url.searchParams.get("limit") || 200);
+    const orderId = url.searchParams.get("orderId") || "";
+    const orderNumber = url.searchParams.get("orderNumber") || "";
+    sendJson(response, 200, listPickingIssueErrorLog({ warehouse, limit, orderId, orderNumber }));
     return;
   }
 
@@ -403,8 +415,12 @@ async function route(request, response) {
     const order = normalizeOrder({ ...(savedOrder || {}), ...(body.order || {}) });
     order.id = exportMatch[1];
     const result = await exportPdf(order, exportDir, tempDir, requestOrigin(request), defaultExportDir);
+    const stockIssue = (order.orderType || "picking") === "picking" && !savedOrder?.exportedAt
+      ? bookPickingOrderIssues(order, warehouse)
+      : { booked: 0, errors: [] };
+    const stockIssueErrorLog = logPickingIssueErrors(order, stockIssue, result, warehouse);
     const exportedAt = markOrderExported(order.id, result);
-    sendJson(response, 200, { ok: true, exportedAt, ...result });
+    sendJson(response, 200, { ok: true, exportedAt, stockIssue, stockIssueErrorLog, ...result });
     return;
   }
 

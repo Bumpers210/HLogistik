@@ -713,7 +713,18 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
   if (parsed.orderNumber) state.orderNumber = parsed.orderNumber;
   if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
 
-  state.lines = parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })];
+  const fallbackLine = parsed.lines.length ? null : fallbackImportLine(text);
+  if (!parsed.lines.length && !fallbackLine) {
+    clearCurrentOrder();
+    render();
+    return {
+      lines: 0,
+      cancelled: true,
+      message: "Lagerauftrag erkannt, aber keine vollstaendige Position gelesen. Import abgebrochen."
+    };
+  }
+
+  state.lines = parsed.lines.length ? parsed.lines : [fallbackLine];
   topControlsCollapsed = false;
   saveStateWithoutServer();
   render();
@@ -924,6 +935,15 @@ function parseOrderText(text) {
   };
 }
 
+function isWarehouseLikeText(text) {
+  return /lageraufg|von-handlin|von-lagerpla|nach-lagerplatz|produktbeschreibung/i.test(String(text || ""));
+}
+
+function fallbackImportLine(text) {
+  if (isWarehouseLikeText(text)) return null;
+  return createLine({ description: String(text || "").slice(0, 140) });
+}
+
 function collectBestellscheinRows(lines) {
   if (!lines.some((line) => /bestellschein|entnahmeanweisungen/i.test(line))) return [];
 
@@ -1045,7 +1065,7 @@ function parseWarehouseLine(line) {
   const product = productInfo.value;
   cursor = productInfo.next;
 
-  while (isOcrQuantityMarker(tokens[cursor]) && canReadQuantityFrom(tokens[cursor + 1])) cursor += 1;
+  while (shouldSkipOcrQuantityPrefix(tokens[cursor], tokens[cursor + 1], tokens[cursor + 2])) cursor += 1;
 
   const combinedQuantity = parseQuantityWithUnitToken(tokens[cursor] || "");
   const quantity = combinedQuantity || parseQuantityToken(tokens[cursor] || "");
@@ -1254,8 +1274,7 @@ function parseStackedWarehouseRow(lines, startIndex) {
   const warehouseOrder = String(lines[startIndex] || "").trim();
   let cursor = startIndex + 1;
   const fromHandlingUnit = extractHandlingUnit(lines[cursor] || "");
-  if (!fromHandlingUnit) return null;
-  cursor += 1;
+  if (fromHandlingUnit) cursor += 1;
 
   const fromBin = extractBin(lines[cursor] || "");
   if (!fromBin) return null;
@@ -1524,7 +1543,7 @@ function findProductQuantityMatch(text) {
 }
 
 function parseQuantityToken(value) {
-  const compact = String(value || "").replace(/\s+/g, "");
+  const compact = normalizeQuantityTokenText(value).replace(/\s+/g, "");
   if (!compact) return null;
 
   if (/^\d+[xX]\d+(?:[,.]\d+)?$/.test(compact)) {
@@ -1537,7 +1556,7 @@ function parseQuantityToken(value) {
 }
 
 function parseQuantityWithUnitToken(value) {
-  const compact = String(value || "").replace(/[_|]/g, "").trim();
+  const compact = normalizeQuantityTokenText(value).replace(/\s+/g, "");
   const match = compact.match(/^(\d+(?:[,.]\d+)?)[/ ]?([A-Za-zÄÖÜäöü]{1,5})$/);
   if (!match) return null;
 
@@ -1547,12 +1566,29 @@ function parseQuantityWithUnitToken(value) {
   };
 }
 
-function canReadQuantityFrom(value) {
-  return Boolean(parseQuantityWithUnitToken(value) || parseQuantityToken(value));
+function normalizeQuantityTokenText(value) {
+  return String(value || "")
+    .replace(/(\d):(\d{3})(?=\D|$)/g, "$1.$2")
+    .replace(/[()[\]{}_|]/g, " ")
+    .replace(/[^\d.,xXA-Za-zÃ„Ã–ÃœÃ¤Ã¶Ã¼ÃŸ/ ]+/g, " ")
+    .trim();
+}
+
+function shouldSkipOcrQuantityPrefix(value, nextValue, nextUnitValue = "") {
+  const nextHasQuantity = parseQuantityWithUnitToken(nextValue) || (parseQuantityToken(nextValue) && parseUnitToken(nextUnitValue));
+  if (!nextHasQuantity) return false;
+  const compact = String(value || "")
+    .replace(/[()[\]{}_|]/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+
+  if (!compact) return true;
+  if (isOcrQuantityMarker(compact)) return true;
+  return /^\d{1,2}$/.test(compact);
 }
 
 function isOcrQuantityMarker(value) {
-  return /^(?:x|v|j|\/|\\|7|71)$/i.test(String(value || ""));
+  return /^(?:x|v|j|\/|\\|7|71|1)$/i.test(String(value || ""));
 }
 
 function isSuspiciousMultiplierQuantity(value) {
@@ -2771,16 +2807,42 @@ async function exportPdf() {
     const exportedFile = result.file || "PDF";
     const exportedPath = result.path || "";
     const copyPath = result.copyPath || "";
+    const stockText = stockIssueSummary(result.stockIssue);
     resetCurrentOrderView();
     showExportMessage(
       exportedPath
-        ? `PDF gespeichert: ${exportedPath}${copyPath ? ` | Kopie: ${copyPath}` : ""}`
+        ? `PDF gespeichert: ${exportedPath}${copyPath ? ` | Kopie: ${copyPath}` : ""}${stockText ? ` | ${stockText}` : ""}`
         : `${exportedFile} gespeichert.`
     );
+    showStockIssueErrors(result.stockIssue);
     await loadOrderList();
   } catch (error) {
     showExportMessage(`Server-PDF fehlgeschlagen: ${error.message}`);
   }
+}
+
+function stockIssueSummary(stockIssue) {
+  if (!stockIssue) return "";
+  const booked = Number(stockIssue.booked || 0);
+  const errors = Array.isArray(stockIssue.errors) ? stockIssue.errors.length : 0;
+  if (!booked && !errors) return "Keine Bestandsbuchung";
+  return `${booked} Bestandsbuchung(en)${errors ? `, ${errors} Fehler` : ""}`;
+}
+
+function showStockIssueErrors(stockIssue) {
+  const errors = Array.isArray(stockIssue?.errors) ? stockIssue.errors : [];
+  if (!errors.length) return;
+  const preview = errors
+    .slice(0, 12)
+    .map((error) => {
+      const label = [error.position ? `Pos. ${error.position}` : "", error.materialnummer, error.lagerplatz, error.leNummer]
+        .filter(Boolean)
+        .join(" | ");
+      return `${label}: ${error.message}`;
+    })
+    .join("\n");
+  const suffix = errors.length > 12 ? `\n... und ${errors.length - 12} weitere Fehler` : "";
+  alert(`PDF wurde erstellt, aber nicht alle Bestände konnten abgebucht werden:\n\n${preview}${suffix}`);
 }
 
 function showServerPdfLink(url, fileName, fullPath) {

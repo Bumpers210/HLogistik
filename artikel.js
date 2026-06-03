@@ -122,11 +122,12 @@ function switchUser() {
   window.location.replace("/");
 }
 
-async function loadArticles(query = "") {
+async function loadArticles(query = null) {
   if (!serverOnline) return;
   try {
+    const searchQuery = query ?? elements.searchInput.value.trim();
     const params = new URLSearchParams();
-    if (query) params.set("q", query);
+    if (searchQuery) params.set("q", searchQuery);
     if (elements.includeInactiveInput.checked) params.set("includeInactive", "1");
     const [loadedArticles, locations] = await Promise.all([
       apiJson(`/api/articles${params.toString() ? `?${params}` : ""}`),
@@ -289,16 +290,15 @@ async function permanentlyDeleteSelectedArticle() {
 }
 
 async function importArticleFile(event) {
-  const file = event.target.files[0];
+  const files = Array.from(event.target.files || []);
   event.target.value = "";
-  if (!file) return;
+  if (!files.length) return;
 
   try {
-    setStatus(`Lese ${file.name}...`);
-    const rows = await readArticleRows(file);
-    const importData = rowsToArticleImport(rows, file.name);
-    const importedArticles = importData.articles;
-    if (!importedArticles.length) throw new Error("Keine verwertbaren Artikel in der Datei gefunden");
+    setStatus(files.length === 1 ? `Lese ${files[0].name}...` : `Lese ${files.length} Dateien...`);
+    const importData = await readArticleImportFiles(files);
+    const importedArticles = mergeArticlesByMaterial(importData.articles);
+    if (!importedArticles.length) throw new Error("Keine verwertbaren Artikel in der Auswahl gefunden");
 
     const existingArticles = await loadAllArticles();
     const existingMatches = findExistingArticleMatches(importedArticles, existingArticles);
@@ -314,11 +314,42 @@ async function importArticleFile(event) {
     const storageResult = await importStorageReceipts(importData.receipts);
     const errorText = result.errors?.length ? ` ${result.errors.length} Zeilen mit Fehlern.` : "";
     const storageText = storageResult.message ? ` ${storageResult.message}` : "";
-    setStatus(`${result.created} neu, ${result.updated} aktualisiert.${storageText}${errorText}`, result.errors?.length ? "error" : "ok");
+    const skippedText = importData.skipped.length ? ` ${importData.skipped.length} Datei(en) ohne verwertbare Daten.` : "";
+    setStatus(`${result.created} neu, ${result.updated} aktualisiert.${storageText}${skippedText}${errorText}`, result.errors?.length ? "error" : "ok");
     await loadArticles();
   } catch (error) {
     setStatus(`Import fehlgeschlagen: ${error.message}`, "error");
   }
+}
+
+async function readArticleImportFiles(files) {
+  const articles = [];
+  const receipts = [];
+  const skipped = [];
+
+  for (const file of files) {
+    setStatus(`Lese ${file.name}...`);
+    const rows = await readArticleRows(file);
+    const importData = rowsToArticleImport(rows, file.name);
+    if (!importData.articles.length && !importData.receipts.length) {
+      skipped.push(file.name);
+      continue;
+    }
+    articles.push(...importData.articles);
+    receipts.push(...importData.receipts);
+  }
+
+  return { articles, receipts, skipped };
+}
+
+function mergeArticlesByMaterial(incoming) {
+  const byMaterial = new Map();
+  incoming.forEach((article) => {
+    const materialnummer = String(article.materialnummer || "").trim();
+    if (!materialnummer) return;
+    byMaterial.set(materialnummer, article);
+  });
+  return Array.from(byMaterial.values());
 }
 
 async function loadAllArticles() {
@@ -530,7 +561,7 @@ function stockSheetToImport(rows, fileName) {
   const mengeProPalette = mostFrequentNumber(quantities) || Math.max(1, Math.round(bestand / Math.max(1, paletten)));
   const firstLine = stockLines[0] || {};
   const lineText = stockLines
-    .map((line) => `${line.pack || `${line.quantity} St.`} ${line.location || ""} ${line.le || ""}`.trim())
+    .map((line) => `${line.quantity} St. ${line.location || ""} ${line.le || ""}`.trim())
     .filter(Boolean)
     .join("; ");
 
@@ -584,6 +615,17 @@ function findStockSheetValue(rows, key) {
 }
 
 function findCurrentStockSheetLines(rows, { bestand = 0, paletten = 0 } = {}) {
+  const columns = detectStockSheetMovementColumns(rows);
+  if (!columns) return findCurrentStockSheetLinesFromTail(rows, { bestand, paletten });
+
+  const detailLines = rows
+    .slice(columns.startIndex)
+    .flatMap((row) => stockSheetDetailRowToLines(row, columns.detailStart));
+
+  return detailLines.length ? reconcileStockSheetLines(detailLines, { bestand, paletten }) : findCurrentStockSheetLinesFromTail(rows, { bestand, paletten });
+}
+
+function findCurrentStockSheetLinesFromTail(rows, { bestand = 0, paletten = 0 } = {}) {
   const currentLines = [];
   let totalQuantity = 0;
   let totalPallets = 0;
@@ -601,6 +643,84 @@ function findCurrentStockSheetLines(rows, { bestand = 0, paletten = 0 } = {}) {
   }
 
   return currentLines;
+}
+
+function detectStockSheetMovementColumns(rows) {
+  const headerIndex = rows
+    .slice(0, 12)
+    .findIndex((row) => row.some((cell) => normalizeToken(cell) === "zugang") && row.some((cell) => normalizeToken(cell) === "abgang"));
+  if (headerIndex < 0) return null;
+
+  const header = rows[headerIndex];
+  const accessColumns = [];
+  const issueColumns = [];
+  const balanceColumns = [];
+  header.forEach((cell, index) => {
+    const token = normalizeToken(cell);
+    if (token === "zugang") accessColumns.push(index);
+    if (token === "abgang") issueColumns.push(index);
+    if (token === "bestand") balanceColumns.push(index);
+  });
+
+  return {
+    startIndex: headerIndex + 1,
+    quantityAccess: accessColumns[0] ?? 1,
+    quantityIssue: issueColumns[0] ?? 2,
+    quantityBalance: balanceColumns[0] ?? 4,
+    palletAccess: accessColumns[1] ?? 5,
+    palletIssue: issueColumns[1] ?? 6,
+    palletBalance: balanceColumns[1] ?? 7,
+    detailStart: Math.max(balanceColumns[1] ?? 7, issueColumns[1] ?? 6, accessColumns[1] ?? 5) + 1
+  };
+}
+
+function reconcileStockSheetLines(lines, { bestand = 0, paletten = 0 } = {}) {
+  const activeLines = lines.filter((line) => line.quantity > 0);
+  if (!activeLines.length) return activeLines;
+
+  const currentTotal = sumNumbers(activeLines.map((line) => line.quantity));
+  const difference = bestand > 0 ? bestand - currentTotal : 0;
+  const canAdjust =
+    difference !== 0 &&
+    Math.abs(difference) <= Math.max(1000, Math.round((bestand || currentTotal) * 0.05)) &&
+    activeLines.at(-1).quantity + difference > 0;
+  if (canAdjust) activeLines.at(-1).quantity += difference;
+
+  if (paletten > 0 && activeLines.length > paletten) return activeLines.slice(-paletten);
+  return activeLines;
+}
+
+function stockSheetDetailRowToLines(row, detailStart) {
+  const detailCells = row.slice(detailStart).map(String);
+  const lines = [];
+
+  for (let index = 0; index < detailCells.length; index += 1) {
+    const pack = parsePack(detailCells[index]);
+    if (!pack.quantity) continue;
+
+    const cellsUntilNextPack = [];
+    for (let next = index + 1; next < detailCells.length; next += 1) {
+      if (parsePack(detailCells[next]).quantity) break;
+      cellsUntilNextPack.push(detailCells[next]);
+    }
+
+    const locations = findStoragePlaces(cellsUntilNextPack);
+    const handlingUnits = findHandlingUnits(cellsUntilNextPack);
+    const count = Math.max(pack.count, locations.length || 0, handlingUnits.length || 0, 1);
+
+    for (let itemIndex = 0; itemIndex < count; itemIndex += 1) {
+      const location = locations[itemIndex] || locations[0] || "";
+      if (!location) continue;
+      lines.push({
+        pack: `${pack.count}x${pack.quantity}`,
+        quantity: pack.quantity,
+        location,
+        le: handlingUnits[itemIndex] || handlingUnits[0] || ""
+      });
+    }
+  }
+
+  return lines;
 }
 
 function stockSheetRowToLines(row) {
@@ -777,6 +897,13 @@ function findStoragePlaces(row) {
   return row.map(String).map(normalizeStoragePlace).filter(Boolean);
 }
 
+function findHandlingUnits(row) {
+  return row
+    .map(String)
+    .map((cell) => cell.replace(/\D/g, ""))
+    .filter((cell) => /^\d{8,10}$/.test(cell));
+}
+
 function normalizeStoragePlace(value) {
   const normalized = String(value || "")
     .trim()
@@ -790,6 +917,8 @@ function normalizeStoragePlace(value) {
     if (!/[A-Z]/.test(suffix)) return "";
     return suffix ? `002-${existingCanonical[1]}-S${suffix}` : "";
   }
+  const compactAreaPlace = normalized.match(/^(\d{1,3})([A-Z])(\d{1,3})$/);
+  if (compactAreaPlace) return canonicalStoragePlace(compactAreaPlace.slice(1));
   return canonicalStoragePlace(normalized.split(" ").filter(Boolean));
 }
 

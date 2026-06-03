@@ -77,6 +77,25 @@ export function initializeDatabase() {
       referenz TEXT,
       erstellt_am TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS bestandsbuchung_fehler (
+      id TEXT PRIMARY KEY,
+      lager TEXT NOT NULL DEFAULT 'SSI',
+      auftrag_id TEXT NOT NULL DEFAULT '',
+      auftragsnummer TEXT NOT NULL DEFAULT '',
+      position INTEGER NOT NULL DEFAULT 0,
+      lagerauftrag TEXT NOT NULL DEFAULT '',
+      materialnummer TEXT NOT NULL DEFAULT '',
+      lagerplatz TEXT NOT NULL DEFAULT '',
+      le_nummer TEXT NOT NULL DEFAULT '',
+      menge TEXT NOT NULL DEFAULT '',
+      fehler TEXT NOT NULL DEFAULT '',
+      exportiert_pdf_datei TEXT NOT NULL DEFAULT '',
+      erstellt_am TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_bestandsbuchung_fehler_auftrag
+      ON bestandsbuchung_fehler(auftrag_id, erstellt_am);
+    CREATE INDEX IF NOT EXISTS idx_bestandsbuchung_fehler_material
+      ON bestandsbuchung_fehler(lager, materialnummer, erstellt_am);
     CREATE TABLE IF NOT EXISTS auftraege (
       id TEXT PRIMARY KEY,
       auftragsnummer TEXT NOT NULL DEFAULT '',
