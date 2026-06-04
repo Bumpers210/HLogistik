@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#167a58">
+    <title>Auswertungen</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="app-icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css?v=20260604-2">
+    <script src="auswertungen.js?v=20260604-1" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Lager</p>
+        <h1>Auswertungen</h1>
+      </div>
+      <div class="header-actions">
+        <div id="connectionBadge" class="connection-badge is-checking" role="status" aria-live="polite">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connectionText">Prüfe Verbindung</span>
+        </div>
+        <label class="warehouse-picker">
+          Lager
+          <select id="warehouseSelect">
+            <option value="SSI">SSI</option>
+            <option value="SI">SI</option>
+          </select>
+        </label>
+        <nav class="mode-nav" aria-label="Arbeitsbereich">
+          <a class="mode-button" href="/">Kommissionierung</a>
+          <a class="mode-button" href="/lager.html">Buchung</a>
+          <a class="mode-button" href="/lager.html?ansicht=artikeluebersicht">Artikelübersicht</a>
+          <a class="mode-button" href="/lager.html?ansicht=buchungsfehler">Buchungsfehler</a>
+          <a class="mode-button" href="/artikel.html">Artikelstamm</a>
+          <span class="mode-button is-active">Auswertungen</span>
+        </nav>
+        <div class="user-chip" aria-label="Angemeldeter Mitarbeiter">
+          <span id="currentUserName">Nicht angemeldet</span>
+          <button id="switchUserButton" class="secondary-button" type="button">Wechseln</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="app-shell storage-shell">
+      <section class="toolbar report-toolbar" aria-label="Zeitraum und Suche">
+        <label>
+          Von
+          <input id="fromInput" type="date">
+        </label>
+        <label>
+          Bis
+          <input id="toInput" type="date">
+        </label>
+        <button id="refreshButton" class="secondary-button" type="button">Aktualisieren</button>
+        <label>
+          Suche
+          <input id="searchInput" type="search" autocomplete="off" placeholder="Artikel oder Lagerplatz">
+        </label>
+        <p id="reportStatus" class="export-status" role="status">Auswertung wird geladen...</p>
+      </section>
+
+      <div id="reportTabs" class="storage-tabs report-tabs" role="tablist" aria-label="Auswertung">
+        <button class="storage-tab is-active" type="button" role="tab" data-report="article-movements">Artikelbewegungen</button>
+        <button class="storage-tab" type="button" role="tab" data-report="top-articles">Top-Artikel</button>
+        <button class="storage-tab" type="button" role="tab" data-report="slow-articles">Langsame Artikel</button>
+        <button class="storage-tab" type="button" role="tab" data-report="location-usage">Lagerplatz-Auswertung</button>
+      </div>
+
+      <section class="list-panel report-panel">
+        <div class="section-heading">
+          <h2 id="reportTitle">Artikelbewegungen</h2>
+          <span id="reportCount" class="muted-count">0 Einträge</span>
+        </div>
+        <p id="reportHint" class="muted-count report-hint">„Aktueller Bestand" und „Artikelanzahl" sind Momentaufnahmen; übrige Werte gelten für den gewählten Zeitraum.</p>
+        <div class="article-table-wrap">
+          <table class="article-table report-table">
+            <thead id="reportTableHead"></thead>
+            <tbody id="reportTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

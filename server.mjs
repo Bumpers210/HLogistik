@@ -48,6 +48,12 @@ import {
   deleteStorageForMaterial,
 } from "./server/storage.mjs";
 import {
+  readArticleMovements,
+  readTopArticles,
+  readSlowArticles,
+  readLocationUsage,
+} from "./server/reports.mjs";
+import {
   readOrders,
   findOrder,
   upsertOrder,
@@ -79,11 +85,13 @@ const publicStaticFiles = new Set([
   "/index.html",
   "/artikel.html",
   "/lager.html",
+  "/auswertungen.html",
   "/tablet.html",
   "/app.js",
   "/artikel.js",
   "/xlsx.full.min.js",
   "/lager.js",
+  "/auswertungen.js",
   "/tablet.js",
   "/tablet-legacy.js",
   "/styles.css",
@@ -172,6 +180,33 @@ async function route(request, response) {
     const orderId = url.searchParams.get("orderId") || "";
     const orderNumber = url.searchParams.get("orderNumber") || "";
     sendJson(response, 200, listPickingIssueErrorLog({ warehouse, limit, orderId, orderNumber }));
+    return;
+  }
+
+  // Auswertungen / Reports (read-only)
+  if (pathname === "/api/storage/reports/article-movements" && request.method === "GET") {
+    const from = url.searchParams.get("from") || "";
+    const to = url.searchParams.get("to") || "";
+    sendJson(response, 200, { ok: true, ...readArticleMovements({ warehouse, from, to }) });
+    return;
+  }
+  if (pathname === "/api/storage/reports/top-articles" && request.method === "GET") {
+    const from = url.searchParams.get("from") || "";
+    const to = url.searchParams.get("to") || "";
+    const limit = readInteger(url.searchParams.get("limit") || 50);
+    sendJson(response, 200, { ok: true, ...readTopArticles({ warehouse, from, to, limit }) });
+    return;
+  }
+  if (pathname === "/api/storage/reports/slow-articles" && request.method === "GET") {
+    const from = url.searchParams.get("from") || "";
+    const to = url.searchParams.get("to") || "";
+    sendJson(response, 200, { ok: true, ...readSlowArticles({ warehouse, from, to }) });
+    return;
+  }
+  if (pathname === "/api/storage/reports/location-usage" && request.method === "GET") {
+    const from = url.searchParams.get("from") || "";
+    const to = url.searchParams.get("to") || "";
+    sendJson(response, 200, { ok: true, ...readLocationUsage({ warehouse, from, to }) });
     return;
   }
 

@@ -886,6 +886,39 @@ textarea[readonly] {
   margin-top: 0;
 }
 
+.report-toolbar {
+  grid-template-columns: minmax(140px, 0.5fr) minmax(140px, 0.5fr) auto minmax(220px, 1fr);
+  align-items: end;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.report-toolbar .export-status {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+.report-tabs {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.report-hint {
+  margin: -4px 0 10px;
+}
+
+@media (max-width: 720px) {
+  .report-toolbar {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .report-tabs {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 .inline-check {
   display: inline-flex;
   align-items: center;
