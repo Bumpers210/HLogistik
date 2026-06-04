@@ -46,7 +46,10 @@ function bindElements() {
     "bemerkungInput",
     "aktivInput",
     "deactivateButton",
-    "permanentDeleteButton"
+    "permanentDeleteButton",
+    "articleEditorOverlay",
+    "closeEditorButton",
+    "editorStatus"
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
   });
@@ -58,13 +61,20 @@ function bindEvents() {
     searchTimer = window.setTimeout(loadArticles, ARTICLE_SEARCH_DEBOUNCE_MS);
   });
   elements.includeInactiveInput.addEventListener("change", loadArticles);
-  elements.newArticleButton.addEventListener("click", () => selectArticle(null));
+  elements.newArticleButton.addEventListener("click", () => { selectArticle(null); openEditor(); });
   elements.csvInput.addEventListener("change", importArticleFile);
   elements.articleForm.addEventListener("submit", saveArticle);
   elements.deactivateButton.addEventListener("click", deactivateSelectedArticle);
   elements.permanentDeleteButton.addEventListener("click", permanentlyDeleteSelectedArticle);
   elements.gebindeArtInput.addEventListener("change", updateKrtFieldVisibility);
   elements.switchUserButton.addEventListener("click", switchUser);
+  elements.closeEditorButton.addEventListener("click", closeEditor);
+  elements.articleEditorOverlay.addEventListener("click", (event) => {
+    if (event.target === elements.articleEditorOverlay) closeEditor();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !elements.articleEditorOverlay.hidden) closeEditor();
+  });
   if (elements.warehouseSelect) {
     elements.warehouseSelect.addEventListener("change", async () => {
       saveCurrentWarehouse();
@@ -184,12 +194,12 @@ function renderArticles() {
       <td>${escapeHtml(article.materialnummer)}</td>
       <td>${escapeHtml(article.materialbezeichnung)}</td>
       <td>${escapeHtml(article.gebindeArt || "STK")}</td>
-      <td class="num">${supportsPackageQuantity(article.gebindeArt) ? escapeHtml(article.mengeProKarton || "") : ""}</td>
-      <td class="num">${escapeHtml(article.mengeProPalette)}</td>
-      <td class="num">${escapeHtml(stockTotalsByMaterial.get(article.materialnummer) || 0)}</td>
+      <td>${supportsPackageQuantity(article.gebindeArt) ? escapeHtml(article.mengeProKarton || "") : ""}</td>
+      <td>${escapeHtml(article.mengeProPalette)}</td>
+      <td>${escapeHtml(stockTotalsByMaterial.get(article.materialnummer) || 0)}</td>
       <td>${article.aktiv ? "Aktiv" : "Inaktiv"}</td>
     `;
-    row.addEventListener("click", () => selectArticle(article));
+    row.addEventListener("click", () => { selectArticle(article); openEditor(); });
     elements.articleTableBody.appendChild(row);
   });
 }
@@ -221,6 +231,24 @@ function selectArticle(article) {
   renderArticles();
 }
 
+function openEditor() {
+  if (!elements.articleEditorOverlay) return;
+  elements.articleEditorOverlay.hidden = false;
+  setEditorStatus("");
+  if (elements.materialnummerInput) elements.materialnummerInput.focus();
+}
+
+function closeEditor() {
+  if (elements.articleEditorOverlay) elements.articleEditorOverlay.hidden = true;
+}
+
+function setEditorStatus(message, type = "") {
+  if (!elements.editorStatus) return;
+  elements.editorStatus.textContent = message;
+  elements.editorStatus.classList.toggle("is-ok", type === "ok");
+  elements.editorStatus.classList.toggle("is-error", type === "error");
+}
+
 async function saveArticle(event) {
   event.preventDefault();
   if (!serverOnline) return setStatus("Server nicht verbunden.", "error");
@@ -235,8 +263,10 @@ async function saveArticle(event) {
     setStatus("Artikel gespeichert.", "ok");
     await loadArticles();
     selectArticle(articles.find((entry) => entry.id === selectedArticleId) || result.article);
+    closeEditor();
   } catch (error) {
     setStatus(`Speichern fehlgeschlagen: ${error.message}`, "error");
+    setEditorStatus(`Speichern fehlgeschlagen: ${error.message}`, "error");
   }
 }
 
@@ -251,8 +281,10 @@ async function deactivateSelectedArticle() {
     setStatus("Artikel deaktiviert.", "ok");
     await loadArticles();
     selectArticle(result.article);
+    closeEditor();
   } catch (error) {
     setStatus(`Deaktivieren fehlgeschlagen: ${error.message}`, "error");
+    setEditorStatus(`Deaktivieren fehlgeschlagen: ${error.message}`, "error");
   }
 }
 
@@ -284,8 +316,10 @@ async function permanentlyDeleteSelectedArticle() {
     );
     await loadArticles();
     selectArticle(null);
+    closeEditor();
   } catch (error) {
     setStatus(`Löschen fehlgeschlagen: ${error.message}`, "error");
+    setEditorStatus(`Löschen fehlgeschlagen: ${error.message}`, "error");
   }
 }
 

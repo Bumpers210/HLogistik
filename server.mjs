@@ -146,7 +146,7 @@ async function route(request, response) {
 
   // Health
   if (pathname === "/api/health") {
-    sendJson(response, 200, { ok: true, host: hostname(), localHostname: localHostname || null, port, exportDir, warehouse, warehouses: ["SSI", "SI"] });
+    sendJson(response, 200, { ok: true, host: hostname(), localHostname: localHostname || null, port, exportDir, warehouse, warehouses: ["SSI", "SI"], localAddresses: localAddresses() });
     return;
   }
 
@@ -564,10 +564,16 @@ function requestOrigin(request) {
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 function localAddresses() {
+  function score(addr) {
+    if (/^192\.168\./.test(addr)) return 0;
+    if (/^10\./.test(addr)) return 1;
+    return 2;
+  }
   return Object.values(networkInterfaces())
     .flat()
     .filter((entry) => entry && entry.family === "IPv4" && !entry.internal)
-    .map((entry) => entry.address);
+    .map((entry) => entry.address)
+    .sort((a, b) => score(a) - score(b));
 }
 
 function readLocalHostname() {

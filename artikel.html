@@ -7,9 +7,9 @@
     <title>Artikelstamm</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260602-6">
+    <link rel="stylesheet" href="styles.css?v=20260604-1">
     <script src="xlsx.full.min.js" defer></script>
-    <script src="artikel.js?v=20260603-5" defer></script>
+    <script src="artikel.js?v=20260604-1" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -86,9 +86,14 @@
             </table>
           </div>
         </div>
+      </section>
 
+      <div id="articleEditorOverlay" class="login-overlay article-editor-overlay" hidden>
         <aside class="summary-box article-editor">
-          <h2 id="editorTitle">Artikel bearbeiten</h2>
+          <div class="article-editor-head">
+            <h2 id="editorTitle">Neuer Artikel</h2>
+            <button id="closeEditorButton" class="secondary-button editor-close" type="button" aria-label="Schließen">✕</button>
+          </div>
           <form id="articleForm" class="article-form">
             <label>
               Materialnummer
@@ -135,9 +140,10 @@
               <button id="deactivateButton" class="danger-button" type="button">Deaktivieren</button>
               <button id="permanentDeleteButton" class="danger-button danger-button-strong" type="button">Endgültig löschen</button>
             </div>
+            <p id="editorStatus" class="export-status" role="status"></p>
           </form>
         </aside>
-      </section>
+      </div>
     </main>
   </body>
 </html>

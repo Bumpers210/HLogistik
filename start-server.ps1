@@ -554,8 +554,10 @@ $uiTimer.add_Tick({
         $logBox.ScrollToCaret()
 
         if ($text -match "Im Netzwerk: (http://[\d.:]+/)") {
-            $script:networkUrl = $Matches[1]
-            $lnkNet.Text = $Matches[1]
+            if (-not $script:networkUrl) {
+                $script:networkUrl = $Matches[1]
+                $lnkNet.Text = $Matches[1]
+            }
         }
         if ($text -match "laeuft auf") {
             $lblStatus.Text      = "$dot Online"
@@ -622,6 +624,14 @@ if ($script:existingServerPid -gt 0) {
     Write-ManagerLog "Haenge mich an bestehenden Server: PID $script:existingServerPid"
     Add-LogLine "HLogistik laeuft bereits im Hintergrund. PID: $script:existingServerPid"
     Add-LogLine "laeuft auf http://localhost:4174/"
+    try {
+        $healthEx = Invoke-RestMethod -Uri "http://localhost:4174/api/health" -TimeoutSec 2
+        if ($healthEx.localAddresses -and $healthEx.localAddresses.Count -gt 0) {
+            $ip = $healthEx.localAddresses[0]
+            $script:networkUrl = "http://${ip}:4174/"
+            $lnkNet.Text = $script:networkUrl
+        }
+    } catch {}
 } else {
     try {
         Write-ManagerLog "Starte Node-Server"

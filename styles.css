@@ -284,7 +284,7 @@ h2 {
 }
 
 .article-overview-detail-row td {
-  padding-top: 0;
+  padding: 0;
   background: #fbfdfb;
 }
 
@@ -299,11 +299,17 @@ h2 {
   border-collapse: collapse;
   border: 1px solid var(--line);
   background: #fff;
+  table-layout: fixed;
+}
+
+.overview-location-table th:first-child,
+.overview-location-table td:first-child {
+  width: 40%;
 }
 
 .overview-location-table th,
 .overview-location-table td {
-  padding: 7px 9px;
+  padding: 7px 7px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -896,9 +902,32 @@ textarea[readonly] {
 
 .article-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 440px);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+}
+
+.article-editor-overlay .article-editor {
+  width: min(100%, 460px);
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
+}
+
+.article-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.article-editor-head h2 {
+  margin: 0;
+}
+
+.editor-close {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  line-height: 1;
 }
 
 .muted-count {
@@ -995,7 +1024,7 @@ textarea[readonly] {
 
 .article-overview-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
   margin: 8px 0 12px;
   overflow: hidden;
   border: 1px solid var(--line);

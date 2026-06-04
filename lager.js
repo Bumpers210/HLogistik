@@ -58,7 +58,6 @@ function bindElements() {
     "articleOverviewMetricArticles",
     "articleOverviewMetricPieces",
     "articleOverviewMetricPallets",
-    "articleOverviewMetricPlaces",
     "articleOverviewTableBody",
     "movementSearchInput",
     "refreshMovementsButton",
@@ -446,7 +445,7 @@ function renderArticleOverview(locations) {
 
   if (!overview.length) {
     const row = document.createElement("tr");
-    row.innerHTML = `<td colspan="6" class="empty-cell">Keine Artikel mit Bestand gefunden.</td>`;
+    row.innerHTML = `<td colspan="5" class="empty-cell">Keine Artikel mit Bestand gefunden.</td>`;
     elements.articleOverviewTableBody.appendChild(row);
     return;
   }
@@ -458,9 +457,8 @@ function renderArticleOverview(locations) {
     row.innerHTML = `
       <td><strong>${escapeHtml(article.materialnummer)}</strong></td>
       <td>${escapeHtml(article.materialbezeichnung)}</td>
-      <td class="num">${escapeHtml(formatNumber(article.gesamtStueck))}</td>
-      <td class="num">${escapeHtml(formatNumber(article.palettenGesamt))}</td>
-      <td class="num">${escapeHtml(formatNumber(article.locations.length))}</td>
+      <td>${escapeHtml(formatNumber(article.gesamtStueck))}</td>
+      <td>${escapeHtml(formatNumber(article.palettenGesamt))}</td>
       <td>
         <button class="secondary-button overview-toggle-button" type="button" data-overview-toggle="${escapeHtml(article.materialnummer)}" aria-expanded="${isExpanded}">
           ${isExpanded ? "Ausblenden" : "Anzeigen"}
@@ -472,7 +470,7 @@ function renderArticleOverview(locations) {
     if (isExpanded) {
       const detailRow = document.createElement("tr");
       detailRow.className = "article-overview-detail-row";
-      detailRow.innerHTML = `<td colspan="6">${renderArticleOverviewDetails(article)}</td>`;
+      detailRow.innerHTML = `<td colspan="5">${renderArticleOverviewDetails(article)}</td>`;
       elements.articleOverviewTableBody.appendChild(detailRow);
     }
   });
@@ -481,11 +479,9 @@ function renderArticleOverview(locations) {
 function updateArticleOverviewMetrics(overview) {
   const totalPieces = overview.reduce((sum, article) => sum + Number(article.gesamtStueck || 0), 0);
   const totalPallets = overview.reduce((sum, article) => sum + Number(article.palettenGesamt || 0), 0);
-  const totalPlaces = overview.reduce((sum, article) => sum + article.locations.length, 0);
   elements.articleOverviewMetricArticles.textContent = formatNumber(overview.length);
   elements.articleOverviewMetricPieces.textContent = formatNumber(totalPieces);
   elements.articleOverviewMetricPallets.textContent = formatNumber(totalPallets);
-  elements.articleOverviewMetricPlaces.textContent = formatNumber(totalPlaces);
 }
 
 function handleArticleOverviewAction(event) {
@@ -571,8 +567,8 @@ function renderArticleOverviewDetails(article) {
         <tr>
           <td>${escapeHtml(location.lagerplatz)}</td>
           <td>${escapeHtml(location.leNummer || "-")}</td>
-          <td class="num">${escapeHtml(formatNumber(location.mengeStueck))}</td>
-          <td class="num">${escapeHtml(formatNumber(palletCount))}</td>
+          <td>${escapeHtml(formatNumber(location.mengeStueck))}</td>
+          <td>${escapeHtml(formatNumber(palletCount))}</td>
         </tr>
       `;
     })
