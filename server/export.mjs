@@ -127,9 +127,11 @@ function printableHtml(order, fileName) {
 
 function pdfFileBase(order) {
   const orderNumber = sanitizeFileNamePart(order.orderNumber || order.id || "auftrag");
+  const customer = sanitizeFileNamePart(order.customerName || "kunde");
   const orderDate = sanitizeFileNamePart(order.orderDate || new Date().toISOString().slice(0, 10));
-  const orderTime = sanitizeFileNamePart(String(order.orderTime || "").replace(":", "-"));
-  return sanitizeFileName(["kommissionierung", orderNumber, orderDate, orderTime].filter(Boolean).join("-"));
+  const rawTime = String(order.orderTime || "").replace(":", "-").trim();
+  const orderTime = rawTime ? sanitizeFileNamePart(rawTime) : "";
+  return sanitizeFileName([orderNumber, customer, orderDate, orderTime].filter(Boolean).join("-"));
 }
 
 export function findBrowser() {

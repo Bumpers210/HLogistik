@@ -784,7 +784,7 @@ async function findDuplicateOrderForImport(orderNumber, orderType, text = "") {
 }
 
 function isReusableOrderNumber(orderNumber) {
-  return String(orderNumber || "").trim().toLowerCase() === "ssi";
+  return String(orderNumber || "").trim().toLowerCase().startsWith("ssi");
 }
 
 function orderFingerprint(text) {
