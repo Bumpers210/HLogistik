@@ -480,7 +480,7 @@ function findDuplicateOrder(order, excludeId = "") {
 }
 
 function isReusableOrderNumber(orderNumber) {
-  return String(orderNumber || "").trim().toLowerCase() === "ssi";
+  return String(orderNumber || "").trim().toLowerCase().startsWith("ssi");
 }
 
 function isOpenOrder(order) {
