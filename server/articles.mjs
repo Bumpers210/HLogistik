@@ -75,12 +75,14 @@ export async function findArticle(id, warehouse = "SSI") {
 
 // ── Import / export ───────────────────────────────────────────────────────────
 
-export async function importArticles(incoming, warehouse = "SSI") {
+export async function importArticles(incoming, warehouse = "SSI", options = {}) {
   const articles = await readArticles(warehouse);
   const byMaterialnummer = new Map(articles.map((article, index) => [article.materialnummer, { article, index }]));
   let created = 0;
   let updated = 0;
+  let skippedExisting = 0;
   const errors = [];
+  const importedMaterials = [];
 
   incoming.forEach((entry, index) => {
     try {
@@ -88,6 +90,10 @@ export async function importArticles(incoming, warehouse = "SSI") {
       validateArticle(article);
       const existing = byMaterialnummer.get(article.materialnummer);
       if (existing) {
+        if (options.skipExisting) {
+          skippedExisting += 1;
+          return;
+        }
         const merged = normalizeArticle({
           ...existing.article,
           ...article,
@@ -98,6 +104,7 @@ export async function importArticles(incoming, warehouse = "SSI") {
         articles[existing.index] = merged;
         byMaterialnummer.set(merged.materialnummer, { article: merged, index: existing.index });
         updated += 1;
+        importedMaterials.push(merged.materialnummer);
         return;
       }
       article.id = createArticleId();
@@ -106,13 +113,14 @@ export async function importArticles(incoming, warehouse = "SSI") {
       articles.push(article);
       byMaterialnummer.set(article.materialnummer, { article, index: articles.length - 1 });
       created += 1;
+      importedMaterials.push(article.materialnummer);
     } catch (error) {
       errors.push({ row: index + 1, error: error.message || "Ungültiger Artikel" });
     }
   });
 
   if (created || updated) await writeArticles(sortArticles(articles), warehouse);
-  return { created, updated, errors };
+  return { created, updated, skippedExisting, importedMaterials, errors };
 }
 
 export async function deleteArticle(id, warehouse = "SSI") {
@@ -261,8 +269,8 @@ export function validateArticle(article) {
   if (!["C1", "C2", "A1", "KRT", "STK"].includes(article.gebindeArt)) throw new Error("Gebindeart ist ungültig");
   if (requiresPackageQuantity(article.gebindeArt) && (!Number.isInteger(article.mengeProKarton) || article.mengeProKarton <= 0))
     throw new Error(`Menge pro ${article.gebindeArt} muss größer 0 sein`);
-  if (!Number.isInteger(article.mengeProPalette) || article.mengeProPalette <= 0)
-    throw new Error("Menge pro Palette muss größer 0 sein");
+  if (!Number.isInteger(article.mengeProPalette) || article.mengeProPalette < 0)
+    throw new Error("Menge pro Palette darf nicht negativ sein");
 }
 
 export function articleSummary(article) {

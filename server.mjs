@@ -1,11 +1,11 @@
 import { createServer } from "node:http";
 import { mkdir } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { configure as configureDb, configureArticleDatabases, initializeArticleDatabases, initializeDatabase } from "./server/db.mjs";
+import { configure as configureDb, configureArticleDatabases, getArticleDb, getDb, initializeArticleDatabases, initializeDatabase } from "./server/db.mjs";
 import {
   sendJson,
   sendText,
@@ -268,7 +268,7 @@ async function route(request, response) {
     requireGroup(request, ["buero", "verwaltung"]);
     const body = await readBody(request, maxBodyBytes);
     const incoming = Array.isArray(body.articles) ? body.articles : [];
-    sendJson(response, 200, { ok: true, ...(await importArticles(incoming, warehouse)) });
+    sendJson(response, 200, { ok: true, ...(await importArticles(incoming, warehouse, { skipExisting: Boolean(body.skipExisting) })) });
     return;
   }
 
@@ -276,6 +276,15 @@ async function route(request, response) {
   if (pathname === "/api/articles/export" && request.method === "GET") {
     const articles = await readArticles(warehouse);
     sendCsv(response, 200, `artikelstamm-${warehouse}.csv`, articlesToCsv(articles));
+    return;
+  }
+
+  // Articles reset: delete article master, stock, movement and error-log data; keep orders.
+  if (pathname === "/api/articles/reset" && request.method === "POST") {
+    requireGroup(request, ["buero", "verwaltung"]);
+    const body = await readBody(request, maxBodyBytes);
+    requireArticleDeletePassword(body.password);
+    sendJson(response, 200, { ok: true, ...resetArticleMasterData() });
     return;
   }
 
@@ -587,6 +596,88 @@ function requireGroup(request, allowedGroups) {
 function requireArticleDeletePassword(password) {
   if (String(password || "") !== articleDeletePassword) {
     throw httpError(403, "Passwort ist falsch");
+  }
+}
+
+function resetArticleMasterData() {
+  const before = articleMasterCounts();
+  const backupDir = backupArticleMasterData();
+
+  for (const warehouse of ["SSI", "SI"]) {
+    const db = getArticleDb(warehouse);
+    db.exec("BEGIN");
+    try {
+      db.prepare("DELETE FROM artikel").run();
+      db.exec("COMMIT");
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  const db = getDb();
+  db.exec("BEGIN");
+  try {
+    db.prepare("DELETE FROM lagerbestand").run();
+    db.prepare("DELETE FROM lagerbewegung").run();
+    db.prepare("DELETE FROM bestandsbuchung_fehler").run();
+    db.exec("COMMIT");
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+
+  return {
+    backupDir,
+    before,
+    after: articleMasterCounts()
+  };
+}
+
+function backupArticleMasterData() {
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[-:T]/g, "")
+    .slice(0, 14);
+  const backupDir = path.join(dataDir, `artikel-reset-backup-${timestamp}`);
+  mkdirSync(backupDir, { recursive: true });
+
+  [
+    "artikel-ssi.sqlite",
+    "artikel-ssi.sqlite-wal",
+    "artikel-ssi.sqlite-shm",
+    "artikel-si.sqlite",
+    "artikel-si.sqlite-wal",
+    "artikel-si.sqlite-shm",
+    "logistik.sqlite",
+    "logistik.sqlite-wal",
+    "logistik.sqlite-shm"
+  ].forEach((fileName) => {
+    const source = path.join(dataDir, fileName);
+    if (existsSync(source)) copyFileSync(source, path.join(backupDir, fileName));
+  });
+
+  return backupDir;
+}
+
+function articleMasterCounts() {
+  return {
+    artikelSsi: countRows(getArticleDb("SSI"), "artikel"),
+    artikelSi: countRows(getArticleDb("SI"), "artikel"),
+    lagerbestand: countRows(getDb(), "lagerbestand"),
+    lagerbewegung: countRows(getDb(), "lagerbewegung"),
+    bestandsbuchungFehler: countRows(getDb(), "bestandsbuchung_fehler"),
+    auftraege: countRows(getDb(), "auftraege")
+  };
+}
+
+function countRows(db, tableName) {
+  try {
+    return db.prepare(`SELECT COUNT(*) AS count FROM ${tableName}`).get().count;
+  } catch {
+    return 0;
   }
 }
 

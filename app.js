@@ -697,6 +697,15 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
     };
   }
 
+  const importIssues = validatePickingImport(text, parsed);
+  if (importIssues.length) {
+    return {
+      lines: 0,
+      cancelled: true,
+      message: `Import abgebrochen: ${importIssues.slice(0, 3).join(" ")}${importIssues.length > 3 ? " Weitere Fehler vorhanden." : ""}`
+    };
+  }
+
   currentMode = "picking";
   localStorage.setItem(MODE_KEY, currentMode);
   clearCurrentOrder();
@@ -939,6 +948,58 @@ function isWarehouseLikeText(text) {
   return /lageraufg|von-handlin|von-lagerpla|nach-lagerplatz|produktbeschreibung/i.test(String(text || ""));
 }
 
+function validatePickingImport(text, parsed) {
+  const issues = [];
+  const source = String(text || "");
+  const lines = source
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const bestellscheinExpectedRows = countBestellscheinCandidateRows(lines);
+  const warehouseExpectedRows = isWarehouseLikeText(source) ? countWarehouseCandidateRows(lines) : 0;
+
+  if (bestellscheinExpectedRows && parsed.lines.length < bestellscheinExpectedRows) {
+    issues.push(`${bestellscheinExpectedRows} Bestellschein-Position(en) erkannt, aber nur ${parsed.lines.length} gelesen.`);
+  }
+
+  if (warehouseExpectedRows && parsed.lines.length < warehouseExpectedRows) {
+    issues.push(`${warehouseExpectedRows} Lagerauftrag-Position(en) erkannt, aber nur ${parsed.lines.length} gelesen.`);
+  }
+
+  parsed.lines.forEach((line, index) => {
+    const label = `Position ${index + 1}`;
+    const quantity = parseImportQuantityValue(line.targetQty);
+
+    if (!String(line.product || "").trim()) issues.push(`${label}: Artikelnummer fehlt.`);
+    if (!quantity || quantity <= 0) issues.push(`${label}: Menge fehlt oder ist ungueltig.`);
+    if (isWarehouseLikeText(source) && !String(line.fromBin || "").trim()) issues.push(`${label}: Von-Lagerplatz fehlt.`);
+  });
+
+  return issues;
+}
+
+function countBestellscheinCandidateRows(lines) {
+  return lines.filter((line) => /^\d{7}\b/.test(line) && /\b\d{1,4}(?:[,.]\d{3})*(?:[,.]\d+)?\s*(?:ST|Stk|Stueck|Stück|PC|PCS)\b/i.test(line)).length;
+}
+
+function countWarehouseCandidateRows(lines) {
+  const starts = lines.filter((line) => isWarehouseRowStart(line)).length;
+  if (starts) return starts;
+
+  return lines.filter((line) => {
+    const normalizedLine = normalizeOcrWarehouseLine(line);
+    return /\b\d{6,}\b/.test(normalizedLine) && /\b\d{4,8}\b/.test(normalizedLine) && /\b\d{3}-[A-Z0-9]+-[A-Z0-9]+\b/i.test(normalizedLine);
+  }).length;
+}
+
+function parseImportQuantityValue(value) {
+  const normalized = normalizeQuantity(String(value || "").replace(",", "."));
+  const multiplier = normalized.match(/^(\d+)x(\d+(?:\.\d+)?)$/i);
+  if (multiplier) return Number(multiplier[1]) * Number(multiplier[2]);
+  return Number(normalized);
+}
+
 function fallbackImportLine(text) {
   if (isWarehouseLikeText(text)) return null;
   return createLine({ description: String(text || "").slice(0, 140) });
@@ -969,7 +1030,7 @@ function collectBestellscheinRows(lines) {
 
 function parseBestellscheinRow(chunk) {
   const normalized = normalizeBestellscheinText(chunk);
-  const rowMatch = normalized.match(/^(\d{7})\s+(.+?)\s+(\d{1,5})\s*(ST|Stk|Stueck|Stück|PC|PCS)\b/i);
+  const rowMatch = normalized.match(/^(\d{7})\s+(.+?)\s+(\d{1,4}(?:[,.]\d{3})*|\d+(?:[,.]\d+)?)\s*(ST|Stk|Stueck|Stück|PC|PCS)\b/i);
   if (!rowMatch) return null;
 
   const product = rowMatch[1];
@@ -1008,17 +1069,18 @@ function cleanBestellscheinDescription(value) {
     .trim();
 }
 
-function extractBestellscheinBin(value) {
-  const match = String(value || "").match(/Lagerp?l?atz\s*[:.]?\s*(\d{2,4}\s*\/\s*\d{7})/i);
-  return match ? match[1].replace(/\s+/g, "") : "";
+function extractBestellscheinBin() {
+  return "";
 }
 
 function extractBestellscheinFirstBarcode(value, product) {
   const afterBin = String(value || "").match(/Lagerp?l?atz\s*[:.]?\s*\d{2,4}\s*\/\s*\d{7}\D+(.+)$/i);
-  if (!afterBin) return "";
+  const source = String(value || "");
+  const productIndex = source.indexOf(String(product || ""));
+  const searchText = afterBin ? afterBin[1] : source.slice(productIndex === -1 ? 0 : productIndex + String(product || "").length);
 
-  const match = afterBin[1]
-    .match(/\b\d{7,10}\b/g)
+  const match = searchText
+    .match(/\b\d{8,12}\b/g)
     ?.find((number) => number !== product);
 
   return match || "";
@@ -1788,7 +1850,7 @@ function render() {
     map.product.readOnly = true;
     map.description.readOnly = true;
     setHandlingUnitEditMode(map.fromHandlingUnit, canEditHandlingUnit);
-    map.fromBin.readOnly = !isStorageLine;
+    map.fromBin.readOnly = !(isStorageLine || state.awaitingRelease);
     map.fromBin.placeholder = isStorageLine ? "Stellplatz" : "Lagerplatz";
     map.fromHandlingUnit.placeholder = isStorageLine ? "HU eintragen" : map.fromHandlingUnit.placeholder;
     map.targetQty.readOnly = true;

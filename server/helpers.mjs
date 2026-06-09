@@ -30,10 +30,11 @@ export function httpError(statusCode, message) {
   return error;
 }
 
-export function withLineContext(error, index) {
+export function withLineContext(error, index, context = "") {
   const statusCode = error.statusCode || 400;
   const message = error.publicMessage || error.message || "Buchungszeile ist ungueltig";
-  return httpError(statusCode, `Zeile ${index + 1}: ${message}`);
+  const contextText = context ? ` (${context})` : "";
+  return httpError(statusCode, `Buchung ${index + 1}${contextText}: ${message}`);
 }
 
 export function sendJson(response, status, value) {

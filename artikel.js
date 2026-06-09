@@ -30,6 +30,7 @@ function bindElements() {
     "newArticleButton",
     "csvInput",
     "exportLink",
+    "resetArticleDataButton",
     "articleStatus",
     "articleCount",
     "articleTableBody",
@@ -63,6 +64,7 @@ function bindEvents() {
   elements.includeInactiveInput.addEventListener("change", loadArticles);
   elements.newArticleButton.addEventListener("click", () => { selectArticle(null); openEditor(); });
   elements.csvInput.addEventListener("change", importArticleFile);
+  elements.resetArticleDataButton.addEventListener("click", resetArticleMasterData);
   elements.articleForm.addEventListener("submit", saveArticle);
   elements.deactivateButton.addEventListener("click", deactivateSelectedArticle);
   elements.permanentDeleteButton.addEventListener("click", permanentlyDeleteSelectedArticle);
@@ -122,6 +124,9 @@ function enforceArticleAccess() {
   if (elements.currentUserName) {
     const groupLabel = userGroup === "buero" ? "Büro" : userGroup === "tablet" ? "Tablet" : "";
     elements.currentUserName.textContent = groupLabel ? `${userName} - ${groupLabel}` : userName;
+  }
+  if (elements.resetArticleDataButton) {
+    elements.resetArticleDataButton.hidden = !["buero", "verwaltung"].includes(userGroup);
   }
   return true;
 }
@@ -195,7 +200,7 @@ function renderArticles() {
       <td>${escapeHtml(article.materialbezeichnung)}</td>
       <td>${escapeHtml(article.gebindeArt || "STK")}</td>
       <td>${supportsPackageQuantity(article.gebindeArt) ? escapeHtml(article.mengeProKarton || "") : ""}</td>
-      <td>${escapeHtml(article.mengeProPalette)}</td>
+      <td>${escapeHtml(formatPaletteQuantity(article.mengeProPalette))}</td>
       <td>${escapeHtml(stockTotalsByMaterial.get(article.materialnummer) || 0)}</td>
       <td>${article.aktiv ? "Aktiv" : "Inaktiv"}</td>
     `;
@@ -336,23 +341,67 @@ async function importArticleFile(event) {
 
     const existingArticles = await loadAllArticles();
     const existingMatches = findExistingArticleMatches(importedArticles, existingArticles);
-    if (existingMatches.length && !confirm(overwriteArticleMessage(existingMatches))) {
-      setStatus("Import abgebrochen. Bestehende Artikel wurden nicht überschrieben.", "error");
-      return;
-    }
+    const skipExisting = Boolean(existingMatches.length && !confirm(overwriteArticleMessage(existingMatches)));
 
     const result = await apiJson("/api/articles/import", {
       method: "POST",
-      body: JSON.stringify({ articles: importedArticles })
+      body: JSON.stringify({ articles: importedArticles, skipExisting })
     });
-    const storageResult = await importStorageReceipts(importData.receipts);
+    const importedMaterials = new Set((result.importedMaterials || []).map((materialnummer) => String(materialnummer || "").trim()));
+    const receiptsToImport = (skipExisting
+      ? importData.receipts.filter((receipt) => importedMaterials.has(String(receipt.materialnummer || "").trim()))
+      : importData.receipts
+    ).filter(isBookableStorageReceipt);
+    let storageResult = { imported: 0, skipped: 0, message: "" };
+    let storageError = "";
+    try {
+      storageResult = await importStorageReceipts(receiptsToImport);
+    } catch (error) {
+      storageError = error.message || "Lagerbuchungen konnten nicht importiert werden";
+    }
     const errorText = result.errors?.length ? ` ${result.errors.length} Zeilen mit Fehlern.` : "";
     const storageText = storageResult.message ? ` ${storageResult.message}` : "";
+    const storageErrorText = storageError ? ` Lagerbuchungen nicht komplett importiert: ${storageError}` : "";
     const skippedText = importData.skipped.length ? ` ${importData.skipped.length} Datei(en) ohne verwertbare Daten.` : "";
-    setStatus(`${result.created} neu, ${result.updated} aktualisiert.${storageText}${skippedText}${errorText}`, result.errors?.length ? "error" : "ok");
+    const existingText = result.skippedExisting ? ` ${result.skippedExisting} bestehende Artikel uebersprungen.` : "";
     await loadArticles();
+    setStatus(
+      `${result.created} neu, ${result.updated} aktualisiert.${storageText}${storageErrorText}${existingText}${skippedText}${errorText}`,
+      result.errors?.length || storageError ? "error" : "ok"
+    );
   } catch (error) {
+    await loadArticles().catch(() => {});
     setStatus(`Import fehlgeschlagen: ${error.message}`, "error");
+  }
+}
+
+async function resetArticleMasterData() {
+  if (!serverOnline) return setStatus("Server nicht verbunden.", "error");
+
+  const password = prompt("Passwort zum Loeschen des Artikelstamms eingeben:");
+  if (password === null) return;
+
+  const confirmation = prompt("Zum Bestaetigen bitte LOESCHEN eingeben. Auftraege bleiben erhalten.");
+  if (confirmation !== "LOESCHEN") {
+    setStatus("Zuruecksetzen abgebrochen.", "error");
+    return;
+  }
+
+  try {
+    setStatus("Artikelstamm wird geloescht...");
+    const result = await apiJson("/api/articles/reset", {
+      method: "POST",
+      body: JSON.stringify({ password })
+    });
+    selectedArticleId = "";
+    selectArticle(null);
+    await loadArticles("");
+    setStatus(
+      `Artikelstamm geloescht. Backup: ${result.backupDir || "erstellt"}. Auftraege: ${result.after?.auftraege ?? "unveraendert"}`,
+      "ok"
+    );
+  } catch (error) {
+    setStatus(`Zuruecksetzen fehlgeschlagen: ${error.message}`, "error");
   }
 }
 
@@ -384,6 +433,14 @@ function mergeArticlesByMaterial(incoming) {
     byMaterial.set(materialnummer, article);
   });
   return Array.from(byMaterial.values());
+}
+
+function isBookableStorageReceipt(receipt) {
+  return (
+    String(receipt?.materialnummer || "").trim() &&
+    String(receipt?.lagerplatz || "").trim() &&
+    Number(receipt?.mengeStueck || 0) > 0
+  );
 }
 
 async function loadAllArticles() {
@@ -496,6 +553,20 @@ async function inspectStorageReceipts(receipts) {
             legacyBaseLocations.push(generatedLocation);
           }
         }
+        if (receipt.leNummer) {
+          const generatedLocation = existing.find((location) => {
+            return (
+              String(location.materialnummer || "").trim().toLowerCase() === String(receipt.materialnummer || "").trim().toLowerCase() &&
+              String(location.lagerplatz || "").trim().toUpperCase() === String(receipt.lagerplatz || "").trim().toUpperCase() &&
+              /^EXCEL-/i.test(String(location.leNummer || location.le_nummer || "").trim())
+            );
+          });
+          const generatedKey = generatedLocation ? storageReceiptKey(generatedLocation) : "";
+          if (generatedLocation && !legacyKeys.has(generatedKey)) {
+            legacyKeys.add(generatedKey);
+            legacyBaseLocations.push(generatedLocation);
+          }
+        }
         if (receipt.originalLe && receipt.originalLe !== receipt.leNummer) {
           const legacyLocation = byLegacyKey.get(storageLegacyKey({ ...receipt, leNummer: receipt.originalLe }));
           const legacyKey = legacyLocation ? storageReceiptKey(legacyLocation) : "";
@@ -531,12 +602,20 @@ async function readArticleRows(file) {
     const workbook = window.XLSX.read(buffer, { type: "array" });
     const sheetName = workbook.SheetNames[0];
     if (!sheetName) return [];
-    return window.XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+    const rows = window.XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
       header: 1,
       raw: false,
       defval: "",
       blankrows: false
     });
+    const rawRows = window.XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+      header: 1,
+      raw: true,
+      defval: "",
+      blankrows: false
+    });
+    Object.defineProperty(rows, "rawRows", { value: rawRows });
+    return rows;
   }
 
   const text = new TextDecoder("windows-1252").decode(buffer);
@@ -553,9 +632,15 @@ function readHtmlRows(text) {
 
 function rowsToArticleImport(rows, fileName = "") {
   if (!rows.length) return { articles: [], receipts: [] };
+  const rawRows = rows.rawRows || rows;
   const cleanedRows = rows
-    .map((row) => row.map((cell) => String(cell ?? "").trim()))
+    .map((row, index) => attachSourceRow(row.map((cell) => String(cell ?? "").trim()), index + 1))
     .filter((row) => row.some(Boolean));
+  Object.defineProperty(cleanedRows, "rawRows", {
+    value: rawRows
+      .map((row, index) => attachSourceRow(row.map((cell) => cell ?? ""), index + 1))
+      .filter((row) => row.some((cell) => String(cell ?? "").trim()))
+  });
   const stockSheetImport = stockSheetToImport(cleanedRows, fileName);
   if (stockSheetImport) return stockSheetImport;
 
@@ -576,7 +661,13 @@ function rowsToArticleImport(rows, fileName = "") {
   return { articles: Array.from(articlesByMaterial.values()), receipts: [] };
 }
 
+function attachSourceRow(row, sourceRow) {
+  Object.defineProperty(row, "sourceRow", { value: sourceRow });
+  return row;
+}
+
 function stockSheetToImport(rows, fileName) {
+  const rawRows = rows.rawRows || rows;
   const firstRows = rows.slice(0, 8);
   const hasArticleMarker = firstRows.some((row) => row.some((cell) => normalizeHeader(cell) === "artikel"));
   const hasMovementHeader = firstRows.some((row) => row.some((cell) => ["zugang", "abgang", "bestand"].includes(normalizeHeader(cell))));
@@ -585,17 +676,33 @@ function stockSheetToImport(rows, fileName) {
   const materialnummer = findStockSheetMaterial(rows) || fileName.match(/\b\d{7}\b/)?.[0] || "";
   if (!materialnummer) return null;
 
-  const stockLines = findCurrentStockSheetLines(rows, {
-    bestand: findStockSheetValue(rows, "bestande"),
-    paletten: findStockSheetValue(rows, "paletten")
+  const headerBestand = findStockSheetValue(rows, "bestande", rawRows);
+  const headerPaletten = findStockSheetValue(rows, "paletten", rawRows);
+  let stockLines = findCurrentStockSheetLines(rows, {
+    bestand: headerBestand,
+    paletten: headerPaletten
   });
+  const foundQuantities = stockLines.map((line) => line.quantity).filter((quantity) => quantity > 0);
+  const bestand = headerBestand || sumNumbers(foundQuantities) || 0;
+  const paletten = headerPaletten || stockLines.length || 0;
+  if (!stockLines.length && bestand > 0) {
+    const lastDetailLine = findLastStockSheetDetailLine(rows);
+    stockLines = lastDetailLine
+      ? [{
+        ...lastDetailLine,
+        pack: `${Math.max(1, paletten || 1)}x${bestand}`,
+        quantity: bestand,
+        note: "Stellplatz/HU aus letzter Detailzeile uebernommen"
+      }]
+      : [stockSheetFallbackLine(bestand, paletten)];
+  }
   const quantities = stockLines.map((line) => line.quantity).filter((quantity) => quantity > 0);
-  const bestand = findStockSheetValue(rows, "bestande") || sumNumbers(quantities) || findPositiveInteger(rows.flat(), materialnummer) || 1;
-  const paletten = findStockSheetValue(rows, "paletten") || stockLines.length || 1;
-  const mengeProPalette = mostFrequentNumber(quantities) || Math.max(1, Math.round(bestand / Math.max(1, paletten)));
+  const mengeProPalette = bestand > 0
+    ? mostFrequentNumber(quantities) || Math.max(1, Math.round(bestand / Math.max(1, paletten)))
+    : "";
   const firstLine = stockLines[0] || {};
   const lineText = stockLines
-    .map((line) => `${line.quantity} St. ${line.location || ""} ${line.le || ""}`.trim())
+    .map((line) => `${line.quantity} St. ${line.location || ""} ${line.le || ""} ${line.note || ""}`.trim())
     .filter(Boolean)
     .join("; ");
 
@@ -613,6 +720,38 @@ function stockSheetToImport(rows, fileName) {
   };
   const receipts = stockLines.map((line) => stockLineReceipt(line, materialnummer, fileName));
   return { articles: [article], receipts };
+}
+
+function stockSheetFallbackLine(bestand, paletten) {
+  return {
+    pack: `${Math.max(1, paletten || 1)}x${bestand}`,
+    quantity: bestand,
+    location: "KLAERFALL",
+    le: "",
+    note: "Stellplatz/HU fehlen in Excel"
+  };
+}
+
+function findLastStockSheetDetailLine(rows) {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const locations = findStoragePlaces(rows[index]);
+    const handlingUnits = findHandlingUnits(rows[index]);
+    if (!locations.length && !handlingUnits.length) continue;
+
+    const location = locations.at(-1) || "";
+    const le = handlingUnits.at(-1) || "";
+    if (!location && !le) continue;
+
+    return {
+      pack: "",
+      quantity: 0,
+      location,
+      le,
+      sourceRow: rows[index].sourceRow || index + 1
+    };
+  }
+
+  return null;
 }
 
 function findStockSheetMaterial(rows) {
@@ -637,11 +776,15 @@ function findStockSheetDescription(rows) {
   return "";
 }
 
-function findStockSheetValue(rows, key) {
-  for (const row of rows.slice(0, 6)) {
+function findStockSheetValue(rows, key, rawRows = rows) {
+  for (let rowIndex = 0; rowIndex < rows.slice(0, 6).length; rowIndex += 1) {
+    const row = rows[rowIndex];
     const index = row.findIndex((cell) => normalizeHeader(cell) === key);
     if (index >= 0) {
-      const value = row.slice(index + 1).map(parsePositiveInteger).find((amount) => amount > 0);
+      const value = row
+        .slice(index + 1)
+        .map((cell, offset) => parseStockNumber(rawRows[rowIndex]?.[index + 1 + offset] ?? cell))
+        .find((amount) => amount > 0);
       if (value) return value;
     }
   }
@@ -749,7 +892,8 @@ function stockSheetDetailRowToLines(row, detailStart) {
         pack: `${pack.count}x${pack.quantity}`,
         quantity: pack.quantity,
         location,
-        le: handlingUnits[itemIndex] || handlingUnits[0] || ""
+        le: handlingUnits[itemIndex] || handlingUnits[0] || "",
+        sourceRow: row.sourceRow
       });
     }
   }
@@ -766,7 +910,8 @@ function stockSheetRowToLines(row) {
   return locations.map((location) => ({
     pack: pack.replace(/\s+/g, ""),
     quantity: parsedPack.quantity,
-    location
+    location,
+    sourceRow: row.sourceRow
   }));
 }
 
@@ -779,9 +924,11 @@ function stockLineReceipt(line, materialnummer, fileName) {
   return {
     materialnummer,
     lagerplatz: line.location,
-    leNummer: "",
+    leNummer: line.le || "",
     mengeStueck: line.quantity,
-    referenz: `Excel-Import ${fileName}`
+    referenz: [`Excel-Import ${fileName}`, line.note].filter(Boolean).join(" - "),
+    importFile: fileName,
+    importRow: line.sourceRow || ""
   };
 }
 
@@ -793,6 +940,11 @@ function mostFrequentNumber(values) {
 
 function sumNumbers(values) {
   return values.reduce((sum, value) => sum + value, 0);
+}
+
+function formatPaletteQuantity(value) {
+  const amount = Number(value || 0);
+  return amount > 0 ? String(amount) : "";
 }
 
 function rowToArticle(row, columns, defaultMaterial, fileName) {
@@ -915,6 +1067,17 @@ function parsePositiveInteger(value) {
   return Number.isInteger(amount) && amount > 0 ? amount : 0;
 }
 
+function parseStockNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  const text = String(value || "").trim();
+  if (!text) return 0;
+  const normalized = /^\d{1,3},\d{3}$/.test(text)
+    ? text.replace(",", "")
+    : text.replace(/\./g, "").replace(",", ".");
+  const amount = Number(normalized);
+  return Number.isFinite(amount) && amount > 0 ? Math.round(amount) : 0;
+}
+
 function findPositiveInteger(row, materialnummer) {
   return row
     .map(String)
@@ -939,10 +1102,11 @@ function findHandlingUnits(row) {
 }
 
 function normalizeStoragePlace(value) {
+  if (/^\s*\d+\s*x\s*\d+\s*$/i.test(String(value || ""))) return "";
   const normalized = String(value || "")
     .trim()
     .toUpperCase()
-    .replace(/[-_/]+/g, " ")
+    .replace(/[-_/\u2010-\u2015]+/g, " ")
     .replace(/\s+/g, " ");
   if (!normalized) return "";
   const existingCanonical = normalized.match(/^002\s+(H[1347])\s+S\s*(.+)$/);
@@ -972,7 +1136,10 @@ function isStoragePlaceShape(tokens) {
   if (tokens.length < 3) return false;
   const [area, second, third] = tokens;
   if (/^\d{1,3}$/.test(area)) return /^[A-Z]$/.test(second) && /^\d{1,3}$/.test(third);
-  if (/^[A-Z]$/.test(area) || /^A[N-T]$/.test(area)) return tokens.slice(1).every((token) => /^\d{1,3}$/.test(token));
+  if (/^[A-Z]$/.test(area) || /^A[A-Z]$/.test(area)) {
+    if (tokens.length === 3) return tokens.slice(1).every((token) => /^\d{1,3}$/.test(token));
+    if (tokens.length === 4) return /^\d{1,3}$/.test(second) && /^[A-Z]$/.test(third) && /^\d{1,3}$/.test(tokens[3]);
+  }
   return false;
 }
 
@@ -981,7 +1148,7 @@ function storageHallForArea(area) {
   if (numericArea >= 1 && numericArea <= 69) return "H7";
   if (/^[A-Z]$/.test(area) && area >= "A" && area <= "N") return "H4";
   if (/^[A-Z]$/.test(area) && area >= "O" && area <= "Z") return "H3";
-  if (/^A[N-T]$/.test(area)) return "H1";
+  if (/^A[A-Z]$/.test(area)) return "H1";
   return "";
 }
 

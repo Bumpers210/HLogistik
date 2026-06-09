@@ -9,7 +9,7 @@
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css?v=20260604-1">
     <script src="xlsx.full.min.js" defer></script>
-    <script src="artikel.js?v=20260604-1" defer></script>
+    <script src="artikel.js?v=20260609-11" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -60,6 +60,7 @@
             <input id="csvInput" type="file" accept=".xls,.xlsx,.csv,.html,.htm,text/csv" multiple>
           </label>
           <a id="exportLink" class="secondary-button link-button" href="/api/articles/export">CSV exportieren</a>
+          <button id="resetArticleDataButton" class="danger-button" type="button">Artikelstamm löschen</button>
         </div>
         <p id="articleStatus" class="export-status" role="status">Artikel werden geladen...</p>
       </section>
@@ -121,7 +122,7 @@
               </label>
               <label>
                 Menge pro Palette
-                <input id="mengeProPaletteInput" name="mengeProPalette" type="number" inputmode="numeric" min="1" step="1" required>
+                <input id="mengeProPaletteInput" name="mengeProPalette" type="number" inputmode="numeric" min="0" step="1">
               </label>
             </div>
             <label>

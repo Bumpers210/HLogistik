@@ -86,7 +86,7 @@ export function bookStorageReceipts(receipts, warehouse = "SSI") {
         if (!article) throw httpError(400, "Artikelnummer ist nicht im Artikelstamm vorhanden");
         results.push(applyStorageReceipt(normalized, article, new Date().toISOString(), normalizedWarehouse));
       } catch (error) {
-        throw withLineContext(error, index);
+        throw withLineContext(error, index, storageReceiptContext(receipt));
       }
     });
     db.exec("COMMIT");
@@ -506,6 +506,24 @@ function normalizeStorageReceipt(receipt) {
   if (!Number.isInteger(normalized.mengeStueck) || normalized.mengeStueck <= 0)
     throw httpError(400, "Stückzahl muss größer 0 sein");
   return normalized;
+}
+
+function storageReceiptContext(receipt) {
+  const parts = [];
+  const file = String(receipt?.importFile || receipt?.datei || "").trim();
+  const row = String(receipt?.importRow || receipt?.excelZeile || "").trim();
+  const materialnummer = String(receipt?.materialnummer || receipt?.artikelnummer || receipt?.articleNumber || "").trim();
+  const lagerplatz = String(receipt?.lagerplatz || receipt?.storageBin || "").trim();
+  const leNummer = String(receipt?.leNummer || receipt?.le_nummer || receipt?.LE || receipt?.handlingUnit || "").trim();
+  const menge = String(receipt?.mengeStueck || receipt?.menge_stueck || receipt?.stueckzahl || receipt?.quantity || "").trim();
+
+  if (file) parts.push(`Datei ${file}`);
+  if (row) parts.push(`Excel-Zeile ${row}`);
+  if (materialnummer) parts.push(`Artikel ${materialnummer}`);
+  if (lagerplatz) parts.push(`Lagerplatz ${lagerplatz}`);
+  if (leNummer) parts.push(`HU ${leNummer}`);
+  if (menge) parts.push(`Menge ${menge}`);
+  return parts.join(", ");
 }
 
 function normalizeStorageIssue(issue) {
