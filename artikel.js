@@ -3,6 +3,16 @@ const ARTICLE_SEARCH_DEBOUNCE_MS = 200;
 const USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const WAREHOUSE_KEY = "hlogistik-warehouse-v1";
+const ARTICLE_SORT_KEY = "artikelstamm-sort-v1";
+const ARTICLE_SORT_COLUMNS = new Set([
+  "materialnummer",
+  "materialbezeichnung",
+  "gebindeArt",
+  "mengeProKarton",
+  "mengeProPalette",
+  "gesamtStueck",
+  "status"
+]);
 
 const elements = {};
 let articles = [];
@@ -10,6 +20,7 @@ let stockTotalsByMaterial = new Map();
 let selectedArticleId = "";
 let searchTimer = null;
 let serverOnline = false;
+let articleSort = readArticleSort();
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -71,6 +82,9 @@ function bindEvents() {
   elements.gebindeArtInput.addEventListener("change", updateKrtFieldVisibility);
   elements.switchUserButton.addEventListener("click", switchUser);
   elements.closeEditorButton.addEventListener("click", closeEditor);
+  document.querySelectorAll("[data-article-sort]").forEach((button) => {
+    button.addEventListener("click", () => changeArticleSort(button.dataset.articleSort));
+  });
   elements.articleEditorOverlay.addEventListener("click", (event) => {
     if (event.target === elements.articleEditorOverlay) closeEditor();
   });
@@ -183,6 +197,7 @@ function normalizeWarehouse(value) {
 function renderArticles() {
   elements.articleTableBody.innerHTML = "";
   elements.articleCount.textContent = `${articles.length} Artikel`;
+  updateArticleSortIndicators();
 
   if (!articles.length) {
     const row = document.createElement("tr");
@@ -191,7 +206,7 @@ function renderArticles() {
     return;
   }
 
-  articles.forEach((article) => {
+  sortedArticlesForDisplay().forEach((article) => {
     const row = document.createElement("tr");
     row.classList.toggle("is-selected", article.id === selectedArticleId);
     row.classList.toggle("is-inactive", !article.aktiv);
@@ -207,6 +222,80 @@ function renderArticles() {
     row.addEventListener("click", () => { selectArticle(article); openEditor(); });
     elements.articleTableBody.appendChild(row);
   });
+}
+
+function changeArticleSort(key) {
+  if (!ARTICLE_SORT_COLUMNS.has(key)) return;
+  const sameColumn = articleSort.key === key;
+  articleSort = {
+    key,
+    direction: sameColumn && articleSort.direction === "asc" ? "desc" : "asc"
+  };
+  writeArticleSort();
+  renderArticles();
+}
+
+function sortedArticlesForDisplay() {
+  return articles.slice().sort((left, right) => {
+    const direction = articleSort.direction === "desc" ? -1 : 1;
+    const result = compareArticleSortValue(articleSortValue(left, articleSort.key), articleSortValue(right, articleSort.key));
+    if (result) return result * direction;
+    return compareArticleSortValue(articleSortValue(left, "materialnummer"), articleSortValue(right, "materialnummer"));
+  });
+}
+
+function articleSortValue(article, key) {
+  if (key === "gesamtStueck") return Number(stockTotalsByMaterial.get(article.materialnummer) || 0);
+  if (key === "status") return article.aktiv ? "Aktiv" : "Inaktiv";
+  if (key === "mengeProKarton") return supportsPackageQuantity(article.gebindeArt) ? sortableNumber(article.mengeProKarton) : null;
+  if (key === "mengeProPalette") return sortableNumber(article.mengeProPalette);
+  return String(article[key] || "");
+}
+
+function compareArticleSortValue(left, right) {
+  const leftEmpty = left === null || left === undefined || left === "";
+  const rightEmpty = right === null || right === undefined || right === "";
+  if (leftEmpty && rightEmpty) return 0;
+  if (leftEmpty) return 1;
+  if (rightEmpty) return -1;
+
+  if (typeof left === "number" && typeof right === "number") return left - right;
+  return String(left).localeCompare(String(right), "de", { numeric: true, sensitivity: "base" });
+}
+
+function sortableNumber(value) {
+  const number = Number(String(value || "").replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function updateArticleSortIndicators() {
+  document.querySelectorAll("[data-article-sort]").forEach((button) => {
+    const active = button.dataset.articleSort === articleSort.key;
+    button.dataset.sortDirection = active ? articleSort.direction : "";
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+
+    const header = button.closest("th");
+    if (header) header.setAttribute("aria-sort", active ? (articleSort.direction === "desc" ? "descending" : "ascending") : "none");
+  });
+}
+
+function readArticleSort() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ARTICLE_SORT_KEY) || "{}");
+    const key = ARTICLE_SORT_COLUMNS.has(saved.key) ? saved.key : "materialnummer";
+    const direction = saved.direction === "desc" ? "desc" : "asc";
+    return { key, direction };
+  } catch {
+    return { key: "materialnummer", direction: "asc" };
+  }
+}
+
+function writeArticleSort() {
+  try {
+    localStorage.setItem(ARTICLE_SORT_KEY, JSON.stringify(articleSort));
+  } catch {
+    // Sorting can still work without persistence.
+  }
 }
 
 function calculateStockTotals(locations) {
@@ -348,26 +437,37 @@ async function importArticleFile(event) {
       body: JSON.stringify({ articles: importedArticles, skipExisting })
     });
     const importedMaterials = new Set((result.importedMaterials || []).map((materialnummer) => String(materialnummer || "").trim()));
+    const existingMaterials = new Set(existingArticles.map((article) => String(article.materialnummer || "").trim()));
+    const bookableMaterials = new Set([...existingMaterials, ...importedMaterials]);
     const receiptsToImport = (skipExisting
-      ? importData.receipts.filter((receipt) => importedMaterials.has(String(receipt.materialnummer || "").trim()))
+      ? importData.receipts.filter((receipt) => bookableMaterials.has(String(receipt.materialnummer || "").trim()))
       : importData.receipts
     ).filter(isBookableStorageReceipt);
     let storageResult = { imported: 0, skipped: 0, message: "" };
     let storageError = "";
+    let storageVerification = { missing: [], message: "" };
     try {
       storageResult = await importStorageReceipts(receiptsToImport);
     } catch (error) {
       storageError = error.message || "Lagerbuchungen konnten nicht importiert werden";
     }
+    if (receiptsToImport.length) {
+      try {
+        storageVerification = await verifyStorageReceiptsImported(receiptsToImport);
+      } catch (error) {
+        storageVerification = { missing: [], message: `Pruefung der Lagerbuchungen fehlgeschlagen: ${error.message}` };
+      }
+    }
     const errorText = result.errors?.length ? ` ${result.errors.length} Zeilen mit Fehlern.` : "";
     const storageText = storageResult.message ? ` ${storageResult.message}` : "";
     const storageErrorText = storageError ? ` Lagerbuchungen nicht komplett importiert: ${storageError}` : "";
+    const storageVerificationText = storageVerification.message ? ` ${storageVerification.message}` : "";
     const skippedText = importData.skipped.length ? ` ${importData.skipped.length} Datei(en) ohne verwertbare Daten.` : "";
     const existingText = result.skippedExisting ? ` ${result.skippedExisting} bestehende Artikel uebersprungen.` : "";
     await loadArticles();
     setStatus(
-      `${result.created} neu, ${result.updated} aktualisiert.${storageText}${storageErrorText}${existingText}${skippedText}${errorText}`,
-      result.errors?.length || storageError ? "error" : "ok"
+      `${result.created} neu, ${result.updated} aktualisiert.${storageText}${storageErrorText}${storageVerificationText}${existingText}${skippedText}${errorText}`,
+      result.errors?.length || storageError || storageVerification.missing?.length ? "error" : "ok"
     );
   } catch (error) {
     await loadArticles().catch(() => {});
@@ -484,7 +584,12 @@ async function importStorageReceipts(receipts) {
     replaceLegacyBaseLocations = true;
   }
 
-  if (duplicateReceipts.length) {
+  if (duplicateReceipts.length && !newReceipts.length) {
+    return { imported: 0, skipped: duplicateReceipts.length, message: `${duplicateReceipts.length} Lagerbuchung(en) bereits vorhanden.` };
+  }
+
+  const shouldAskAboutDuplicateReceipts = false;
+  if (shouldAskAboutDuplicateReceipts && duplicateReceipts.length) {
     const duplicateText = duplicateReceipts
       .slice(0, 6)
       .map((receipt) => `${receipt.materialnummer} | ${receipt.lagerplatz} | ${receipt.leNummer}`)
@@ -524,6 +629,80 @@ async function importStorageReceipts(receipts) {
     skipped: duplicateReceipts.length,
     message: `${result.movements?.length || 0} Lagerbuchung(en) importiert.${duplicateReceipts.length ? ` ${duplicateReceipts.length} bereits vorhanden.` : ""}`
   };
+}
+
+async function verifyStorageReceiptsImported(receipts) {
+  const expected = aggregateStorageReceipts(receipts);
+  if (!expected.size) return { missing: [], message: "" };
+
+  const locations = await apiJson("/api/storage/locations");
+  const actual = aggregateStorageReceipts(locations.map((location) => ({
+    materialnummer: location.materialnummer,
+    lagerplatz: location.lagerplatz,
+    leNummer: location.leNummer || location.le_nummer,
+    mengeStueck: location.mengeStueck || location.menge_stueck,
+    paletten: location.paletten
+  })));
+
+  const missing = [];
+  expected.forEach((entry, key) => {
+    const currentQty = actual.get(key)?.mengeStueck || 0;
+    const currentPallets = actual.get(key)?.paletten || 0;
+    if (currentQty < entry.mengeStueck || currentPallets < entry.paletten) {
+      missing.push({
+        ...entry,
+        currentQty,
+        currentPallets,
+        missingQty: Math.max(0, entry.mengeStueck - currentQty),
+        missingPallets: Math.max(0, entry.paletten - currentPallets)
+      });
+    }
+  });
+
+  if (!missing.length) return { missing, message: "" };
+
+  const preview = missing
+    .slice(0, 8)
+    .map((entry) => {
+      const missingParts = [
+        entry.missingQty ? `${entry.missingQty} Stk fehlt` : "",
+        entry.missingPallets ? `${entry.missingPallets} Pal. fehlt` : ""
+      ].filter(Boolean).join(", ");
+      return `Zeile ${entry.importRows.join(", ")}: ${entry.materialnummer} ${entry.lagerplatz} ${entry.leNummer || "-"} (${missingParts})`;
+    })
+    .join("; ");
+  const suffix = missing.length > 8 ? `; ... und ${missing.length - 8} weitere` : "";
+
+  return {
+    missing,
+    message: `Pruefung: ${missing.length} Lagerzeile(n) fehlen nach Import. ${preview}${suffix}`
+  };
+}
+
+function aggregateStorageReceipts(receipts) {
+  const aggregated = new Map();
+
+  receipts
+    .filter(isBookableStorageReceipt)
+    .forEach((receipt) => {
+      const key = storageReceiptKey(receipt);
+      const entry = aggregated.get(key) || {
+        materialnummer: String(receipt.materialnummer || "").trim(),
+        lagerplatz: String(receipt.lagerplatz || "").trim(),
+        leNummer: String(receipt.leNummer || receipt.le_nummer || "").trim(),
+        mengeStueck: 0,
+        paletten: 0,
+        importRows: []
+      };
+      const mengeStueck = Number(receipt.mengeStueck || receipt.menge_stueck || 0) || 0;
+      entry.mengeStueck += mengeStueck;
+      entry.paletten += Number(receipt.paletten || 0) || (mengeStueck > 0 ? 1 : 0);
+      const importRow = String(receipt.importRow || "").trim();
+      if (importRow) entry.importRows.push(importRow);
+      aggregated.set(key, entry);
+    });
+
+  return aggregated;
 }
 
 async function inspectStorageReceipts(receipts) {
@@ -643,6 +822,8 @@ function rowsToArticleImport(rows, fileName = "") {
   });
   const stockSheetImport = stockSheetToImport(cleanedRows, fileName);
   if (stockSheetImport) return stockSheetImport;
+  const stockDetailImport = stockDetailToImport(cleanedRows, fileName);
+  if (stockDetailImport) return stockDetailImport;
 
   const headerIndex = cleanedRows.findIndex((row) => detectArticleColumns(row).score >= 2);
   const header = headerIndex >= 0 ? cleanedRows[headerIndex] : [];
@@ -692,6 +873,7 @@ function stockSheetToImport(rows, fileName) {
         ...lastDetailLine,
         pack: `${Math.max(1, paletten || 1)}x${bestand}`,
         quantity: bestand,
+        paletten: Math.max(1, paletten || 1),
         note: "Stellplatz/HU aus letzter Detailzeile uebernommen"
       }]
       : [stockSheetFallbackLine(bestand, paletten)];
@@ -722,10 +904,163 @@ function stockSheetToImport(rows, fileName) {
   return { articles: [article], receipts };
 }
 
+function stockDetailToImport(rows, fileName) {
+  const headerIndex = rows.findIndex((row) => detectStockDetailColumns(row).score >= 5);
+  if (headerIndex < 0) return null;
+
+  const columns = detectStockDetailColumns(rows[headerIndex]);
+  if (columns.material < 0 || columns.quantity < 0 || columns.location < 0 || columns.handlingUnit < 0) return null;
+
+  const articlesByMaterial = new Map();
+  const receipts = [];
+  const importLabel = /^bestandsdetail\b/i.test(String(fileName || "").trim())
+    ? fileName
+    : `Bestandsdetail ${fileName}`;
+
+  rows.slice(headerIndex + 1).forEach((row) => {
+    const materialnummer = normalizeMaterialNumber(getCell(row, columns.material));
+    if (!materialnummer) return;
+
+    const quantity = parseStockNumber(getCell(row, columns.quantity));
+    const palletCount = parseStockNumber(getCell(row, columns.pallets)) || (quantity > 0 ? 1 : 0);
+    const lagerplatz = normalizeStockDetailStoragePlace(getCell(row, columns.location));
+    const leNummer = normalizeHandlingUnitNumber(getCell(row, columns.handlingUnit));
+    const description = cleanStockDetailDescription(getCell(row, columns.description), materialnummer);
+    const area = getCell(row, columns.area);
+    const status = getCell(row, columns.status);
+    const reference = [getCell(row, columns.bookingNumber), getCell(row, columns.date), status]
+      .filter(Boolean)
+      .join(" | ");
+
+    const stats = articlesByMaterial.get(materialnummer) || {
+      materialnummer,
+      materialbezeichnung: description || materialnummer,
+      totalQuantity: 0,
+      totalPallets: 0,
+      palletQuantities: [],
+      firstLocation: "",
+      firstLe: "",
+      areas: new Set(),
+      statuses: new Set()
+    };
+
+    if (description && stats.materialbezeichnung === materialnummer) stats.materialbezeichnung = description;
+    stats.totalQuantity += quantity;
+    stats.totalPallets += palletCount;
+    if (quantity > 0) stats.palletQuantities.push(stockDetailPalletQuantity(quantity, palletCount));
+    if (!stats.firstLocation && lagerplatz) stats.firstLocation = lagerplatz;
+    if (!stats.firstLe && leNummer) stats.firstLe = leNummer;
+    if (area) stats.areas.add(area);
+    if (status) stats.statuses.add(status);
+    articlesByMaterial.set(materialnummer, stats);
+
+    if (!quantity || !lagerplatz) return;
+    receipts.push({
+      materialnummer,
+      lagerplatz,
+      leNummer,
+      mengeStueck: quantity,
+      paletten: Math.max(1, palletCount),
+      referenz: [importLabel, reference].filter(Boolean).join(" - "),
+      importFile: fileName,
+      importRow: row.sourceRow || ""
+    });
+  });
+
+  if (!articlesByMaterial.size) return null;
+
+  const articles = Array.from(articlesByMaterial.values()).map((stats) => ({
+    materialnummer: stats.materialnummer,
+    materialbezeichnung: stats.materialbezeichnung,
+    gebindeArt: "STK",
+    mengeProKarton: "",
+    mengeProPalette: stats.totalQuantity > 0 ? mostFrequentNumber(stats.palletQuantities) || "" : "",
+    barcode: stats.firstLe,
+    lagerplatz: stats.firstLocation,
+    artikelgruppe: Array.from(stats.areas).join(", "),
+    bemerkung: [
+      `Bestand: ${stats.totalQuantity}`,
+      `Paletten: ${stats.totalPallets}`,
+      stats.statuses.size ? `Status: ${Array.from(stats.statuses).join(", ")}` : "",
+      `Import: ${fileName}`
+    ].filter(Boolean).join(" | "),
+    aktiv: true
+  }));
+
+  return { articles, receipts };
+}
+
+function detectStockDetailColumns(row) {
+  const columns = {
+    material: -1,
+    description: -1,
+    quantity: -1,
+    pallets: -1,
+    location: -1,
+    handlingUnit: -1,
+    bookingNumber: -1,
+    date: -1,
+    supplier: -1,
+    status: -1,
+    area: -1,
+    score: 0
+  };
+
+  row.forEach((cell, index) => {
+    const token = normalizeToken(cell);
+    if (columns.material === -1 && ["artikelnr", "artikelnummer", "materialnummer", "material_nr", "matnr"].includes(token)) columns.material = index;
+    if (columns.description === -1 && ["bezeichnung", "artikelbezeichnung", "materialbezeichnung", "beschreibung"].includes(token)) columns.description = index;
+    if (columns.quantity === -1 && ["menge", "bestand", "stuck", "stueck", "stueckzahl", "stuckzahl"].includes(token)) columns.quantity = index;
+    if (columns.pallets === -1 && ["paletten", "palettenanzahl", "pal_anz", "palanz", "pal"].includes(token)) columns.pallets = index;
+    if (columns.location === -1 && ["stellplatz", "lagerplatz", "lagerort", "platz"].includes(token)) columns.location = index;
+    if (columns.handlingUnit === -1 && ["lagereinheit", "le", "le_nummer", "hu", "hu_nummer"].includes(token)) columns.handlingUnit = index;
+    if (columns.bookingNumber === -1 && ["buchungs_nr", "buchungsnummer", "buchung", "referenz"].includes(token)) columns.bookingNumber = index;
+    if (columns.date === -1 && token === "datum") columns.date = index;
+    if (columns.supplier === -1 && token === "lieferant") columns.supplier = index;
+    if (columns.status === -1 && token === "status") columns.status = index;
+    if (columns.area === -1 && ["bereich", "lagerbereich", "artikelgruppe"].includes(token)) columns.area = index;
+  });
+
+  columns.score = ["material", "quantity", "location", "handlingUnit", "description", "pallets", "area"].filter(
+    (key) => columns[key] >= 0
+  ).length;
+  return columns;
+}
+
+function normalizeMaterialNumber(value) {
+  const text = String(value || "").trim();
+  if (/^\d{4,7}$/.test(text)) return text;
+  const numeric = text.match(/^(\d{4,7})(?:[,.]0+)?$/);
+  if (numeric) return numeric[1];
+  if (/^\d{7}$/.test(text)) return text;
+  return text.match(/\b\d{4,7}\b/)?.[0] || "";
+}
+
+function cleanStockDetailDescription(value, materialnummer) {
+  const description = String(value || "").trim();
+  if (!description || description === materialnummer) return "";
+  return description;
+}
+
+function normalizeHandlingUnitNumber(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const numeric = text.match(/^(\d{8,10})(?:[,.]0+)?$/);
+  if (numeric) return numeric[1];
+  const digits = text.replace(/\D/g, "");
+  return /^\d{8,10}$/.test(digits) ? digits : "";
+}
+
+function stockDetailPalletQuantity(quantity, palletCount) {
+  const pallets = Math.max(1, Number(palletCount || 0));
+  return Math.max(1, Math.round(quantity / pallets));
+}
+
 function stockSheetFallbackLine(bestand, paletten) {
   return {
     pack: `${Math.max(1, paletten || 1)}x${bestand}`,
     quantity: bestand,
+    paletten: Math.max(1, paletten || 1),
     location: "KLAERFALL",
     le: "",
     note: "Stellplatz/HU fehlen in Excel"
@@ -891,6 +1226,7 @@ function stockSheetDetailRowToLines(row, detailStart) {
       lines.push({
         pack: `${pack.count}x${pack.quantity}`,
         quantity: pack.quantity,
+        paletten: 1,
         location,
         le: handlingUnits[itemIndex] || handlingUnits[0] || "",
         sourceRow: row.sourceRow
@@ -910,6 +1246,7 @@ function stockSheetRowToLines(row) {
   return locations.map((location) => ({
     pack: pack.replace(/\s+/g, ""),
     quantity: parsedPack.quantity,
+    paletten: 1,
     location,
     sourceRow: row.sourceRow
   }));
@@ -926,6 +1263,7 @@ function stockLineReceipt(line, materialnummer, fileName) {
     lagerplatz: line.location,
     leNummer: line.le || "",
     mengeStueck: line.quantity,
+    paletten: Math.max(1, Number(line.paletten || 0)),
     referenz: [`Excel-Import ${fileName}`, line.note].filter(Boolean).join(" - "),
     importFile: fileName,
     importRow: line.sourceRow || ""
@@ -1099,6 +1437,31 @@ function findHandlingUnits(row) {
     .map(String)
     .map((cell) => cell.replace(/\D/g, ""))
     .filter((cell) => /^\d{8,10}$/.test(cell));
+}
+
+function normalizeStockDetailStoragePlace(value) {
+  return normalizeStoragePlace(value) || normalizeLooseStockDetailStoragePlace(value);
+}
+
+function normalizeLooseStockDetailStoragePlace(value) {
+  if (/^\s*\d+\s*x\s*\d+\s*$/i.test(String(value || ""))) return "";
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[-_/\u2010-\u2015]+/g, " ")
+    .replace(/\s+/g, " ");
+  if (!normalized) return "";
+
+  if (/^H\s*\d{1,2}(?:\s+[A-Z]{1,3}\s*\d{0,3})?$/.test(normalized)) {
+    return normalized.replace(/\b([A-Z])\s*(\d{1,3})\b/g, "$1 $2").replace(/\s+/g, " ").trim();
+  }
+
+  if (/^[A-Z]{1,3}$/.test(normalized)) return normalized;
+  if (/^[A-Z]{1,3}\s+\d{1,3}(?:\s+[A-Z]\s*\d{1,3})?$/.test(normalized)) {
+    return normalized.replace(/\b([A-Z])\s*(\d{1,3})\b/g, "$1 $2").replace(/\s+/g, " ").trim();
+  }
+
+  return "";
 }
 
 function normalizeStoragePlace(value) {

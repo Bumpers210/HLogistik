@@ -3,6 +3,13 @@ const SEARCH_DEBOUNCE_MS = 200;
 const USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const WAREHOUSE_KEY = "hlogistik-warehouse-v1";
+const ARTICLE_OVERVIEW_SORT_KEY = "artikeluebersicht-sort-v1";
+const ARTICLE_OVERVIEW_SORT_COLUMNS = new Set([
+  "materialnummer",
+  "materialbezeichnung",
+  "gesamtStueck",
+  "palettenGesamt"
+]);
 
 function storagePageLabel(group) {
   return group === "buero" ? "Buchung" : "Einlagern";
@@ -17,6 +24,7 @@ let receiptLineCounter = 0;
 let issueLineCounter = 0;
 let loadedLocations = [];
 const expandedOverviewMaterials = new Set();
+let articleOverviewSort = readArticleOverviewSort();
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -107,6 +115,9 @@ function bindEvents() {
   elements.articleOverviewSearchInput.addEventListener("input", () => {
     window.clearTimeout(articleOverviewSearchTimer);
     articleOverviewSearchTimer = window.setTimeout(() => renderArticleOverview(loadedLocations), SEARCH_DEBOUNCE_MS);
+  });
+  document.querySelectorAll("[data-overview-sort]").forEach((button) => {
+    button.addEventListener("click", () => changeArticleOverviewSort(button.dataset.overviewSort));
   });
   elements.articleOverviewTableBody.addEventListener("click", handleArticleOverviewAction);
   elements.locationSearchInput.addEventListener("input", () => {
@@ -439,7 +450,8 @@ function renderLocations(locations) {
 
 function renderArticleOverview(locations) {
   elements.articleOverviewTableBody.innerHTML = "";
-  const overview = filterArticleOverview(buildArticleOverview(locations));
+  updateArticleOverviewSortIndicators();
+  const overview = sortArticleOverview(filterArticleOverview(buildArticleOverview(locations)));
   elements.articleOverviewCount.textContent = `${overview.length} Artikel`;
   updateArticleOverviewMetrics(overview);
 
@@ -474,6 +486,74 @@ function renderArticleOverview(locations) {
       elements.articleOverviewTableBody.appendChild(detailRow);
     }
   });
+}
+
+function changeArticleOverviewSort(key) {
+  if (!ARTICLE_OVERVIEW_SORT_COLUMNS.has(key)) return;
+  const sameColumn = articleOverviewSort.key === key;
+  articleOverviewSort = {
+    key,
+    direction: sameColumn && articleOverviewSort.direction === "asc" ? "desc" : "asc"
+  };
+  writeArticleOverviewSort();
+  renderArticleOverview(loadedLocations);
+}
+
+function sortArticleOverview(overview) {
+  const direction = articleOverviewSort.direction === "desc" ? -1 : 1;
+  return overview.slice().sort((left, right) => {
+    const result = compareArticleOverviewValue(
+      articleOverviewSortValue(left, articleOverviewSort.key),
+      articleOverviewSortValue(right, articleOverviewSort.key)
+    );
+    if (result) return result * direction;
+    return compareArticleOverviewValue(left.materialnummer, right.materialnummer);
+  });
+}
+
+function articleOverviewSortValue(article, key) {
+  if (key === "gesamtStueck" || key === "palettenGesamt") return Number(article[key] || 0);
+  return String(article[key] || "");
+}
+
+function compareArticleOverviewValue(left, right) {
+  const leftEmpty = left === null || left === undefined || left === "";
+  const rightEmpty = right === null || right === undefined || right === "";
+  if (leftEmpty && rightEmpty) return 0;
+  if (leftEmpty) return 1;
+  if (rightEmpty) return -1;
+  if (typeof left === "number" && typeof right === "number") return left - right;
+  return String(left).localeCompare(String(right), "de", { numeric: true, sensitivity: "base" });
+}
+
+function updateArticleOverviewSortIndicators() {
+  document.querySelectorAll("[data-overview-sort]").forEach((button) => {
+    const active = button.dataset.overviewSort === articleOverviewSort.key;
+    button.dataset.sortDirection = active ? articleOverviewSort.direction : "";
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+
+    const header = button.closest("th");
+    if (header) header.setAttribute("aria-sort", active ? (articleOverviewSort.direction === "desc" ? "descending" : "ascending") : "none");
+  });
+}
+
+function readArticleOverviewSort() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ARTICLE_OVERVIEW_SORT_KEY) || "{}");
+    const key = ARTICLE_OVERVIEW_SORT_COLUMNS.has(saved.key) ? saved.key : "materialnummer";
+    const direction = saved.direction === "desc" ? "desc" : "asc";
+    return { key, direction };
+  } catch {
+    return { key: "materialnummer", direction: "asc" };
+  }
+}
+
+function writeArticleOverviewSort() {
+  try {
+    localStorage.setItem(ARTICLE_OVERVIEW_SORT_KEY, JSON.stringify(articleOverviewSort));
+  } catch {
+    // The overview can still be sorted without browser persistence.
+  }
 }
 
 function updateArticleOverviewMetrics(overview) {
@@ -525,20 +605,22 @@ function buildArticleOverview(locations) {
         materialbezeichnung: location.materialbezeichnung || "",
         mengeProPalette: Number(location.mengeProPalette || 0),
         gesamtStueck: 0,
+        palettenGesamt: 0,
         locations: []
       });
     }
 
     const article = byMaterial.get(materialnummer);
     const mengeStueck = Number(location.mengeStueck || 0);
+    const paletten = Number(location.paletten || 0) || calculatePalletCount(mengeStueck, article.mengeProPalette, 1);
     article.gesamtStueck += mengeStueck;
-    article.locations.push({ ...location, mengeStueck });
+    article.palettenGesamt += paletten;
+    article.locations.push({ ...location, mengeStueck, paletten });
   });
 
   return Array.from(byMaterial.values())
     .map((article) => ({
       ...article,
-      palettenGesamt: calculatePalletCount(article.gesamtStueck, article.mengeProPalette, article.locations.length),
       locations: article.locations.sort((a, b) =>
         String(a.lagerplatz).localeCompare(String(b.lagerplatz), "de", { numeric: true }) ||
         String(a.leNummer).localeCompare(String(b.leNummer), "de", { numeric: true })
@@ -562,7 +644,7 @@ function renderArticleOverviewDetails(article) {
       <tbody>
         ${article.locations
     .map((location) => {
-      const palletCount = calculatePalletCount(location.mengeStueck, article.mengeProPalette, 1);
+      const palletCount = Number(location.paletten || 0) || calculatePalletCount(location.mengeStueck, article.mengeProPalette, 1);
       return `
         <tr>
           <td>${escapeHtml(location.lagerplatz)}</td>

@@ -775,13 +775,49 @@ async function applyStorageBinsFromArticleStock(lines) {
     if (!match?.lagerplatz) return line;
 
     const nextBin = String(match.lagerplatz || "").trim();
-    if (!nextBin || String(line.fromBin || "").trim().toUpperCase() === nextBin.toUpperCase()) return line;
+    const stockQty = Number(match.mengeStueck || match.menge_stueck || 0) || 0;
+    const quantityRemark = storageQuantityRemarkForLine(line, stockQty);
+    const nextNote = updateStorageQuantityRemark(line.positionNote, quantityRemark);
+    const binChanged = Boolean(nextBin && String(line.fromBin || "").trim().toUpperCase() !== nextBin.toUpperCase());
+    const noteChanged = nextNote !== String(line.positionNote || "").trim();
 
-    applied += 1;
-    return { ...line, fromBin: nextBin };
+    if (!binChanged && !noteChanged && Number(line.stockQty || 0) === stockQty) return line;
+
+    if (binChanged) applied += 1;
+    return {
+      ...line,
+      fromBin: binChanged ? nextBin : line.fromBin,
+      positionNote: nextNote,
+      stockQty
+    };
   });
 
   return { lines: enriched, applied };
+}
+
+function storageQuantityRemarkForLine(line, stockQty) {
+  const quantitySource = line?.actualQty !== undefined && line?.actualQty !== null && String(line.actualQty).trim() !== ""
+    ? line.actualQty
+    : line?.targetQty;
+  const pickQty = parseImportQuantityValue(quantitySource);
+  const availableQty = Number(stockQty || 0);
+
+  if (!Number.isFinite(pickQty) || !Number.isFinite(availableQty) || pickQty <= 0 || availableQty <= 0) return "";
+  if (pickQty === availableQty) return "1 Pal.";
+  if (pickQty < availableQty) return "com";
+  return "";
+}
+
+function updateStorageQuantityRemark(note, remark) {
+  const cleanedParts = String(note || "")
+    .split(/\s*;\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !/^1\s*Pal\.?$/i.test(part) && !/^com$/i.test(part));
+
+  const nextRemark = String(remark || "").trim();
+  if (nextRemark) cleanedParts.push(nextRemark);
+  return cleanedParts.join("; ");
 }
 
 function normalizeHandlingUnitLookup(value) {
@@ -1018,6 +1054,10 @@ function validatePickingImport(text, parsed) {
     issues.push(`${warehouseExpectedRows} Lagerauftrag-Position(en) erkannt, aber nur ${parsed.lines.length} gelesen.`);
   }
 
+  duplicateHandlingUnitConflicts(parsed.lines).forEach((conflict) => {
+    issues.push(`LE/HU ${conflict.value} ist mehrfach vorhanden (${formatHandlingUnitPositions(conflict.positions)}).`);
+  });
+
   parsed.lines.forEach((line, index) => {
     const label = `Position ${index + 1}`;
     const quantity = parseImportQuantityValue(line.targetQty);
@@ -1028,6 +1068,34 @@ function validatePickingImport(text, parsed) {
   });
 
   return issues;
+}
+
+function duplicateHandlingUnitConflicts(lines) {
+  const byHandlingUnit = new Map();
+
+  (Array.isArray(lines) ? lines : []).forEach((line, index) => {
+    const rawValue = String(line?.fromHandlingUnit || "").trim();
+    const key = normalizeHandlingUnitLookup(rawValue);
+    if (!key) return;
+
+    const entry = byHandlingUnit.get(key) || { value: rawValue, positions: [] };
+    if (!entry.value && rawValue) entry.value = rawValue;
+    entry.positions.push(index + 1);
+    byHandlingUnit.set(key, entry);
+  });
+
+  return [...byHandlingUnit.values()].filter((entry) => entry.positions.length > 1);
+}
+
+function formatHandlingUnitPositions(positions) {
+  return positions.map((position) => `Pos. ${position}`).join(", ");
+}
+
+function formatDuplicateHandlingUnitConflicts(conflicts) {
+  return conflicts
+    .slice(0, 3)
+    .map((conflict) => `LE/HU ${conflict.value} mehrfach (${formatHandlingUnitPositions(conflict.positions)})`)
+    .join("; ");
 }
 
 function countBestellscheinCandidateRows(lines) {
@@ -1130,11 +1198,21 @@ function extractBestellscheinFirstBarcode(value, product) {
   const productIndex = source.indexOf(String(product || ""));
   const searchText = afterBin ? afterBin[1] : source.slice(productIndex === -1 ? 0 : productIndex + String(product || "").length);
 
-  const match = searchText
-    .match(/\b\d{8,12}\b/g)
-    ?.find((number) => number !== product);
+  const candidates = [...searchText.matchAll(/\b\d{8,12}\b/g)]
+    .map((match) => ({ value: match[0], index: match.index || 0 }))
+    .filter((candidate) => candidate.value !== product)
+    .filter((candidate) => !isBestellscheinOrderColumnNumber(searchText, candidate));
 
-  return match || "";
+  return candidates.find((candidate) => isLikelyHandlingUnit(candidate.value))?.value || candidates[0]?.value || "";
+}
+
+function isBestellscheinOrderColumnNumber(text, candidate) {
+  const afterNumber = String(text || "").slice(candidate.index + candidate.value.length, candidate.index + candidate.value.length + 8);
+  return /^\s+[A-Z]{2}\b/.test(afterNumber);
+}
+
+function isLikelyHandlingUnit(value) {
+  return /^3\d{7,11}$/.test(String(value || ""));
 }
 
 function rebuildPageRows(items) {
@@ -1930,7 +2008,18 @@ function render() {
     map.product.addEventListener("input", () => updateLine(line.id, { product: map.product.value }, false));
     map.description.addEventListener("input", () => updateLine(line.id, { description: map.description.value }, false));
     map.targetQty.addEventListener("input", () => updateLine(line.id, { targetQty: map.targetQty.value }, false));
-    map.actualQty.addEventListener("input", () => updateLine(line.id, { actualQty: map.actualQty.value }, false));
+    map.actualQty.addEventListener("input", () => {
+      const patch = { actualQty: map.actualQty.value };
+      if (Number(line.stockQty || 0) > 0) {
+        const quantityRemark = storageQuantityRemarkForLine({ ...line, actualQty: map.actualQty.value }, Number(line.stockQty || 0));
+        const nextNote = updateStorageQuantityRemark(map.positionNote.value, quantityRemark);
+        if (nextNote !== String(map.positionNote.value || "").trim()) {
+          map.positionNote.value = nextNote;
+          patch.positionNote = nextNote;
+        }
+      }
+      updateLine(line.id, patch, false);
+    });
     map.unit.addEventListener("input", () => updateLine(line.id, { unit: map.unit.value }, false));
 
     elements.pickList.appendChild(item);
@@ -2613,6 +2702,14 @@ async function saveOrderNow(silent = false, { allowDraftRelease = false, touch =
 
   if (!state.lines.length) {
     if (!silent) setServerStatus("Leere Auftraege ohne Positionen werden nicht gespeichert.", "error");
+    return false;
+  }
+
+  const handlingUnitConflicts = duplicateHandlingUnitConflicts(state.lines);
+  if (handlingUnitConflicts.length) {
+    if (!silent) {
+      setServerStatus(`Speichern abgebrochen: ${formatDuplicateHandlingUnitConflicts(handlingUnitConflicts)}. LE/HU muss einmalig sein.`, "error");
+    }
     return false;
   }
 

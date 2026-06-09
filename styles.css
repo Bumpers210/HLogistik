@@ -1000,6 +1000,37 @@ textarea[readonly] {
   text-transform: uppercase;
 }
 
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-height: 26px;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: left;
+  text-transform: inherit;
+}
+
+.table-sort-button::after {
+  content: "";
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+
+.table-sort-button[data-sort-direction="asc"]::after {
+  content: "^";
+}
+
+.table-sort-button[data-sort-direction="desc"]::after {
+  content: "v";
+}
+
 .article-table tbody tr {
   cursor: pointer;
 }

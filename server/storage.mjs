@@ -12,7 +12,7 @@ export function readStorageLocations({ query = "", materialnummer = "", warehous
     .prepare(
       `SELECT lagerbestand.id, lagerbestand.lager, lagerbestand.materialnummer,
               lagerbestand.lagerplatz, lagerbestand.le_nummer, lagerbestand.menge_stueck,
-              lagerbestand.aktualisiert_am
+              lagerbestand.paletten, lagerbestand.aktualisiert_am
        FROM lagerbestand
        WHERE lagerbestand.lager = ? AND lagerbestand.menge_stueck > 0
        ORDER BY lagerbestand.lagerplatz COLLATE NOCASE, lagerbestand.materialnummer COLLATE NOCASE, lagerbestand.le_nummer COLLATE NOCASE`
@@ -41,7 +41,7 @@ export function readStorageMovements({ query = "", limit = 100, warehouse = "SSI
   const rows = getDb()
     .prepare(
       `SELECT lagerbewegung.id, lagerbewegung.lager, lagerbewegung.materialnummer,
-              lagerbewegung.bewegungsart, lagerbewegung.menge_stueck, lagerbewegung.lagerplatz,
+              lagerbewegung.bewegungsart, lagerbewegung.menge_stueck, lagerbewegung.paletten, lagerbewegung.lagerplatz,
               lagerbewegung.le_nummer, lagerbewegung.referenz, lagerbewegung.erstellt_am
        FROM lagerbewegung
        WHERE lagerbewegung.lager = ?
@@ -105,7 +105,7 @@ function applyStorageReceipt(normalized, article, now, warehouse) {
   const db = getDb();
   const existing = db
     .prepare(
-      `SELECT id, menge_stueck FROM lagerbestand
+      `SELECT id, menge_stueck, paletten FROM lagerbestand
        WHERE lager = ? AND materialnummer = ? AND lagerplatz = ? AND le_nummer = ?`
     )
     .get(warehouse, article.materialnummer, normalized.lagerplatz, normalized.leNummer);
@@ -114,21 +114,32 @@ function applyStorageReceipt(normalized, article, now, warehouse) {
   const bewegungId = createStorageMovementId();
 
   if (existing) {
-    db.prepare(`UPDATE lagerbestand SET menge_stueck = menge_stueck + ?, aktualisiert_am = ? WHERE id = ?`).run(
+    db.prepare(`UPDATE lagerbestand SET menge_stueck = menge_stueck + ?, paletten = paletten + ?, aktualisiert_am = ? WHERE id = ?`).run(
       normalized.mengeStueck,
+      normalized.paletten,
       now,
       existing.id
     );
   } else {
     db.prepare(
-      `INSERT INTO lagerbestand (id, lager, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, aktualisiert_am)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(bestandId, warehouse, article.id, article.materialnummer, normalized.lagerplatz, normalized.leNummer, normalized.mengeStueck, now);
+      `INSERT INTO lagerbestand (id, lager, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, paletten, aktualisiert_am)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      bestandId,
+      warehouse,
+      article.id,
+      article.materialnummer,
+      normalized.lagerplatz,
+      normalized.leNummer,
+      normalized.mengeStueck,
+      normalized.paletten,
+      now
+    );
   }
 
   db.prepare(
-    `INSERT INTO lagerbewegung (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, lagerplatz, le_nummer, referenz, erstellt_am)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO lagerbewegung (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, paletten, lagerplatz, le_nummer, referenz, erstellt_am)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     bewegungId,
     warehouse,
@@ -136,6 +147,7 @@ function applyStorageReceipt(normalized, article, now, warehouse) {
     article.materialnummer,
     "Wareneingang",
     normalized.mengeStueck,
+    normalized.paletten,
     normalized.lagerplatz,
     normalized.leNummer,
     normalized.referenz,
@@ -145,7 +157,8 @@ function applyStorageReceipt(normalized, article, now, warehouse) {
   const location = db
     .prepare(
       `SELECT lagerbestand.id, lagerbestand.lager, lagerbestand.materialnummer,
-              lagerbestand.lagerplatz, lagerbestand.le_nummer, lagerbestand.menge_stueck, lagerbestand.aktualisiert_am
+              lagerbestand.lagerplatz, lagerbestand.le_nummer, lagerbestand.menge_stueck,
+              lagerbestand.paletten, lagerbestand.aktualisiert_am
        FROM lagerbestand WHERE lagerbestand.id = ?`
     )
     .get(bestandId);
@@ -157,6 +170,7 @@ function applyStorageReceipt(normalized, article, now, warehouse) {
       bewegungsart: "Wareneingang",
       materialnummer: article.materialnummer,
       mengeStueck: normalized.mengeStueck,
+      paletten: normalized.paletten,
       lagerplatz: normalized.lagerplatz,
       leNummer: normalized.leNummer,
       referenz: normalized.referenz,
@@ -311,7 +325,7 @@ function bookPickingIssueIgnoringHandlingUnit(issue, warehouse = "SSI") {
   const db = getDb();
   const rows = db
     .prepare(
-      `SELECT id, le_nummer, menge_stueck FROM lagerbestand
+      `SELECT id, le_nummer, menge_stueck, paletten FROM lagerbestand
        WHERE lager = ? AND materialnummer = ? AND lagerplatz = ? AND menge_stueck > 0
        ORDER BY le_nummer COLLATE NOCASE`
     )
@@ -330,10 +344,17 @@ function bookPickingIssueIgnoringHandlingUnit(issue, warehouse = "SSI") {
       const rest = current - booked;
       remaining -= booked;
 
-      db.prepare(`UPDATE lagerbestand SET menge_stueck = ?, aktualisiert_am = ? WHERE id = ?`).run(rest, now, row.id);
+      const bookedPaletten = rest === 0 ? Number(row.paletten || 0) : 0;
+      const restPaletten = rest === 0 ? 0 : Number(row.paletten || 0);
+      db.prepare(`UPDATE lagerbestand SET menge_stueck = ?, paletten = ?, aktualisiert_am = ? WHERE id = ?`).run(
+        rest,
+        restPaletten,
+        now,
+        row.id
+      );
       db.prepare(
-        `INSERT INTO lagerbewegung (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, lagerplatz, le_nummer, referenz, erstellt_am)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO lagerbewegung (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, paletten, lagerplatz, le_nummer, referenz, erstellt_am)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         createStorageMovementId(),
         normalizedWarehouse,
@@ -341,6 +362,7 @@ function bookPickingIssueIgnoringHandlingUnit(issue, warehouse = "SSI") {
         article.materialnummer,
         "Warenausgang",
         booked,
+        bookedPaletten,
         lagerplatz,
         String(row.le_nummer || ""),
         issue.referenz,
@@ -432,7 +454,7 @@ function applyStorageIssue(normalized, article, now, warehouse) {
   const db = getDb();
   const existing = db
     .prepare(
-      `SELECT id, menge_stueck FROM lagerbestand
+      `SELECT id, menge_stueck, paletten FROM lagerbestand
        WHERE lager = ? AND materialnummer = ? AND lagerplatz = ? AND le_nummer = ?`
     )
     .get(warehouse, article.materialnummer, normalized.lagerplatz, normalized.leNummer);
@@ -444,16 +466,19 @@ function applyStorageIssue(normalized, article, now, warehouse) {
 
   const bewegungId = createStorageMovementId();
   const restbestand = Number(existing.menge_stueck) - normalized.mengeStueck;
+  const bookedPaletten = restbestand === 0 ? Number(existing.paletten || 0) : 0;
+  const restPaletten = restbestand === 0 ? 0 : Number(existing.paletten || 0);
 
-  db.prepare(`UPDATE lagerbestand SET menge_stueck = ?, aktualisiert_am = ? WHERE id = ?`).run(
+  db.prepare(`UPDATE lagerbestand SET menge_stueck = ?, paletten = ?, aktualisiert_am = ? WHERE id = ?`).run(
     restbestand,
+    restPaletten,
     now,
     existing.id
   );
 
   db.prepare(
-    `INSERT INTO lagerbewegung (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, lagerplatz, le_nummer, referenz, erstellt_am)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO lagerbewegung (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, paletten, lagerplatz, le_nummer, referenz, erstellt_am)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     bewegungId,
     warehouse,
@@ -461,6 +486,7 @@ function applyStorageIssue(normalized, article, now, warehouse) {
     article.materialnummer,
     "Warenausgang",
     normalized.mengeStueck,
+    bookedPaletten,
     normalized.lagerplatz,
     normalized.leNummer,
     normalized.referenz,
@@ -470,7 +496,8 @@ function applyStorageIssue(normalized, article, now, warehouse) {
   const location = db
     .prepare(
       `SELECT lagerbestand.id, lagerbestand.lager, lagerbestand.materialnummer,
-              lagerbestand.lagerplatz, lagerbestand.le_nummer, lagerbestand.menge_stueck, lagerbestand.aktualisiert_am
+              lagerbestand.lagerplatz, lagerbestand.le_nummer, lagerbestand.menge_stueck,
+              lagerbestand.paletten, lagerbestand.aktualisiert_am
        FROM lagerbestand WHERE lagerbestand.id = ?`
     )
     .get(existing.id);
@@ -482,6 +509,7 @@ function applyStorageIssue(normalized, article, now, warehouse) {
       bewegungsart: "Warenausgang",
       materialnummer: article.materialnummer,
       mengeStueck: normalized.mengeStueck,
+      paletten: bookedPaletten,
       lagerplatz: normalized.lagerplatz,
       leNummer: normalized.leNummer,
       referenz: normalized.referenz,
@@ -499,12 +527,14 @@ function normalizeStorageReceipt(receipt) {
     lagerplatz: String(receipt.lagerplatz ?? receipt.storageBin ?? "").trim().toUpperCase(),
     leNummer: String(receipt.leNummer ?? receipt.le_nummer ?? receipt.LE ?? receipt.handlingUnit ?? "").trim(),
     mengeStueck: readInteger(receipt.mengeStueck ?? receipt.menge_stueck ?? receipt.stueckzahl ?? receipt.quantity),
+    paletten: readInteger(receipt.paletten ?? receipt.palettenAnzahl ?? receipt.pallets ?? receipt.palletCount),
     referenz: String(receipt.referenz ?? receipt.reference ?? "").trim(),
   };
   if (!normalized.materialnummer) throw httpError(400, "Artikelnummer fehlt");
   if (!normalized.lagerplatz) throw httpError(400, "Lagerplatz fehlt");
   if (!Number.isInteger(normalized.mengeStueck) || normalized.mengeStueck <= 0)
     throw httpError(400, "Stückzahl muss größer 0 sein");
+  if (!Number.isInteger(normalized.paletten) || normalized.paletten <= 0) normalized.paletten = 1;
   return normalized;
 }
 
@@ -556,6 +586,7 @@ function storageLocationFromRow(row, articleInfo = new Map()) {
     lagerplatz: String(row.lagerplatz || ""),
     leNummer: String(row.le_nummer || ""),
     mengeStueck: Number(row.menge_stueck || 0),
+    paletten: Math.max(0, Number(row.paletten || 0)),
     aktualisiertAm: String(row.aktualisiert_am || ""),
   };
 }
@@ -569,6 +600,7 @@ function storageMovementFromRow(row, articleInfo = new Map()) {
     materialbezeichnung: String(row.materialbezeichnung || article.materialbezeichnung || ""),
     bewegungsart: String(row.bewegungsart || ""),
     mengeStueck: Number(row.menge_stueck || 0),
+    paletten: Math.max(0, Number(row.paletten || 0)),
     lagerplatz: String(row.lagerplatz || ""),
     leNummer: String(row.le_nummer || ""),
     referenz: String(row.referenz || ""),

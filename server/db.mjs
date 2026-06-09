@@ -62,6 +62,7 @@ export function initializeDatabase() {
       lagerplatz TEXT NOT NULL,
       le_nummer TEXT NOT NULL,
       menge_stueck INTEGER NOT NULL DEFAULT 0,
+      paletten INTEGER NOT NULL DEFAULT 1,
       aktualisiert_am TEXT NOT NULL,
       UNIQUE(lager, materialnummer, lagerplatz, le_nummer)
     );
@@ -72,6 +73,7 @@ export function initializeDatabase() {
       materialnummer TEXT NOT NULL,
       bewegungsart TEXT NOT NULL,
       menge_stueck INTEGER NOT NULL,
+      paletten INTEGER NOT NULL DEFAULT 0,
       lagerplatz TEXT NOT NULL,
       le_nummer TEXT NOT NULL,
       referenz TEXT,
@@ -178,7 +180,9 @@ function ensureColumn(db, tableName, name, definition) {
 
 function migrateStorageWarehouseTables() {
   migrateLagerbestandTable();
+  ensureColumn(getDb(), "lagerbestand", "paletten", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(getDb(), "lagerbewegung", "lager", "TEXT NOT NULL DEFAULT 'SSI'");
+  ensureColumn(getDb(), "lagerbewegung", "paletten", "INTEGER NOT NULL DEFAULT 0");
   getDb().exec(`
     CREATE INDEX IF NOT EXISTS idx_lagerbestand_lager_artikel
       ON lagerbestand(lager, materialnummer, lagerplatz, le_nummer);
@@ -209,14 +213,18 @@ function migrateLagerbestandTable() {
         lagerplatz TEXT NOT NULL,
         le_nummer TEXT NOT NULL,
         menge_stueck INTEGER NOT NULL DEFAULT 0,
+        paletten INTEGER NOT NULL DEFAULT 1,
         aktualisiert_am TEXT NOT NULL,
         UNIQUE(lager, materialnummer, lagerplatz, le_nummer)
       );
     `);
     const lagerSelect = hasWarehouseColumn ? "COALESCE(lager, 'SSI')" : "'SSI'";
+    const palettenSelect = columns.includes("paletten")
+      ? "COALESCE(paletten, CASE WHEN menge_stueck > 0 THEN 1 ELSE 0 END)"
+      : "CASE WHEN menge_stueck > 0 THEN 1 ELSE 0 END";
     db.exec(`
-      INSERT INTO lagerbestand (id, lager, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, aktualisiert_am)
-      SELECT id, ${lagerSelect}, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, aktualisiert_am
+      INSERT INTO lagerbestand (id, lager, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, paletten, aktualisiert_am)
+      SELECT id, ${lagerSelect}, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, ${palettenSelect}, aktualisiert_am
       FROM lagerbestand_alt;
       DROP TABLE lagerbestand_alt;
     `);

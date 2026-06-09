@@ -7,9 +7,9 @@
     <title>Artikelstamm</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260604-1">
+    <link rel="stylesheet" href="styles.css?v=20260609-5">
     <script src="xlsx.full.min.js" defer></script>
-    <script src="artikel.js?v=20260609-11" defer></script>
+    <script src="artikel.js?v=20260609-16" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -75,13 +75,13 @@
             <table class="article-table">
               <thead>
                 <tr>
-                  <th>Artikelnummer</th>
-                  <th>Artikelbezeichnung</th>
-                  <th>Gebindeart</th>
-                  <th>Menge pro Gebinde</th>
-                  <th>Menge pro Palette</th>
-                  <th>Gesamtstückzahl</th>
-                  <th>Status</th>
+                  <th><button class="table-sort-button" type="button" data-article-sort="materialnummer">Artikelnummer</button></th>
+                  <th><button class="table-sort-button" type="button" data-article-sort="materialbezeichnung">Artikelbezeichnung</button></th>
+                  <th><button class="table-sort-button" type="button" data-article-sort="gebindeArt">Gebindeart</button></th>
+                  <th><button class="table-sort-button" type="button" data-article-sort="mengeProKarton">Menge pro Gebinde</button></th>
+                  <th><button class="table-sort-button" type="button" data-article-sort="mengeProPalette">Menge pro Palette</button></th>
+                  <th><button class="table-sort-button" type="button" data-article-sort="gesamtStueck">Gesamtstückzahl</button></th>
+                  <th><button class="table-sort-button" type="button" data-article-sort="status">Status</button></th>
                 </tr>
               </thead>
               <tbody id="articleTableBody"></tbody>

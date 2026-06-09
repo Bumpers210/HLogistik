@@ -395,6 +395,11 @@ async function route(request, response) {
       sendJson(response, 400, { ok: false, error: "Leere Auftraege ohne Positionen werden nicht gespeichert" });
       return;
     }
+    const lineValidation = validateOrderLines(order);
+    if (lineValidation) {
+      sendJson(response, 400, { ok: false, error: lineValidation });
+      return;
+    }
     const duplicate = findDuplicateOrder(order);
     if (duplicate) {
       sendJson(response, 409, { ok: false, error: `Auftrag ${duplicate.orderNumber || duplicate.id} wurde bereits eingelesen` });
@@ -430,6 +435,11 @@ async function route(request, response) {
       sendJson(response, 400, { ok: false, error: "Leere Auftraege ohne Positionen werden nicht gespeichert" });
       return;
     }
+    const lineValidation = validateOrderLines(order);
+    if (lineValidation) {
+      sendJson(response, 400, { ok: false, error: lineValidation });
+      return;
+    }
     preserveClosedOrderStatus(order, existing);
     const duplicate = findDuplicateOrder(order, orderMatch[1]);
     if (duplicate) {
@@ -458,6 +468,11 @@ async function route(request, response) {
     const savedOrder = findOrder(exportMatch[1]);
     const order = normalizeOrder({ ...(savedOrder || {}), ...(body.order || {}) });
     order.id = exportMatch[1];
+    const lineValidation = validateOrderLines(order);
+    if (lineValidation) {
+      sendJson(response, 400, { ok: false, error: lineValidation });
+      return;
+    }
     const result = await exportPdf(order, exportDir, tempDir, requestOrigin(request), defaultExportDir);
     const stockIssue = (order.orderType || "picking") === "picking" && !savedOrder?.exportedAt
       ? bookPickingOrderIssues(order, warehouse)
@@ -503,6 +518,44 @@ async function sendExportFile(response, requestPath) {
 }
 
 // ── Security helpers ──────────────────────────────────────────────────────────
+
+function validateOrderLines(order) {
+  const conflicts = duplicateHandlingUnitConflicts(order.lines);
+  if (!conflicts.length) return "";
+
+  return `LE/HU muss einmalig sein: ${conflicts
+    .slice(0, 3)
+    .map((conflict) => `LE/HU ${conflict.value} mehrfach (${formatHandlingUnitPositions(conflict.positions)})`)
+    .join("; ")}`;
+}
+
+function duplicateHandlingUnitConflicts(lines) {
+  const byHandlingUnit = new Map();
+
+  (Array.isArray(lines) ? lines : []).forEach((line, index) => {
+    const rawValue = String(line?.fromHandlingUnit || "").trim();
+    const key = normalizeHandlingUnitLookup(rawValue);
+    if (!key) return;
+
+    const entry = byHandlingUnit.get(key) || { value: rawValue, positions: [] };
+    if (!entry.value && rawValue) entry.value = rawValue;
+    entry.positions.push(index + 1);
+    byHandlingUnit.set(key, entry);
+  });
+
+  return [...byHandlingUnit.values()].filter((entry) => entry.positions.length > 1);
+}
+
+function normalizeHandlingUnitLookup(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+}
+
+function formatHandlingUnitPositions(positions) {
+  return positions.map((position) => `Pos. ${position}`).join(", ");
+}
 
 function findDuplicateOrder(order, excludeId = "") {
   const orderNumber = String(order.orderNumber || "").trim().toLowerCase();
