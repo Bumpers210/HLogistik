@@ -3,6 +3,7 @@ const USER_KEY = "tablet-pick-user-v1";
 const SORT_MODE_KEY = "tablet-pick-sort-mode-v1";
 const MAIN_USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
+const CURRENT_ORDER_CACHE_KEY = "tablet-pick-current-order-v1";
 const ORDER_LIST_REFRESH_MS = 120000;
 const AUTO_SAVE_MS = 10000;
 
@@ -12,6 +13,7 @@ let serverOnline = false;
 let dirty = false;
 let orderListTimer = null;
 let saveTimer = null;
+let changeRevision = 0;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -22,6 +24,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
 window.addEventListener("online", () => {
   if (!serverOnline) initialize();
+});
+
+window.addEventListener("pagehide", persistCurrentOrderCache);
+window.addEventListener("beforeunload", persistCurrentOrderCache);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) persistCurrentOrderCache();
 });
 
 function bindElements() {
@@ -70,6 +78,7 @@ function bindEvents() {
   elements.collapseDoneInput.addEventListener("change", () => {
     if (!currentOrder) return;
     currentOrder.collapseDone = elements.collapseDoneInput.checked;
+    persistCurrentOrderCache();
     renderOrder();
   });
 }
@@ -232,17 +241,23 @@ async function loadOrder(id) {
 
   try {
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
-    currentOrder = order;
+    const cachedOrder = restoreCachedOrderFor(order);
+    currentOrder = cachedOrder || order;
     currentOrder.collapseDone = currentOrder.collapseDone !== false;
     elements.collapseDoneInput.checked = currentOrder.collapseDone;
-    dirty = false;
+    dirty = Boolean(cachedOrder);
     renderOrder();
+    if (cachedOrder) {
+      setMessage("Lokaler Zwischenstand wiederhergestellt. Bitte speichern oder weiterarbeiten.", false);
+      return;
+    }
     setMessage(
       currentOrder.activeUser && currentOrder.activeUser !== currentUserName()
         ? `Auftrag geladen. Aktuell in Bearbeitung: ${currentOrder.activeUser}.`
         : "Auftrag geladen.",
       false
     );
+    persistCurrentOrderCache();
     try { if (window.OfflineStore) await OfflineStore.saveOrder(order); } catch { /* non-critical */ }
   } catch (error) {
     setMessage(`Auftrag konnte nicht geladen werden: ${error.message}`, true);
@@ -285,6 +300,7 @@ function formatOrderOptionLabel(order) {
 }
 
 function orderStatusText(order) {
+  if (order.completedAt && !order.exportedAt) return "Fertig, PDF fehlt";
   const activeUser = String(order?.activeUser || "").trim();
   if (!activeUser) return "Frei";
   return activeUser === currentUserName() ? "Bearbeitet von mir" : `Bearbeitet von ${activeUser}`;
@@ -297,27 +313,18 @@ function renderLine(line) {
     (line.picked ? " is-done" : "") +
     (line.picked && currentOrder.collapseDone ? " is-collapsed" : "");
 
-  const checkWrap = document.createElement("label");
-  checkWrap.className = "check-target";
-  const checkbox = document.createElement("input");
-  checkbox.className = "picked-input";
-  checkbox.type = "checkbox";
-  checkbox.checked = Boolean(line.picked);
-  checkbox.addEventListener("change", () => {
-    line.picked = checkbox.checked;
-    markDirty();
-    renderOrder();
-  });
-  checkWrap.appendChild(checkbox);
+  const checkWrap = document.createElement("button");
+  checkWrap.type = "button";
+  checkWrap.className = `check-target${line.picked ? " is-picked" : ""}`;
+  checkWrap.setAttribute("aria-pressed", line.picked ? "true" : "false");
+  checkWrap.setAttribute("aria-label", line.picked ? "Position wieder öffnen" : "Position abhaken");
   const checkmark = document.createElement("span");
   checkmark.className = "checkmark";
   checkmark.setAttribute("aria-hidden", "true");
   checkWrap.appendChild(checkmark);
   checkWrap.addEventListener("click", (event) => {
-    if (event.target === checkbox) return;
     event.preventDefault();
-    checkbox.checked = !checkbox.checked;
-    checkbox.dispatchEvent(new Event("change"));
+    toggleLinePicked(line, card, checkWrap);
   });
   card.appendChild(checkWrap);
 
@@ -374,6 +381,27 @@ function renderLine(line) {
   return card;
 }
 
+function toggleLinePicked(line, card, button) {
+  line.picked = !line.picked;
+  updateLinePickedState(line, card, button);
+  markDirty();
+  updateCounts();
+}
+
+function updateLinePickedState(line, card, button) {
+  const picked = Boolean(line.picked);
+  card.classList.toggle("is-done", picked);
+  card.classList.remove("is-collapsed");
+  button.classList.toggle("is-picked", picked);
+  button.setAttribute("aria-pressed", picked ? "true" : "false");
+  button.setAttribute("aria-label", picked ? "Position wieder öffnen" : "Position abhaken");
+  if (picked && currentOrder && currentOrder.collapseDone) {
+    window.setTimeout(() => {
+      if (line.picked && currentOrder && currentOrder.collapseDone) card.classList.add("is-collapsed");
+    }, 180);
+  }
+}
+
 function makeInput(labelText, value, onChange, options = {}) {
   const label = document.createElement("label");
   label.appendChild(document.createTextNode(labelText));
@@ -427,7 +455,9 @@ function takeOverCurrentOrder() {
 
 function markDirty() {
   dirty = true;
+  changeRevision += 1;
   touchOrder();
+  persistCurrentOrderCache();
   setMessage("Änderungen noch nicht gespeichert.", false);
 }
 
@@ -456,6 +486,8 @@ function currentUserName() {
 async function saveOrder(silent, onSuccess) {
   if (!currentOrder || !currentOrder.id) return;
   touchOrder();
+  persistCurrentOrderCache();
+  const revision = changeRevision;
 
   if (!serverOnline) {
     if (window.OfflineStore) {
@@ -479,7 +511,13 @@ async function saveOrder(silent, onSuccess) {
       method: "PUT",
       body: JSON.stringify({ order: currentOrder }),
     });
-    dirty = false;
+    if (changeRevision === revision) {
+      dirty = false;
+      clearCurrentOrderCache();
+    } else {
+      dirty = true;
+      persistCurrentOrderCache();
+    }
     setMessage(silent ? "Automatisch gespeichert." : "Auftrag gespeichert.", false);
     loadOrderList();
     if (onSuccess) onSuccess();
@@ -510,6 +548,7 @@ async function exportPdf() {
         body: JSON.stringify({ order: currentOrder }),
       });
       dirty = false;
+      clearCurrentOrderCache();
       resetToStart("PDF erfolgreich exportiert. Bitte Auftrag wählen.");
       loadOrderList();
     } catch (error) {
@@ -519,12 +558,64 @@ async function exportPdf() {
 }
 
 function resetToStart(message) {
+  clearCurrentOrderCache();
   currentOrder = null;
   dirty = false;
   elements.orderSelect.value = "";
   elements.collapseDoneInput.checked = true;
   renderOrder();
   setMessage(message || "Bitte Auftrag wählen.", false);
+}
+
+function persistCurrentOrderCache() {
+  if (!currentOrder || !currentOrder.id) return;
+  try {
+    localStorage.setItem(CURRENT_ORDER_CACHE_KEY, JSON.stringify({
+      orderId: currentOrder.id,
+      cachedAt: new Date().toISOString(),
+      dirty: dirty === true,
+      order: currentOrder,
+    }));
+  } catch {
+    // Der Auftrag bleibt im Speicher; nur die Absturzsicherung ist dann nicht verfuegbar.
+  }
+}
+
+function clearCurrentOrderCache() {
+  try {
+    localStorage.removeItem(CURRENT_ORDER_CACHE_KEY);
+  } catch {
+    // Nicht kritisch.
+  }
+}
+
+function restoreCachedOrderFor(serverOrder) {
+  const payload = loadCachedOrderPayload();
+  if (!payload || !payload.order || !serverOrder || !serverOrder.id) return null;
+  if (payload.dirty !== true) return null;
+  if (String(payload.orderId || payload.order.id) !== String(serverOrder.id)) return null;
+  if (serverOrder.exportedAt) return null;
+  if (!Array.isArray(payload.order.lines) || !Array.isArray(serverOrder.lines)) return null;
+  if (payload.order.lines.length !== serverOrder.lines.length) return null;
+  const cachedAt = dateToMs(payload.cachedAt);
+  const serverAt = dateToMs(serverOrder.updatedAt || serverOrder.activeUserAt || serverOrder.createdAt);
+  if (serverAt && cachedAt <= serverAt) return null;
+  return payload.order;
+}
+
+function loadCachedOrderPayload() {
+  try {
+    const raw = localStorage.getItem(CURRENT_ORDER_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function dateToMs(value) {
+  if (!value) return 0;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
 }
 
 function updateCounts() {

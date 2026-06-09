@@ -331,20 +331,16 @@ button {
   position: relative;
   width: 52px;
   min-height: 48px;
-  padding-top: 2px;
+  padding: 2px 0 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
+  text-align: left;
   touch-action: manipulation;
-}
-
-.picked-input {
-  position: absolute;
-  left: 0;
-  top: 0;
-  z-index: 2;
-  width: 48px;
-  height: 48px;
-  margin: 0;
-  opacity: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .checkmark {
@@ -357,12 +353,12 @@ button {
   background: #fff;
 }
 
-.picked-input:checked + .checkmark {
+.check-target.is-picked .checkmark {
   background: #167a58;
   background: var(--accent);
 }
 
-.picked-input:checked + .checkmark::after {
+.check-target.is-picked .checkmark::after {
   content: "OK";
   display: block;
   color: #fff;

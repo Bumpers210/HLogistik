@@ -3,13 +3,18 @@ var USER_KEY = "tablet-pick-user-v1";
 var SORT_MODE_KEY = "tablet-pick-sort-mode-v1";
 var MAIN_USER_KEY = "kommissionier-app-user-v1";
 var USER_GROUP_KEY = "kommissionier-app-user-group-v1";
+var CURRENT_ORDER_CACHE_KEY = "tablet-pick-current-order-v1";
 var ORDER_LIST_REFRESH_MS = 120000;
+var AUTO_SAVE_MS = 2500;
 
 var elements = {};
 var currentOrder = null;
 var serverOnline = false;
 var dirty = false;
 var orderListTimer = null;
+var autoSaveTimer = null;
+var savingOrder = false;
+var changeRevision = 0;
 
 document.addEventListener("DOMContentLoaded", function () {
   bindElements();
@@ -17,6 +22,12 @@ document.addEventListener("DOMContentLoaded", function () {
   loadUser();
   renderCompletionFields();
   initialize();
+});
+
+window.addEventListener("pagehide", persistCurrentOrderCache);
+window.addEventListener("beforeunload", persistCurrentOrderCache);
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) persistCurrentOrderCache();
 });
 
 function bindElements() {
@@ -69,6 +80,7 @@ function bindEvents() {
   elements.collapseDoneInput.onchange = function () {
     if (!currentOrder) return;
     currentOrder.collapseDone = elements.collapseDoneInput.checked;
+    persistCurrentOrderCache();
     renderOrder();
   };
   elements.euroPalletsInput.onchange = updateCompletionFieldsFromInputs;
@@ -156,7 +168,7 @@ function loadOrderList() {
 }
 
 function isOpenOrder(order) {
-  return !order.exportedAt && !order.completedAt;
+  return !order.exportedAt;
 }
 
 function formatOrderCreatedAt(value) {
@@ -176,6 +188,7 @@ function formatOrderOptionLabel(order, timeText) {
 }
 
 function orderStatusText(order) {
+  if (order.completedAt && !order.exportedAt) return "Fertig, PDF fehlt";
   var activeUser = String(order && order.activeUser || "").trim();
   if (!activeUser) return "Frei";
   return activeUser === currentUserName() ? "Bearbeitet von mir" : "Bearbeitet von " + activeUser;
@@ -188,12 +201,18 @@ function loadOrder(id) {
     return;
   }
   apiJson("/api/orders/" + encodeURIComponent(id), null, function (order) {
-    currentOrder = order;
+    var cachedOrder = restoreCachedOrderFor(order);
+    currentOrder = cachedOrder || order;
     currentOrder.collapseDone = currentOrder.collapseDone !== false;
     elements.collapseDoneInput.checked = currentOrder.collapseDone;
     renderCompletionFields();
-    dirty = false;
+    dirty = Boolean(cachedOrder);
     renderOrder();
+    if (cachedOrder) {
+      setMessage("Lokaler Zwischenstand wiederhergestellt. Bitte speichern oder weiterarbeiten.", false);
+      return;
+    }
+    persistCurrentOrderCache();
     setMessage(currentOrder.activeUser && currentOrder.activeUser !== currentUserName()
       ? "Auftrag geladen. Aktuell in Bearbeitung: " + currentOrder.activeUser + "."
       : "Auftrag geladen.", false);
@@ -238,27 +257,19 @@ function renderLine(line) {
   var card = document.createElement("article");
   card.className = "pick-item" + (line.picked ? " is-done" : "") + (line.picked && currentOrder.collapseDone ? " is-collapsed" : "");
 
-  var checkWrap = document.createElement("label");
+  var checkWrap = document.createElement("button");
+  checkWrap.type = "button";
   checkWrap.className = "check-target";
-  var checkbox = document.createElement("input");
-  checkbox.className = "picked-input";
-  checkbox.type = "checkbox";
-  checkbox.checked = Boolean(line.picked);
-  checkbox.onchange = function () {
-    line.picked = checkbox.checked;
-    markDirty();
-    renderOrder();
-  };
-  checkWrap.appendChild(checkbox);
+  if (line.picked) checkWrap.className += " is-picked";
+  checkWrap.setAttribute("aria-pressed", line.picked ? "true" : "false");
+  checkWrap.setAttribute("aria-label", line.picked ? "Position wieder öffnen" : "Position abhaken");
   var checkmark = document.createElement("span");
   checkmark.className = "checkmark";
   checkmark.setAttribute("aria-hidden", "true");
   checkWrap.appendChild(checkmark);
   checkWrap.onclick = function (event) {
-    if (event.target === checkbox) return;
     event.preventDefault();
-    checkbox.checked = !checkbox.checked;
-    checkbox.onchange();
+    toggleLinePicked(line, card, checkWrap);
   };
   card.appendChild(checkWrap);
 
@@ -295,6 +306,39 @@ function renderLine(line) {
 
   card.appendChild(body);
   return card;
+}
+
+function toggleLinePicked(line, card, button) {
+  line.picked = !line.picked;
+  updateLinePickedState(line, card, button);
+  markDirty();
+  updateCounts();
+}
+
+function updateLinePickedState(line, card, button) {
+  var picked = Boolean(line.picked);
+  card.className = card.className
+    .replace(/\bis-done\b/g, "")
+    .replace(/\bis-collapsed\b/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^\s+|\s+$/g, "");
+  button.className = button.className
+    .replace(/\bis-picked\b/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^\s+|\s+$/g, "");
+  if (picked) {
+    card.className += " is-done";
+    button.className += " is-picked";
+  }
+  button.setAttribute("aria-pressed", picked ? "true" : "false");
+  button.setAttribute("aria-label", picked ? "Position wieder öffnen" : "Position abhaken");
+  if (picked && currentOrder && currentOrder.collapseDone) {
+    window.setTimeout(function () {
+      if (line.picked && currentOrder && currentOrder.collapseDone) {
+        card.className += " is-collapsed";
+      }
+    }, 180);
+  }
 }
 
 function makeInput(labelText, value, onChange, readOnly, className) {
@@ -359,7 +403,10 @@ function applyCompletionFieldsToOrder() {
 
 function markDirty() {
   dirty = true;
+  changeRevision += 1;
   touchOrder();
+  persistCurrentOrderCache();
+  scheduleAutoSave();
   setMessage("Aenderungen noch nicht gespeichert.", false);
 }
 
@@ -384,16 +431,35 @@ function touchOrder() {
 function saveOrder(silent, onSuccess) {
   if (!currentOrder || !currentOrder.id) return;
   if (!currentUserName()) return setMessage("Bitte erst Mitarbeiter eintragen.", true);
+  if (savingOrder) {
+    window.setTimeout(function () {
+      saveOrder(silent, onSuccess);
+    }, 300);
+    return;
+  }
+  savingOrder = true;
   touchOrder();
+  persistCurrentOrderCache();
+  var revision = changeRevision;
   apiJson("/api/orders/" + encodeURIComponent(currentOrder.id), {
     method: "PUT",
     body: JSON.stringify({ order: currentOrder })
   }, function () {
-    dirty = false;
+    savingOrder = false;
+    if (changeRevision === revision) {
+      dirty = false;
+      clearCurrentOrderCache();
+    } else {
+      dirty = true;
+      persistCurrentOrderCache();
+      scheduleAutoSave();
+    }
     setMessage(silent ? "Automatisch gespeichert." : "Auftrag gespeichert.", false);
     loadOrderList();
     if (onSuccess) onSuccess();
   }, function (message) {
+    savingOrder = false;
+    persistCurrentOrderCache();
     setMessage("Speichern fehlgeschlagen: " + message, true);
   });
 }
@@ -408,6 +474,7 @@ function exportPdf() {
       body: JSON.stringify({ order: currentOrder })
     }, function () {
       dirty = false;
+      clearCurrentOrderCache();
       resetToStart("PDF erfolgreich exportiert. Bitte Auftrag waehlen.");
       loadOrderList();
     }, function (message) {
@@ -417,6 +484,7 @@ function exportPdf() {
 }
 
 function resetToStart(message) {
+  clearCurrentOrderCache();
   currentOrder = null;
   dirty = false;
   elements.orderSelect.value = "";
@@ -424,6 +492,67 @@ function resetToStart(message) {
   renderCompletionFields();
   renderOrder();
   setMessage(message, false);
+}
+
+function scheduleAutoSave() {
+  if (autoSaveTimer) window.clearTimeout(autoSaveTimer);
+  autoSaveTimer = window.setTimeout(function () {
+    autoSaveTimer = null;
+    if (!dirty || !serverOnline || !currentOrder || !currentOrder.id || !currentUserName()) return;
+    saveOrder(true);
+  }, AUTO_SAVE_MS);
+}
+
+function persistCurrentOrderCache() {
+  if (!currentOrder || !currentOrder.id) return;
+  try {
+    localStorage.setItem(CURRENT_ORDER_CACHE_KEY, JSON.stringify({
+      orderId: currentOrder.id,
+      cachedAt: new Date().toISOString(),
+      dirty: dirty === true,
+      order: currentOrder
+    }));
+  } catch (error) {
+    void error;
+  }
+}
+
+function clearCurrentOrderCache() {
+  try {
+    localStorage.removeItem(CURRENT_ORDER_CACHE_KEY);
+  } catch (error) {
+    void error;
+  }
+}
+
+function restoreCachedOrderFor(serverOrder) {
+  var payload = loadCachedOrderPayload();
+  if (!payload || !payload.order || !serverOrder || !serverOrder.id) return null;
+  if (payload.dirty !== true) return null;
+  if (String(payload.orderId || payload.order.id) !== String(serverOrder.id)) return null;
+  if (serverOrder.exportedAt) return null;
+  if (!payload.order.lines || !serverOrder.lines) return null;
+  if (payload.order.lines.length !== serverOrder.lines.length) return null;
+  var cachedAt = dateToMs(payload.cachedAt);
+  var serverAt = dateToMs(serverOrder.updatedAt || serverOrder.activeUserAt || serverOrder.createdAt);
+  if (serverAt && cachedAt <= serverAt) return null;
+  return payload.order;
+}
+
+function loadCachedOrderPayload() {
+  try {
+    var raw = localStorage.getItem(CURRENT_ORDER_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    void error;
+    return null;
+  }
+}
+
+function dateToMs(value) {
+  if (!value) return 0;
+  var time = new Date(value).getTime();
+  return isNaN(time) ? 0 : time;
 }
 
 function updateCounts() {

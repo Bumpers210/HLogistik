@@ -169,6 +169,10 @@ function bindEvents() {
   elements.dismissOrderNoticeButton.addEventListener("click", hideOrderNotice);
   window.addEventListener("online", initializeServer);
   window.addEventListener("offline", () => setConnectionStatus(false));
+  window.addEventListener("pagehide", persistCurrentOrderCache);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") persistCurrentOrderCache();
+  });
   elements.loginForm.addEventListener("submit", (event) => {
     event.preventDefault();
     setCurrentUser(elements.loginNameInput.value, elements.loginGroupInput.value);
@@ -371,7 +375,8 @@ async function handlePdfUpload(event) {
     } else if (result.lines > 0) {
       const suffix = imported.source === "ocr" ? " per OCR" : "";
       const pageNotice = imported.pageNotice ? ` ${imported.pageNotice}` : "";
-      setImportStatus(`${result.lines} Positionen${suffix} als Entwurf importiert. Bitte prüfen und freigeben.${pageNotice}`, imported.pageNotice?.startsWith("Achtung") ? "warning" : "ok", 100);
+      const binNotice = result.autoBins ? ` ${result.autoBins} Stellplatz(e) automatisch gesetzt.` : "";
+      setImportStatus(`${result.lines} Positionen${suffix} als Entwurf importiert.${binNotice} Bitte prüfen und freigeben.${pageNotice}`, imported.pageNotice?.startsWith("Achtung") ? "warning" : "ok", 100);
     } else if (imported.text.trim()) {
       setImportStatus("Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
     } else {
@@ -733,11 +738,57 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
     };
   }
 
-  state.lines = parsed.lines.length ? parsed.lines : [fallbackLine];
+  const nextLines = parsed.lines.length ? parsed.lines : [fallbackLine];
+  const binResult = await applyStorageBinsFromArticleStock(nextLines);
+  state.lines = binResult.lines;
   topControlsCollapsed = false;
   saveStateWithoutServer();
   render();
-  return { lines: parsed.lines.length };
+  return { lines: parsed.lines.length, autoBins: binResult.applied };
+}
+
+async function applyStorageBinsFromArticleStock(lines) {
+  if (!serverOnline || !Array.isArray(lines) || !lines.length) return { lines, applied: 0 };
+
+  const materials = [...new Set(lines.map((line) => String(line.product || "").trim()).filter(Boolean))];
+  if (!materials.length) return { lines, applied: 0 };
+
+  const locationsByMaterial = new Map();
+  await Promise.all(materials.map(async (materialnummer) => {
+    try {
+      const locations = await apiJson(`/api/storage/locations?materialnummer=${encodeURIComponent(materialnummer)}`);
+      locationsByMaterial.set(materialnummer, Array.isArray(locations) ? locations : []);
+    } catch {
+      locationsByMaterial.set(materialnummer, []);
+    }
+  }));
+
+  let applied = 0;
+  const enriched = lines.map((line) => {
+    const materialnummer = String(line.product || "").trim();
+    const handlingUnit = normalizeHandlingUnitLookup(line.fromHandlingUnit);
+    if (!materialnummer || !handlingUnit) return line;
+
+    const match = (locationsByMaterial.get(materialnummer) || []).find((location) => (
+      normalizeHandlingUnitLookup(location.leNummer || location.le_nummer) === handlingUnit
+    ));
+    if (!match?.lagerplatz) return line;
+
+    const nextBin = String(match.lagerplatz || "").trim();
+    if (!nextBin || String(line.fromBin || "").trim().toUpperCase() === nextBin.toUpperCase()) return line;
+
+    applied += 1;
+    return { ...line, fromBin: nextBin };
+  });
+
+  return { lines: enriched, applied };
+}
+
+function normalizeHandlingUnitLookup(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
 }
 
 async function importStorageText(text, fileName = "", parsed = parseStorageSlipText(text, fileName)) {
@@ -1823,7 +1874,7 @@ function render() {
     item.classList.toggle("is-collapsed", state.collapseDone && line.picked);
 
     const map = {
-      picked: item.querySelector(".picked-input"),
+      picked: item.querySelector(".picked-button"),
       fromHandlingUnit: item.querySelector(".from-hu-input"),
       positionNote: item.querySelector(".position-note-input"),
       fromBin: item.querySelector(".from-bin-input"),
@@ -1836,7 +1887,7 @@ function render() {
     const huLabel = item.querySelector(".hu-label");
     if (huLabel) huLabel.textContent = isStorageLine ? "HU" : "Von HU";
 
-    map.picked.checked = line.picked;
+    map.picked.setAttribute("aria-pressed", line.picked ? "true" : "false");
     const isMissingHandlingUnit = !String(line.fromHandlingUnit || "").trim();
     const canEditHandlingUnit = isStorageLine || line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
     map.fromHandlingUnit.value = line.fromHandlingUnit || "";
@@ -1856,7 +1907,20 @@ function render() {
     map.targetQty.readOnly = true;
     map.unit.readOnly = true;
 
-    map.picked.addEventListener("change", () => updateLine(line.id, { picked: map.picked.checked }));
+    const setPicked = (picked) => {
+      map.picked.setAttribute("aria-pressed", picked ? "true" : "false");
+      updateLine(line.id, { picked }, false);
+      item.classList.toggle("is-done", picked);
+      // Do not collapse the row immediately on touch; Safari can stall when the tapped row disappears.
+      item.classList.remove("is-collapsed");
+      updateCollapseButtonText();
+    };
+
+    map.picked.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setPicked(map.picked.getAttribute("aria-pressed") !== "true");
+    });
     map.fromHandlingUnit.addEventListener("input", () => {
       map.fromHandlingUnit.value = map.fromHandlingUnit.value.replace(/[^0-9,]/g, "");
       updateLine(line.id, { fromHandlingUnit: map.fromHandlingUnit.value, fromHandlingUnitEditable: canEditHandlingUnit }, false);
@@ -2329,7 +2393,7 @@ function renderOrderListItems(orders) {
 }
 
 function isOpenOrderSummary(order) {
-  return !order.exportedAt && !order.completedAt;
+  return !order.exportedAt;
 }
 
 function findNewOrders(orders) {
@@ -2386,6 +2450,8 @@ function hideOrderNotice() {
 }
 
 function orderActivityLabel(order) {
+  if (order.completedAt && !order.exportedAt) return "fertig, PDF fehlt";
+
   if (isOrderRecentlyActive(order)) {
     if (order.id === state.id && order.activeUser === currentUser.name) return "bei dir geöffnet";
     return `in Bearbeitung: ${order.activeUser}`;
@@ -2444,7 +2510,9 @@ async function loadOrder(id) {
   try {
     if (state.id && state.id !== id) await releaseCurrentOrderActivity();
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
-    Object.assign(state, order);
+    const cached = await loadCachedOrderForRecovery(id);
+    const recovered = cached && isCachedOrderNewer(cached, order);
+    Object.assign(state, recovered ? cached : order);
     state.awaitingRelease = false;
     currentMode = state.orderType === "storage" ? "storage" : "picking";
     localStorage.setItem(MODE_KEY, currentMode);
@@ -2452,17 +2520,57 @@ async function loadOrder(id) {
     topControlsCollapsed = state.lines.length > 0;
     saveStateWithoutServer();
     render();
-    setServerStatus(
-      state.activeUser && state.activeUser !== currentUser.name
+    const loadMessage = recovered
+      ? "Auftrag aus lokaler Sicherung wiederhergestellt. Bitte weiterarbeiten oder speichern."
+      : state.activeUser && state.activeUser !== currentUser.name
         ? `Auftrag geladen. Aktuell in Bearbeitung: ${state.activeUser}.`
-        : "Auftrag geladen.",
-      "ok"
-    );
-    try { if (window.OfflineStore) await OfflineStore.saveOrder(order); } catch { /* non-critical */ }
+        : "Auftrag geladen.";
+    setServerStatus(loadMessage, "ok");
+    try { if (window.OfflineStore && !recovered) await OfflineStore.saveOrder(order); } catch { /* non-critical */ }
     await loadOrderList();
   } catch (error) {
     setServerStatus(`Auftrag konnte nicht geladen werden: ${error.message}`, "error");
   }
+}
+
+async function loadCachedOrderForRecovery(id) {
+  const candidates = [];
+  try {
+    const recovery = JSON.parse(localStorage.getItem(`${STORAGE_KEY}-recovery`) || "null");
+    if (recovery?.id === id) candidates.push(recovery);
+  } catch {
+    // Ignore damaged local recovery payloads.
+  }
+
+  try {
+    const current = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+    if (current?.id === id) candidates.push(current);
+  } catch {
+    // Ignore damaged state payloads.
+  }
+
+  if (window.OfflineStore?.loadOrder) {
+    try {
+      const cached = await OfflineStore.loadOrder(id);
+      if (cached) candidates.push(cached);
+    } catch {
+      // IndexedDB cache is best effort.
+    }
+  }
+
+  return candidates
+    .filter((order) => order?.id === id && Array.isArray(order.lines))
+    .sort((left, right) => cachedOrderTime(right) - cachedOrderTime(left))[0] || null;
+}
+
+function isCachedOrderNewer(cached, serverOrder) {
+  const cachedAt = cachedOrderTime(cached);
+  const serverAt = Date.parse(serverOrder?.updatedAt || serverOrder?.activeUserAt || serverOrder?.createdAt || "") || 0;
+  return cachedAt > serverAt && JSON.stringify(cached.lines || []) !== JSON.stringify(serverOrder?.lines || []);
+}
+
+function cachedOrderTime(order) {
+  return Date.parse(order?.cachedAt || order?.activeUserAt || order?.updatedAt || order?.createdAt || "") || 0;
 }
 
 async function takeOverCurrentOrder() {
@@ -2696,7 +2804,8 @@ function currentOrderPayload({ touch = true } = {}) {
 }
 
 function saveStateWithoutServer() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  writeLocalState(STORAGE_KEY, state);
+  persistCurrentOrderCache();
 }
 
 async function apiJson(url, options = {}) {
@@ -2730,8 +2839,39 @@ function saveAndRender() {
 }
 
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  writeLocalState(STORAGE_KEY, state);
+  persistCurrentOrderCache();
   scheduleServerSave();
+}
+
+function writeLocalState(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function persistCurrentOrderCache() {
+  if (!state.lines?.length) return;
+  const snapshot = currentOrderPayload({ touch: false });
+  const cacheKey = state.id || `draft-${state.orderType || currentMode || "picking"}`;
+  const cachedOrder = {
+    ...snapshot,
+    id: cacheKey,
+    cacheId: cacheKey,
+    cachedAt: new Date().toISOString(),
+    isLocalRecovery: !state.id
+  };
+  try {
+    writeLocalState(`${STORAGE_KEY}-recovery`, cachedOrder);
+  } catch {
+    // Safari private/low-storage modes may reject writes; the normal local state remains best effort.
+  }
+  if (window.OfflineStore?.saveOrder) {
+    OfflineStore.saveOrder(cachedOrder).catch(() => {});
+  }
 }
 
 function saveDraftState(message = "Entwurf lokal gespeichert. Bitte pruefen und dann freigeben.") {
@@ -2745,6 +2885,15 @@ function loadState() {
   try {
     Object.assign(state, JSON.parse(saved));
     state.id = state.id || "";
+    const recovery = JSON.parse(localStorage.getItem(`${STORAGE_KEY}-recovery`) || "null");
+    if (
+      recovery?.id === state.id &&
+      Array.isArray(recovery.lines) &&
+      cachedOrderTime(recovery) > cachedOrderTime(state) &&
+      JSON.stringify(recovery.lines || []) !== JSON.stringify(state.lines || [])
+    ) {
+      Object.assign(state, recovery);
+    }
   } catch (error) {
     console.warn("Gespeicherte Daten konnten nicht geladen werden.", error);
   }

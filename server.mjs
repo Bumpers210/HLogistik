@@ -528,24 +528,18 @@ function isReusableOrderNumber(orderNumber) {
 }
 
 function isOpenOrder(order) {
-  return !order.exportedAt && !order.completedAt;
+  return !order.exportedAt;
 }
 
 function isStaleClosedOrderWrite(incoming, existing) {
   if (!existing || !existing.id || isOpenOrder(existing)) return false;
 
-  const reopensCompleted = Boolean(existing.completedAt && !incoming.completedAt);
   const reopensExported = Boolean(existing.exportedAt && !incoming.exportedAt);
-  return reopensCompleted || reopensExported;
+  return reopensExported;
 }
 
 function preserveClosedOrderStatus(order, existing) {
   if (!existing || !existing.id) return;
-
-  if (existing.completedAt && !order.completedAt) {
-    order.completedAt = existing.completedAt;
-    order.completedBy = existing.completedBy || order.completedBy;
-  }
 
   if (existing.exportedAt && !order.exportedAt) {
     order.exportedAt = existing.exportedAt;
