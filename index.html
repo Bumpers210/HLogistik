@@ -11,11 +11,11 @@
     <title>Kommissionier-App</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260609-4">
+    <link rel="stylesheet" href="styles.css?v=20260610-7">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
     <script src="offline-store.js" defer></script>
-    <script src="app.js?v=20260609-12" defer></script>
+    <script src="app.js?v=20260610-7" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -105,6 +105,8 @@
           <p id="importStatus" class="import-status" role="status"></p>
         </div>
 
+        <p id="warehouseHint" class="warehouse-hint" role="status" hidden></p>
+
         <div class="order-meta">
           <label>
             Auftragsnummer
@@ -189,13 +191,10 @@
               <button id="clearDoneButton" class="secondary-button" type="button">Erledigte einklappen</button>
             </div>
             <p id="exportStatus" class="export-status" hidden></p>
-            <div id="pdfPreview" class="pdf-preview" hidden></div>
           </div>
         </aside>
       </section>
     </main>
-
-    <section id="printReport" class="print-report" aria-hidden="true" hidden></section>
 
     <section id="loginOverlay" class="login-overlay" hidden>
       <form id="loginForm" class="login-panel">

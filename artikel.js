@@ -584,25 +584,6 @@ async function importStorageReceipts(receipts) {
     replaceLegacyBaseLocations = true;
   }
 
-  if (duplicateReceipts.length && !newReceipts.length) {
-    return { imported: 0, skipped: duplicateReceipts.length, message: `${duplicateReceipts.length} Lagerbuchung(en) bereits vorhanden.` };
-  }
-
-  const shouldAskAboutDuplicateReceipts = false;
-  if (shouldAskAboutDuplicateReceipts && duplicateReceipts.length) {
-    const duplicateText = duplicateReceipts
-      .slice(0, 6)
-      .map((receipt) => `${receipt.materialnummer} | ${receipt.lagerplatz} | ${receipt.leNummer}`)
-      .join("\n");
-    const suffix = duplicateReceipts.length > 6 ? `\n... und ${duplicateReceipts.length - 6} weitere` : "";
-    if (!newReceipts.length) {
-      throw new Error(`Diese Lagerbuchungen sind bereits vorhanden und werden nicht doppelt importiert:\n${duplicateText}${suffix}`);
-    }
-    if (!confirm(`Es gibt bereits ${duplicateReceipts.length} Lagerbuchung(en):\n\n${duplicateText}${suffix}\n\nDiese überspringen und nur neue Lagerbuchungen importieren?`)) {
-      throw new Error("Lagerbuchungs-Import abgebrochen");
-    }
-  }
-
   if (!newReceipts.length) return { imported: 0, skipped: duplicateReceipts.length, message: `${duplicateReceipts.length} Lagerbuchung(en) bereits vorhanden.` };
 
   if (replaceLegacyBaseLocations) {
@@ -1472,6 +1453,8 @@ function normalizeStoragePlace(value) {
     .replace(/[-_/\u2010-\u2015]+/g, " ")
     .replace(/\s+/g, " ");
   if (!normalized) return "";
+  const rackPlace = normalized.match(/^(?:002\s+)?H\s*([25])\s+R\s*(\d{1,3})$/);
+  if (rackPlace) return `002-H${rackPlace[1]}-R${Number(rackPlace[2])}`;
   const existingCanonical = normalized.match(/^002\s+(H[1347])\s+S\s*(.+)$/);
   if (existingCanonical) {
     const suffix = formatStoragePlaceSuffix(existingCanonical[2].split(" "));

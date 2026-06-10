@@ -544,6 +544,34 @@ h2 {
   background: #fff8dd;
 }
 
+.warehouse-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #eef8f2;
+  color: var(--accent-dark);
+  font-weight: 800;
+  box-shadow: var(--shadow);
+}
+
+.warehouse-hint[hidden] {
+  display: none !important;
+}
+
+.warehouse-hint.is-warning {
+  color: #735300;
+  background: #fff8dd;
+  border-color: #e7d484;
+}
+
+.warehouse-hint.is-error {
+  color: #8a2f12;
+  background: #fff4ee;
+  border-color: #e0b49e;
+}
+
 .export-status {
   margin: 12px 0 0;
   padding: 10px;
@@ -565,25 +593,6 @@ h2 {
 .export-status.is-error {
   color: #8a2f12;
   background: #fff4ee;
-}
-
-.pdf-preview {
-  margin-top: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  overflow: hidden;
-  background: #fff;
-}
-
-.pdf-preview iframe {
-  display: block;
-  width: 100%;
-  height: 420px;
-  border: 0;
-}
-
-.print-report {
-  display: none;
 }
 
 .file-drop input {
@@ -838,6 +847,40 @@ textarea[readonly] {
   gap: 5px;
 }
 
+.pick-item.is-loading-slip .line-top {
+  grid-template-columns: minmax(260px, 0.75fr) minmax(120px, 0.24fr) minmax(240px, 1fr) minmax(80px, 0.18fr);
+  align-items: end;
+}
+
+.loading-slip-barcode {
+  min-height: 58px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.code128 {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  height: 58px;
+}
+
+.code128 text {
+  fill: #111;
+  font: 700 9px Arial, Helvetica, sans-serif;
+  letter-spacing: 0;
+}
+
+.loading-slip-empty {
+  display: grid;
+  place-items: center;
+  min-height: 52px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
 .short-input {
   text-align: center;
   font-weight: 700;
@@ -847,6 +890,10 @@ textarea[readonly] {
   display: grid;
   grid-template-columns: minmax(150px, 260px) minmax(180px, 1fr);
   gap: 5px;
+}
+
+.pick-item.is-loading-slip .location-row {
+  grid-template-columns: minmax(180px, 1fr);
 }
 
 .quantity-row {
@@ -1363,78 +1410,6 @@ textarea[readonly] {
   @page {
     size: A4 landscape;
     margin: 12mm;
-  }
-
-  body.is-report-printing > :not(.print-report) {
-    display: none !important;
-  }
-
-  body.is-report-printing .print-report {
-    display: block !important;
-    color: #111;
-    font-size: 10px;
-    font-family: Arial, Helvetica, sans-serif;
-  }
-
-  .print-report header {
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 12px;
-    padding-bottom: 8px;
-    border-bottom: 2px solid #111;
-  }
-
-  .print-report h1 {
-    margin: 0 0 6px;
-    font-size: 20px;
-  }
-
-  .print-report p {
-    margin: 0 0 4px;
-  }
-
-  .print-report .report-meta {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 6px 18px;
-    margin-bottom: 10px;
-    font-size: 11px;
-  }
-
-  .print-report .report-note {
-    min-height: 28px;
-    margin-bottom: 10px;
-    padding: 6px;
-    border: 1px solid #777;
-  }
-
-  .print-report table {
-    width: 100%;
-    border-collapse: collapse;
-    table-layout: fixed;
-  }
-
-  .print-report th,
-  .print-report td {
-    padding: 4px 3px;
-    border: 1px solid #555;
-    vertical-align: top;
-    overflow-wrap: anywhere;
-  }
-
-  .print-report th {
-    background: #e8eee9;
-    text-align: left;
-    font-size: 9px;
-  }
-
-  .print-report td {
-    font-size: 9px;
-  }
-
-  .print-report .num {
-    text-align: right;
   }
 
   .toolbar,

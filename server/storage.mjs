@@ -192,6 +192,8 @@ export function bookPickingOrderIssues(order, warehouse = "SSI") {
   const result = { booked: 0, errors: [] };
 
   lines.forEach((line, index) => {
+    if (line?.lineType === "loading-slip") return;
+
     const materialnummer = String(line.product || "").trim();
     const lagerplatz = String(line.fromBin || "").trim();
     const quantitySource = line.actualQty !== undefined && line.actualQty !== null && String(line.actualQty).trim() !== ""

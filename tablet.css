@@ -378,14 +378,22 @@ button {
   width: 100%;
 }
 
+.loading-slip-top {
+  display: table;
+  width: 100%;
+}
+
 .line-top label,
-.location-row label {
+.location-row label,
+.loading-slip-top label,
+.loading-slip-barcode {
   display: table-cell;
   vertical-align: top;
 }
 
 .line-top label,
-.location-row label {
+.location-row label,
+.loading-slip-top label {
   padding-right: 6px;
   color: #65726c;
   color: var(--muted);
@@ -398,7 +406,8 @@ button {
 }
 
 .line-top input,
-.location-row input {
+.location-row input,
+.loading-slip-top input {
   width: 100%;
   min-height: 34px;
   margin-top: 3px;
@@ -415,6 +424,58 @@ button {
 
 .location-row label:first-child {
   width: 260px;
+}
+
+.is-loading-slip .line-body {
+  width: auto;
+}
+
+.loading-slip-barcode {
+  width: 34%;
+  min-height: 58px;
+  padding: 2px 6px 2px 0;
+}
+
+.loading-slip-top label:nth-child(2) {
+  width: 16%;
+}
+
+.loading-slip-top label:nth-child(3) {
+  width: 34%;
+}
+
+.loading-slip-top label:nth-child(4) {
+  width: 16%;
+}
+
+.loading-slip-note-row label:first-child {
+  width: 100%;
+}
+
+.code128 {
+  display: block;
+  width: 100%;
+  height: 58px;
+  padding: 2px;
+  border: 1px solid #d8e0db;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.code128 text {
+  fill: #111;
+  font: 700 9px Arial, Helvetica, sans-serif;
+  letter-spacing: 0;
+}
+
+.loading-slip-empty {
+  display: block;
+  min-height: 52px;
+  padding: 16px 6px;
+  color: #65726c;
+  color: var(--muted);
+  font-weight: 700;
 }
 
 .short-input {

@@ -243,6 +243,11 @@ function sortOrderLines(lines) {
   var primary = sortMode === "product" ? "product" : "fromBin";
   var secondary = primary === "product" ? "fromBin" : "product";
   return lines.slice().sort(function (left, right) {
+    var leftLoadingSlip = left.lineType === "loading-slip";
+    var rightLoadingSlip = right.lineType === "loading-slip";
+    if (leftLoadingSlip && !rightLoadingSlip) return 1;
+    if (!leftLoadingSlip && rightLoadingSlip) return -1;
+
     return compareLineValue(left[primary], right[primary]) ||
       compareLineValue(left[secondary], right[secondary]) ||
       compareLineValue(left.description, right.description);
@@ -254,6 +259,8 @@ function compareLineValue(left, right) {
 }
 
 function renderLine(line) {
+  if (line.lineType === "loading-slip") return renderLoadingSlipLine(line);
+
   var card = document.createElement("article");
   card.className = "pick-item" + (line.picked ? " is-done" : "") + (line.picked && currentOrder.collapseDone ? " is-collapsed" : "");
 
@@ -303,6 +310,52 @@ function renderLine(line) {
     markDirty();
   }, false, ""));
   body.appendChild(locationRow);
+
+  card.appendChild(body);
+  return card;
+}
+
+function renderLoadingSlipLine(line) {
+  var card = document.createElement("article");
+  card.className = "pick-item is-loading-slip" + (line.picked ? " is-done" : "") + (line.picked && currentOrder.collapseDone ? " is-collapsed" : "");
+
+  var checkWrap = document.createElement("button");
+  checkWrap.type = "button";
+  checkWrap.className = "check-target";
+  if (line.picked) checkWrap.className += " is-picked";
+  checkWrap.setAttribute("aria-pressed", line.picked ? "true" : "false");
+  checkWrap.setAttribute("aria-label", line.picked ? "Position wieder oeffnen" : "Position abhaken");
+  var checkmark = document.createElement("span");
+  checkmark.className = "checkmark";
+  checkmark.setAttribute("aria-hidden", "true");
+  checkWrap.appendChild(checkmark);
+  checkWrap.onclick = function (event) {
+    event.preventDefault();
+    toggleLinePicked(line, card, checkWrap);
+  };
+  card.appendChild(checkWrap);
+
+  var body = document.createElement("div");
+  body.className = "line-body";
+
+  var top = document.createElement("div");
+  top.className = "loading-slip-top";
+  var barcode = document.createElement("div");
+  barcode.className = "loading-slip-barcode";
+  barcode.innerHTML = code128Svg(line.barcode || "");
+  top.appendChild(barcode);
+  top.appendChild(makeInput("Artikelnummer", line.product, null, true, "short-input"));
+  top.appendChild(makeInput("Produktbeschreibung", line.description, null, true, ""));
+  top.appendChild(makeInput("Soll", line.targetQty, null, true, "short-input"));
+  body.appendChild(top);
+
+  var noteRow = document.createElement("div");
+  noteRow.className = "location-row loading-slip-note-row";
+  noteRow.appendChild(makeInput("Zusatzbemerkung", line.positionNote, function (value) {
+    line.positionNote = value;
+    markDirty();
+  }, false, ""));
+  body.appendChild(noteRow);
 
   card.appendChild(body);
   return card;
@@ -636,6 +689,64 @@ function setHidden(element, hidden) {
   element.hidden = hidden;
   if (hidden) element.setAttribute("hidden", "");
   else element.removeAttribute("hidden");
+}
+
+function code128Svg(value) {
+  var barcode = String(value || "").trim();
+  if (!barcode) return '<span class="loading-slip-empty">Kein Barcode</span>';
+
+  var patterns = [
+    "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
+    "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221", "223211", "221132",
+    "221231", "213212", "223112", "312131", "311222", "321122", "321221", "312212", "322112", "322211",
+    "212123", "212321", "232121", "111323", "131123", "131321", "112313", "132113", "132311", "211313",
+    "231113", "231311", "112133", "112331", "132131", "113123", "113321", "133121", "313121", "211331",
+    "231131", "213113", "213311", "213131", "311123", "311321", "331121", "312113", "312311", "332111",
+    "314111", "221411", "431111", "111224", "111422", "121124", "121421", "141122", "141221", "112214",
+    "112412", "122114", "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111",
+    "111242", "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141",
+    "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311", "113141",
+    "114131", "311141", "411131", "211412", "211214", "211232", "2331112"
+  ];
+  var codes = [104];
+  for (var i = 0; i < barcode.length; i += 1) {
+    var charCode = barcode.charCodeAt(i);
+    if (charCode >= 32 && charCode <= 126) codes.push(charCode - 32);
+  }
+  if (codes.length === 1) return '<span class="loading-slip-empty">Barcode ungueltig</span>';
+
+  var checksum = 0;
+  for (var c = 0; c < codes.length; c += 1) checksum += codes[c] * (c || 1);
+  codes.push(checksum % 103, 106);
+
+  var x = 10;
+  var bars = "";
+  for (var codeIndex = 0; codeIndex < codes.length; codeIndex += 1) {
+    var pattern = patterns[codes[codeIndex]];
+    if (!pattern) continue;
+    for (var part = 0; part < pattern.length; part += 1) {
+      var width = Number(pattern.charAt(part));
+      if (part % 2 === 0) bars += '<rect x="' + x + '" y="0" width="' + width + '" height="44"></rect>';
+      x += width;
+    }
+  }
+
+  var svgWidth = x + 10;
+  return '<svg class="code128" viewBox="0 0 ' + svgWidth + ' 58" role="img" aria-label="Barcode ' + escapeHtmlAttribute(barcode) + '">' +
+    '<g fill="#111">' + bars + '</g>' +
+    '<text x="' + (svgWidth / 2) + '" y="56" text-anchor="middle">' + escapeSvgText(barcode) + '</text>' +
+    '</svg>';
+}
+
+function escapeSvgText(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttribute(value) {
+  return escapeSvgText(value).replace(/"/g, "&quot;");
 }
 
 function escapeHtml(value) {

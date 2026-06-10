@@ -38,6 +38,9 @@ const state = {
   exportedPdfPath: "",
   orderType: "picking",
   awaitingRelease: false,
+  detectedWarehouse: "",
+  warehouseHint: "",
+  warehouseHintType: "",
   lines: []
 };
 
@@ -100,6 +103,7 @@ function bindElements() {
     "importProgressWrap",
     "importProgressBar",
     "importStatus",
+    "warehouseHint",
     "topControls",
     "topToggleButton",
     "newOrderButton",
@@ -107,8 +111,6 @@ function bindElements() {
     "exportButton",
     "pdfExportButton",
     "exportStatus",
-    "pdfPreview",
-    "printReport",
     "orderSelect",
     "saveOrderButton",
     "releaseOrderButton",
@@ -185,7 +187,6 @@ function bindEvents() {
       if (serverOnline) await loadOrderList();
     });
   }
-  window.addEventListener("afterprint", cleanupPrintReport);
   elements.clearDoneButton.addEventListener("click", () => {
     state.collapseDone = !state.collapseDone;
     updateCollapseButtonText();
@@ -376,7 +377,9 @@ async function handlePdfUpload(event) {
       const suffix = imported.source === "ocr" ? " per OCR" : "";
       const pageNotice = imported.pageNotice ? ` ${imported.pageNotice}` : "";
       const binNotice = result.autoBins ? ` ${result.autoBins} Stellplatz(e) automatisch gesetzt.` : "";
-      setImportStatus(`${result.lines} Positionen${suffix} als Entwurf importiert.${binNotice} Bitte prüfen und freigeben.${pageNotice}`, imported.pageNotice?.startsWith("Achtung") ? "warning" : "ok", 100);
+      const warehouseNotice = result.warehouseHint?.shortMessage ? ` ${result.warehouseHint.shortMessage}` : "";
+      const statusType = imported.pageNotice?.startsWith("Achtung") || result.warehouseHint?.type === "warning" ? "warning" : "ok";
+      setImportStatus(`${result.lines} Positionen${suffix} als Entwurf importiert.${binNotice} Bitte prüfen und freigeben.${pageNotice}${warehouseNotice}`, statusType, 100);
     } else if (imported.text.trim()) {
       setImportStatus("Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
     } else {
@@ -387,9 +390,10 @@ async function handlePdfUpload(event) {
     const fallbackText = data ? extractTextFromSimplePdf(data) : "";
     if (fallbackText.trim()) {
       const result = await importText(fallbackText, file.name);
+      const warehouseNotice = result.warehouseHint?.shortMessage ? ` ${result.warehouseHint.shortMessage}` : "";
       setImportStatus(
-        result.cancelled ? result.message || "Import abgebrochen." : `Fallback genutzt: ${result.lines} Positionen als Entwurf importiert. Bitte prüfen und freigeben.`,
-        result.cancelled ? "warning" : result.lines ? "ok" : "error",
+        result.cancelled ? result.message || "Import abgebrochen." : `Fallback genutzt: ${result.lines} Positionen als Entwurf importiert. Bitte prüfen und freigeben.${warehouseNotice}`,
+        result.cancelled || result.warehouseHint?.type === "warning" ? "warning" : result.lines ? "ok" : "error",
         result.cancelled || result.lines ? 100 : null
       );
     } else {
@@ -661,10 +665,25 @@ function rotateCanvas(sourceCanvas, degrees) {
 }
 
 function scoreOcrCandidate(text, parsed) {
+  const parsedLines = Array.isArray(parsed?.lines) ? parsed.lines : [];
+  const completeLines = parsedLines.filter(isCompleteImportLine).length;
+  const incompleteLines = parsedLines.length - completeLines;
   const warehouseHits = (text.match(/\b\d{6,}\b/g) || []).length;
   const handlingUnitHits = (text.match(/\b\d{10,}\b/g) || []).length;
   const binHits = (text.match(/\b\d{3}-[A-Z0-9]+-[A-Z0-9]+\b/gi) || []).length;
-  return parsed.lines.length * 1000 + warehouseHits * 20 + handlingUnitHits * 10 + binHits * 10 + Math.min(text.length, 500);
+  return completeLines * 1500
+    + parsedLines.length * 100
+    + warehouseHits * 20
+    + handlingUnitHits * 10
+    + binHits * 10
+    + Math.min(text.length, 500)
+    - incompleteLines * 900;
+}
+
+function isCompleteImportLine(line) {
+  if (!line || !String(line.product || "").trim()) return false;
+  const quantity = parseImportQuantityValue(line.targetQty);
+  return Number.isFinite(quantity) && quantity > 0;
 }
 
 function scoreStorageOcrCandidate(text, parsed) {
@@ -739,12 +758,114 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
   }
 
   const nextLines = parsed.lines.length ? parsed.lines : [fallbackLine];
+  const warehouseHint = await detectPickingWarehouse(nextLines, text);
+  applyWarehouseHint(warehouseHint);
   const binResult = await applyStorageBinsFromArticleStock(nextLines);
   state.lines = binResult.lines;
   topControlsCollapsed = false;
   saveStateWithoutServer();
   render();
-  return { lines: parsed.lines.length, autoBins: binResult.applied };
+  return { lines: parsed.lines.length, autoBins: binResult.applied, warehouseHint };
+}
+
+async function detectPickingWarehouse(lines, text = "") {
+  const materials = [...new Set((Array.isArray(lines) ? lines : [])
+    .map((line) => String(line.product || "").trim())
+    .filter(Boolean))]
+    .slice(0, 80);
+
+  const scores = {
+    SSI: { articleHits: 0, stockHits: 0, textHits: 0, score: 0 },
+    SI: { articleHits: 0, stockHits: 0, textHits: 0, score: 0 }
+  };
+
+  const source = String(text || "");
+  if (/\bSSI\b/i.test(source)) scores.SSI.textHits += 1;
+  if (/Schwan\s+International/i.test(source)) scores.SI.textHits += 1;
+
+  if (serverOnline && materials.length) {
+    await Promise.all(["SSI", "SI"].flatMap((warehouse) => materials.map(async (materialnummer) => {
+      const headers = { "X-Warehouse": warehouse };
+      try {
+        await apiJson(`/api/articles/lookup/${encodeURIComponent(materialnummer)}`, { headers });
+        scores[warehouse].articleHits += 1;
+      } catch {
+        // Missing in this article master is a useful signal for the other warehouse.
+      }
+
+      try {
+        const locations = await apiJson(`/api/storage/locations?materialnummer=${encodeURIComponent(materialnummer)}`, { headers });
+        if (Array.isArray(locations) && locations.length) scores[warehouse].stockHits += 1;
+      } catch {
+        // Stock lookup is best effort; article hits are still enough for a useful hint.
+      }
+    })));
+  }
+
+  Object.values(scores).forEach((entry) => {
+    entry.score = entry.articleHits * 2 + entry.stockHits * 3 + entry.textHits * 4;
+  });
+
+  return warehouseHintFromScores(scores, {
+    checkedMaterials: materials.length,
+    offline: !serverOnline
+  });
+}
+
+function warehouseHintFromScores(scores, info = {}) {
+  const selectedWarehouse = currentWarehouse();
+  const entries = ["SSI", "SI"].map((warehouse) => ({ warehouse, ...scores[warehouse] }))
+    .sort((left, right) => right.score - left.score);
+  const [best, second] = entries;
+  const hasClearMatch = best.score >= 2 && best.score - second.score >= 2;
+
+  if (!hasClearMatch) {
+    const message = info.offline
+      ? `Lagerhinweis: Offline konnte der Auftrag nicht gegen SSI/SI geprüft werden. Aktuell gewählt: ${selectedWarehouse}.`
+      : `Lagerhinweis: Lager nicht eindeutig erkannt. ${warehouseScoreText("SSI", scores.SSI)}, ${warehouseScoreText("SI", scores.SI)}. Bitte Lager-Schalter oben prüfen.`;
+    return {
+      detectedWarehouse: "",
+      selectedWarehouse,
+      type: "warning",
+      message,
+      shortMessage: info.offline ? `Lager nicht geprüft, aktuell ${selectedWarehouse}.` : "Lager nicht eindeutig erkannt.",
+      scores,
+      checkedMaterials: info.checkedMaterials || 0
+    };
+  }
+
+  const type = best.warehouse === selectedWarehouse ? "ok" : "warning";
+  const base = `Lagerhinweis: Auftrag passt wahrscheinlich zu ${best.warehouse} (${warehouseScoreText(best.warehouse, best)}).`;
+  const message = type === "ok"
+    ? `${base} Der Lager-Schalter steht richtig.`
+    : `${base} Oben ist ${selectedWarehouse} gewählt - vor Freigabe/Buchung bitte auf ${best.warehouse} umstellen.`;
+
+  return {
+    detectedWarehouse: best.warehouse,
+    selectedWarehouse,
+    type,
+    message,
+    shortMessage: type === "ok"
+      ? `Lager erkannt: ${best.warehouse}.`
+      : `Achtung: Lager erkannt ${best.warehouse}, oben gewählt ${selectedWarehouse}.`,
+    scores,
+    checkedMaterials: info.checkedMaterials || 0
+  };
+}
+
+function warehouseScoreText(warehouse, score) {
+  const parts = [];
+  if (score.articleHits) parts.push(`${score.articleHits} Artikel`);
+  if (score.stockHits) parts.push(`${score.stockHits} Bestand`);
+  if (score.textHits) parts.push(`${score.textHits} Texttreffer`);
+  return `${warehouse}: ${parts.length ? parts.join(", ") : "0 Treffer"}`;
+}
+
+function applyWarehouseHint(hint) {
+  state.detectedWarehouse = hint?.detectedWarehouse || "";
+  state.warehouseHint = hint?.message || "";
+  state.warehouseHintType = hint?.type || "";
+  renderWarehouseHint();
 }
 
 async function applyStorageBinsFromArticleStock(lines) {
@@ -909,6 +1030,15 @@ function setImportStatus(message, type = "", progress = null) {
   }
 }
 
+function renderWarehouseHint() {
+  if (!elements.warehouseHint) return;
+  const message = String(state.warehouseHint || "").trim();
+  elements.warehouseHint.hidden = !message;
+  elements.warehouseHint.textContent = message;
+  elements.warehouseHint.classList.toggle("is-warning", state.warehouseHintType === "warning");
+  elements.warehouseHint.classList.toggle("is-error", state.warehouseHintType === "error");
+}
+
 function extractTextFromSimplePdf(arrayBuffer) {
   const source = new TextDecoder("latin1").decode(new Uint8Array(arrayBuffer));
   const rows = [];
@@ -946,6 +1076,8 @@ function parseOrderText(text) {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+  const loadingSlipLine = parseLoadingSlipLine(cleanedLines);
+  const pickingLines = loadingSlipLine ? linesBeforeLoadingSlip(cleanedLines) : cleanedLines;
 
   const orderNumber = findFirst(text, [
     /Bestellschein\s*Nr\.?\s*[:.-]?\s*([A-Z0-9-]{4,})/i,
@@ -957,7 +1089,26 @@ function parseOrderText(text) {
     /(?:kunde|lieferadresse|empfänger)\s*[:#-]?\s*([^\n\t]{3,80})/i
   ]);
 
-  const bestellscheinRows = collectBestellscheinRows(cleanedLines);
+  const tableRows = annotateDestinationExceptions(collectWarehouseRows(pickingLines));
+  const stackedRows = tableRows.length ? [] : annotateDestinationExceptions(collectStackedWarehouseRows(pickingLines));
+  const splitRows = tableRows.length || stackedRows.length ? [] : annotateDestinationExceptions(collectSplitWarehouseRows(pickingLines));
+  const warehouseRows = tableRows.length ? tableRows : stackedRows.length ? stackedRows : splitRows;
+  const destinationCustomerName = destinationToCustomerName(warehouseRows);
+  const customerName = destinationCustomerName || cleanCustomerName(explicitCustomerName || findCustomerFromHeader(pickingLines));
+
+  if (warehouseRows.length) {
+    return {
+      orderNumber: "",
+      customerName: customerName || "",
+      lines: appendLoadingSlipLine(warehouseRows.map((line) => createLine({
+        ...line,
+        actualQty: line.targetQty,
+        fromHandlingUnitEditable: !String(line.fromHandlingUnit || "").trim()
+      })), loadingSlipLine)
+    };
+  }
+
+  const bestellscheinRows = collectBestellscheinRows(pickingLines);
   if (bestellscheinRows.length) {
     return {
       orderNumber: orderNumber || "",
@@ -971,26 +1122,7 @@ function parseOrderText(text) {
     };
   }
 
-  const tableRows = annotateDestinationExceptions(collectWarehouseRows(cleanedLines));
-  const stackedRows = tableRows.length ? [] : annotateDestinationExceptions(collectStackedWarehouseRows(cleanedLines));
-  const splitRows = tableRows.length || stackedRows.length ? [] : annotateDestinationExceptions(collectSplitWarehouseRows(cleanedLines));
-  const warehouseRows = tableRows.length ? tableRows : stackedRows.length ? stackedRows : splitRows;
-  const destinationCustomerName = destinationToCustomerName(warehouseRows);
-  const customerName = destinationCustomerName || cleanCustomerName(explicitCustomerName || findCustomerFromHeader(cleanedLines));
-
-  if (warehouseRows.length) {
-    return {
-      orderNumber: "",
-      customerName: customerName || "",
-      lines: warehouseRows.map((line) => createLine({
-        ...line,
-        actualQty: line.targetQty,
-        fromHandlingUnitEditable: !String(line.fromHandlingUnit || "").trim()
-      }))
-    };
-  }
-
-  if (cleanedLines.some((line) => /lageraufg/i.test(line))) {
+  if (pickingLines.some((line) => /lageraufg/i.test(line))) {
     return {
       orderNumber: orderNumber || "",
       customerName: customerName || "",
@@ -1001,7 +1133,7 @@ function parseOrderText(text) {
   const candidates = [];
   let current = null;
 
-  cleanedLines.forEach((line) => {
+  pickingLines.forEach((line) => {
     const starter = line.match(/^(\d{1,4})(?:[.)\s-]+)(.+)$/);
     const looksLikeArticle = /\b[A-Z0-9][A-Z0-9/-]{3,}\b/.test(line);
     const hasQuantity = /\b\d+(?:[,.]\d+)?\s*(?:stk|st|stück|pck|pak|ve|karton|kg|g|m|l|rolle|pal)\b/i.test(line);
@@ -1023,12 +1155,140 @@ function parseOrderText(text) {
   return {
     orderNumber: orderNumber || "",
     customerName: customerName || "",
-    lines: candidates.map((line, index) => createLine({
+    lines: appendLoadingSlipLine(candidates.map((line, index) => createLine({
       ...line,
       warehouseOrder: line.position || String(index + 1),
       actualQty: line.targetQty
-    }))
+    })), loadingSlipLine)
   };
+}
+
+function appendLoadingSlipLine(lines, loadingSlipLine) {
+  if (!loadingSlipLine || !Array.isArray(lines)) return lines;
+  if (!lines.length) return [loadingSlipLine];
+  if (lines.some((line) => line.lineType === "loading-slip" && String(line.barcode || "") === String(loadingSlipLine.barcode || ""))) {
+    return lines;
+  }
+  return [...lines, loadingSlipLine];
+}
+
+function parseLoadingSlipLine(lines) {
+  const loadingSlipLines = loadingSlipLinesFrom(lines);
+  if (!isLikelyLoadingSlip(loadingSlipLines)) return null;
+
+  const rows = collectBestellscheinRows(loadingSlipLines);
+  const row = rows[0] || parseStackedLoadingSlipRow(loadingSlipLines);
+  if (!row) return null;
+
+  const barcode = extractLoadingSlipHeaderBarcode(loadingSlipLines) || row.fromHandlingUnit || "";
+  if (!barcode) return null;
+
+  return createLine({
+    lineType: "loading-slip",
+    warehouseOrder: "Ladeschein",
+    barcode,
+    product: row.product || "",
+    description: row.description || "Ladeschein",
+    targetQty: row.targetQty || "",
+    actualQty: row.targetQty || "",
+    unit: row.unit || "",
+    positionNote: rows.length > 1 ? `Ladeschein mit ${rows.length} Positionen` : "",
+    fromHandlingUnit: "",
+    fromHandlingUnitEditable: false,
+    fromBin: "",
+    toBin: ""
+  });
+}
+
+function isLikelyLoadingSlip(lines) {
+  const source = Array.isArray(lines) ? lines.join("\n") : String(lines || "");
+  return /lad[ce](?:schein|liste)|lade(?:schein|liste)|bestellschein|entnahmeanweisungen/i.test(source) && (
+    collectBestellscheinRows(lines).length > 0 || Boolean(parseStackedLoadingSlipRow(lines))
+  );
+}
+
+function loadingSlipLinesFrom(lines) {
+  const sourceLines = Array.isArray(lines) ? lines : [];
+  const startIndex = sourceLines.findIndex((line) => /lad[ce](?:schein|liste)|lade(?:schein|liste)/i.test(String(line || "")));
+  return startIndex === -1 ? sourceLines : sourceLines.slice(startIndex);
+}
+
+function linesBeforeLoadingSlip(lines) {
+  const sourceLines = Array.isArray(lines) ? lines : [];
+  const startIndex = sourceLines.findIndex((line) => /lad[ce](?:schein|liste)|lade(?:schein|liste)/i.test(String(line || "")));
+  return startIndex === -1 ? sourceLines : sourceLines.slice(0, startIndex);
+}
+
+function parseStackedLoadingSlipRow(lines) {
+  const normalized = normalizeLoadingSlipText(Array.isArray(lines) ? lines.join(" ") : String(lines || ""));
+  if (!/lad[ce](?:schein|liste)|lade(?:schein|liste)/i.test(normalized)) return null;
+
+  const rowMatch = normalized.match(/\b(\d{7})\b\s+(.+?)\s+(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:[,.]\d+)?)\s*(St(?:ü|ue|u|ii|i)ck|STK?|PC|PCS|KG|G|KAR|PCK|PAK|VE|PAL)\b/i);
+  if (!rowMatch) return null;
+
+  const description = cleanLoadingSlipDescription(rowMatch[2]);
+  const targetQty = normalizeLoadingSlipQuantity(rowMatch[3]);
+  if (!description || !targetQty) return null;
+
+  return {
+    fromHandlingUnit: extractLoadingSlipHeaderBarcode(lines),
+    fromBin: "",
+    product: rowMatch[1],
+    description,
+    targetQty,
+    unit: normalizeUnit(rowMatch[4]),
+    toBin: ""
+  };
+}
+
+function normalizeLoadingSlipText(value) {
+  return String(value || "")
+    .replace(/[|[\]{}]/g, " ")
+    .replace(/\bArtikeI\b/g, "Artikel")
+    .replace(/\bBezeichnunq\b/g, "Bezeichnung")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanLoadingSlipDescription(value) {
+  return String(value || "")
+    .replace(/\b(?:Menge|Verpackung|Artikel|Bezeichnung)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeLoadingSlipQuantity(value) {
+  const raw = String(value || "").trim();
+  const withoutDecimalZeros = raw.replace(/,\s*0+$/, "");
+  if (/^\d{1,3}(?:[.\s]\d{3})+$/.test(withoutDecimalZeros)) {
+    return withoutDecimalZeros.replace(/\s+/g, ".");
+  }
+  return normalizeQuantity(raw);
+}
+
+function extractLoadingSlipHeaderBarcode(lines) {
+  const sourceLines = Array.isArray(lines) ? lines : [];
+  const firstRowIndex = sourceLines.findIndex((line) => /^\d{7}\b/.test(String(line || "").trim()));
+  const headerText = (firstRowIndex === -1 ? sourceLines.slice(0, 20) : sourceLines.slice(0, firstRowIndex)).join(" ");
+  const sourceText = headerText || sourceLines.slice(0, 20).join(" ");
+  const numberMatch = sourceText.match(/\b(?:Nummer|Numm(?:e|c)r|Nr\.?)\s*[:.-]?\s*([A-Z]\s*\d[\d\s./-]{5,}\d)\b/i);
+  if (numberMatch) return cleanLoadingSlipBarcode(numberMatch[1]);
+
+  const candidates = [...sourceText.matchAll(/\b[A-Z]\s*\d[\d\s./-]{5,}\d\b|\b[A-Z0-9]{8,24}\b/g)]
+    .map((match) => match[0])
+    .map(cleanLoadingSlipBarcode)
+    .filter((value) => /\d/.test(value))
+    .filter((value) => !/^\d{7}$/.test(value))
+    .filter((value) => !/^(?:20\d{6}|19\d{6})$/.test(value));
+  return candidates.find((value) => value.length >= 12) || candidates[0] || "";
+}
+
+function cleanLoadingSlipBarcode(value) {
+  return String(value || "")
+    .replace(/\s+/g, "")
+    .replace(/[|]/g, "/")
+    .replace(/[^A-Z0-9/.-]/gi, "")
+    .toUpperCase();
 }
 
 function isWarehouseLikeText(text) {
@@ -1064,7 +1324,9 @@ function validatePickingImport(text, parsed) {
 
     if (!String(line.product || "").trim()) issues.push(`${label}: Artikelnummer fehlt.`);
     if (!quantity || quantity <= 0) issues.push(`${label}: Menge fehlt oder ist ungueltig.`);
-    if (isWarehouseLikeText(source) && !String(line.fromBin || "").trim()) issues.push(`${label}: Von-Lagerplatz fehlt.`);
+    if (line.lineType !== "loading-slip" && isWarehouseLikeText(source) && !String(line.fromBin || "").trim()) {
+      issues.push(`${label}: Von-Lagerplatz fehlt.`);
+    }
   });
 
   return issues;
@@ -1916,6 +2178,64 @@ function createId() {
   return `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function code128Svg(value) {
+  const barcode = String(value || "").trim();
+  if (!barcode) return `<span class="loading-slip-empty">Kein Barcode</span>`;
+
+  const patterns = [
+    "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
+    "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221", "223211", "221132",
+    "221231", "213212", "223112", "312131", "311222", "321122", "321221", "312212", "322112", "322211",
+    "212123", "212321", "232121", "111323", "131123", "131321", "112313", "132113", "132311", "211313",
+    "231113", "231311", "112133", "112331", "132131", "113123", "113321", "133121", "313121", "211331",
+    "231131", "213113", "213311", "213131", "311123", "311321", "331121", "312113", "312311", "332111",
+    "314111", "221411", "431111", "111224", "111422", "121124", "121421", "141122", "141221", "112214",
+    "112412", "122114", "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111",
+    "111242", "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141",
+    "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311", "113141",
+    "114131", "311141", "411131", "211412", "211214", "211232", "2331112"
+  ];
+  const codes = [104];
+  for (const char of barcode) {
+    const code = char.charCodeAt(0);
+    if (code < 32 || code > 126) continue;
+    codes.push(code - 32);
+  }
+  if (codes.length === 1) return `<span class="loading-slip-empty">Barcode ungueltig</span>`;
+
+  const checksum = codes.reduce((sum, code, index) => sum + code * (index || 1), 0) % 103;
+  codes.push(checksum, 106);
+
+  let x = 10;
+  let bars = "";
+  codes.forEach((code) => {
+    const pattern = patterns[code];
+    if (!pattern) return;
+    [...pattern].forEach((widthText, index) => {
+      const width = Number(widthText);
+      if (index % 2 === 0) bars += `<rect x="${x}" y="0" width="${width}" height="44"></rect>`;
+      x += width;
+    });
+  });
+
+  const width = x + 10;
+  return `<svg class="code128" viewBox="0 0 ${width} 58" role="img" aria-label="Barcode ${escapeHtmlAttribute(barcode)}">
+    <g fill="#111">${bars}</g>
+    <text x="${width / 2}" y="56" text-anchor="middle">${escapeSvgText(barcode)}</text>
+  </svg>`;
+}
+
+function escapeSvgText(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttribute(value) {
+  return escapeSvgText(value).replace(/"/g, "&quot;");
+}
+
 function setHandlingUnitEditMode(input, canEdit) {
   input.readOnly = !canEdit;
   input.classList.toggle("is-editable-hu", canEdit);
@@ -1932,6 +2252,7 @@ function setHandlingUnitEditMode(input, canEdit) {
 
 function render() {
   renderModeControls();
+  renderWarehouseHint();
   renderReleaseButton();
   renderTakeOverButton();
   renderDeleteOrderButton();
@@ -1950,6 +2271,7 @@ function render() {
     item.dataset.id = line.id;
     item.classList.toggle("is-done", line.picked);
     item.classList.toggle("is-collapsed", state.collapseDone && line.picked);
+    item.classList.toggle("is-loading-slip", line.lineType === "loading-slip");
 
     const map = {
       picked: item.querySelector(".picked-button"),
@@ -1964,6 +2286,12 @@ function render() {
     };
     const huLabel = item.querySelector(".hu-label");
     if (huLabel) huLabel.textContent = isStorageLine ? "HU" : "Von HU";
+
+    if (line.lineType === "loading-slip") {
+      renderLoadingSlipLine(item, map, line);
+      elements.pickList.appendChild(item);
+      return;
+    }
 
     map.picked.setAttribute("aria-pressed", line.picked ? "true" : "false");
     const isMissingHandlingUnit = !String(line.fromHandlingUnit || "").trim();
@@ -2157,13 +2485,6 @@ function formatStorageQuantity(value) {
   return String(Math.round(value * 1000) / 1000).replace(".", ",");
 }
 
-function cleanStorageDescription(value) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .replace(/\bWare erhalten\b.*$/i, "")
-    .trim();
-}
-
 function findStorageCustomer(lines) {
   const selection = lines.find((line) => /-\s*\d{4,}\b/.test(line) && !/material|artikel/i.test(line));
   if (selection) return selection.replace(/^.*?\b([A-ZÄÖÜ][A-Za-zÄÖÜäöüß -]+-\s*\d{4,})\b.*$/, "$1").trim();
@@ -2253,6 +2574,11 @@ function getPickingLines(importOrder) {
 }
 
 function compareStorageBins(left, right, importOrder) {
+  const leftLoadingSlip = left.lineType === "loading-slip";
+  const rightLoadingSlip = right.lineType === "loading-slip";
+  if (leftLoadingSlip && !rightLoadingSlip) return 1;
+  if (!leftLoadingSlip && rightLoadingSlip) return -1;
+
   const leftBin = String(left.fromBin || "").trim();
   const rightBin = String(right.fromBin || "").trim();
 
@@ -2271,6 +2597,38 @@ function compareStorageBins(left, right, importOrder) {
 function syncFields() {
   ["orderNumber", "customerName", "orderDate", "orderTime", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
     if (elements[id].value !== state[id]) elements[id].value = state[id] || "";
+  });
+}
+
+function renderLoadingSlipLine(item, map, line) {
+  const barcodeWrap = document.createElement("div");
+  barcodeWrap.className = "loading-slip-barcode";
+  barcodeWrap.innerHTML = code128Svg(line.barcode || line.fromHandlingUnit || "");
+  map.product.replaceWith(barcodeWrap);
+
+  map.fromBin.value = line.product || "";
+  map.fromBin.readOnly = true;
+  map.fromBin.classList.add("short-input");
+  map.description.value = line.description || "";
+  map.description.readOnly = true;
+  map.targetQty.value = line.targetQty || "";
+  map.targetQty.readOnly = true;
+  map.actualQty.closest("label").remove();
+  map.unit.closest("label").remove();
+  map.fromHandlingUnit.closest("label").remove();
+  map.positionNote.value = line.positionNote || "";
+  map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
+
+  map.picked.setAttribute("aria-pressed", line.picked ? "true" : "false");
+  map.picked.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const picked = map.picked.getAttribute("aria-pressed") !== "true";
+    map.picked.setAttribute("aria-pressed", picked ? "true" : "false");
+    updateLine(line.id, { picked }, false);
+    item.classList.toggle("is-done", picked);
+    item.classList.remove("is-collapsed");
+    updateCollapseButtonText();
   });
 }
 
@@ -2989,11 +3347,24 @@ function loadState() {
       cachedOrderTime(recovery) > cachedOrderTime(state) &&
       JSON.stringify(recovery.lines || []) !== JSON.stringify(state.lines || [])
     ) {
-      Object.assign(state, recovery);
+        Object.assign(state, recovery);
     }
+    if (appendMissingLoadingSlipFromRawText()) writeLocalState(STORAGE_KEY, state);
   } catch (error) {
     console.warn("Gespeicherte Daten konnten nicht geladen werden.", error);
   }
+}
+
+function appendMissingLoadingSlipFromRawText() {
+  if ((state.orderType || currentMode) !== "picking" || !Array.isArray(state.lines) || !state.lines.length) return false;
+  if (state.lines.some((line) => line.lineType === "loading-slip")) return false;
+  if (!String(state.rawText || "").trim()) return false;
+
+  const loadingSlipLine = parseOrderText(state.rawText).lines.find((line) => line.lineType === "loading-slip");
+  if (!loadingSlipLine?.barcode) return false;
+
+  state.lines.push(loadingSlipLine);
+  return true;
 }
 
 function clearCurrentOrder() {
@@ -3019,6 +3390,9 @@ function clearCurrentOrder() {
     exportedPdfPath: "",
     orderType: currentMode,
     awaitingRelease: false,
+    detectedWarehouse: "",
+    warehouseHint: "",
+    warehouseHintType: "",
     lines: []
   });
 }
@@ -3036,6 +3410,7 @@ function resetCurrentOrderView() {
     elements.importStatus.textContent = "";
     elements.importStatus.className = "status-line";
   }
+  applyWarehouseHint(null);
   saveStateWithoutServer();
   render();
 }
@@ -3065,13 +3440,14 @@ function exportCsv() {
     ["Stellplätze", state.storageSpaces],
     ["Notiz", state.orderNote],
     [],
-    ["Erledigt", "Lagerauftrag", "Von-Handling-Unit", "Zusatzbemerkung", "Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit", "Nach-Lagerplatz"]
+    ["Erledigt", "Lagerauftrag", "Barcode", "Von-Handling-Unit", "Zusatzbemerkung", "Lagerplatz", "Produkt", "Produktbeschreibung", "Soll", "Ist", "Einheit", "Nach-Lagerplatz"]
   ];
 
   state.lines.forEach((line) => {
     rows.push([
       line.picked ? "ja" : "nein",
       line.warehouseOrder,
+      line.barcode || "",
       line.fromHandlingUnit,
       line.positionNote,
       line.fromBin,
@@ -3153,265 +3529,6 @@ function showStockIssueErrors(stockIssue) {
   alert(`PDF wurde erstellt, aber nicht alle Bestände konnten abgebucht werden:\n\n${preview}${suffix}`);
 }
 
-function showServerPdfLink(url, fileName, fullPath) {
-  if (!elements.exportStatus) return;
-  elements.exportStatus.hidden = false;
-  elements.exportStatus.innerHTML = "";
-  const text = document.createTextNode(`PDF gespeichert: ${fullPath} `);
-  const link = document.createElement("a");
-  link.href = new URL(url, window.location.origin).href;
-  link.target = "_blank";
-  link.rel = "noopener";
-  link.textContent = fileName;
-  elements.exportStatus.append(text, link);
-}
-
-function renderPrintReport(fileName) {
-  if (!elements.printReport) return;
-
-  const picked = state.lines.filter((line) => line.picked).length;
-  const rows = state.lines.map((line) => `
-    <tr>
-      <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
-      <td>${escapeHtml(line.warehouseOrder)}</td>
-      <td>${escapeHtml(line.fromHandlingUnit)}</td>
-      <td>${escapeHtml(line.positionNote)}</td>
-      <td>${escapeHtml(line.fromBin)}</td>
-      <td>${escapeHtml(line.product)}</td>
-      <td class="num">${escapeHtml(line.targetQty)}</td>
-      <td class="num">${escapeHtml(line.actualQty)}</td>
-      <td>${escapeHtml(line.unit)}</td>
-      <td>${escapeHtml(line.description)}</td>
-      <td>${escapeHtml(line.toBin)}</td>
-    </tr>
-  `).join("");
-
-  elements.printReport.innerHTML = `
-    <header>
-      <div>
-        <h1>Kommissionierabschluss</h1>
-        <p><strong>Auftrag:</strong> ${escapeHtml(state.orderNumber || "-")}</p>
-        <p><strong>Kunde:</strong> ${escapeHtml(state.customerName || "-")}</p>
-        <p><strong>Bearbeiter:</strong> ${escapeHtml(state.lastEditedBy || "-")}</p>
-      </div>
-      <div>
-        <p><strong>Datum:</strong> ${escapeHtml(formatDateForDisplay(state.orderDate))}</p>
-        <p><strong>Uhrzeit:</strong> ${escapeHtml(state.orderTime || "-")}</p>
-        <p><strong>Erledigt:</strong> ${picked}/${state.lines.length}</p>
-        <p><strong>Abgeschlossen:</strong> ${escapeHtml(state.completedBy || "-")}</p>
-        <p><strong>Dateiname:</strong> ${escapeHtml(fileName)}</p>
-      </div>
-    </header>
-    <section class="report-meta">
-      <p><strong>Europaletten:</strong> ${escapeHtml(state.euroPallets || "0")}</p>
-      <p><strong>Stellplätze:</strong> ${escapeHtml(state.storageSpaces || "0")}</p>
-      <p><strong>Korrigiert:</strong> ${escapeHtml(String(state.lines.filter((line) => String(line.actualQty).trim() !== String(line.targetQty).trim()).length))}</p>
-    </section>
-    <section class="report-note"><strong>Notiz:</strong> ${escapeHtml(state.orderNote || "-")}</section>
-    <table>
-      <thead>
-        <tr>
-          <th style="width: 4%;">OK</th>
-          <th style="width: 8%;">Lagerauftrag</th>
-          <th style="width: 11%;">Von-HU</th>
-          <th style="width: 13%;">Bemerkung</th>
-          <th style="width: 9%;">Lagerplatz</th>
-          <th style="width: 7%;">Produkt</th>
-          <th style="width: 5%;">Soll</th>
-          <th style="width: 5%;">Ist</th>
-          <th style="width: 4%;">Einh.</th>
-          <th style="width: 23%;">Beschreibung</th>
-          <th style="width: 11%;">Nach-Lagerplatz</th>
-        </tr>
-      </thead>
-      <tbody>${rows || `<tr><td colspan="11">Keine Positionen vorhanden.</td></tr>`}</tbody>
-    </table>`;
-  elements.printReport.hidden = false;
-  elements.printReport.setAttribute("aria-hidden", "false");
-  document.body.classList.add("is-report-printing");
-}
-
-function cleanupPrintReport() {
-  document.body.classList.remove("is-report-printing");
-  if (!elements.printReport) return;
-  elements.printReport.hidden = true;
-  elements.printReport.setAttribute("aria-hidden", "true");
-}
-
-function createPdfDocument() {
-  const pageWidth = 842;
-  const pageHeight = 595;
-  const margin = 26;
-  const lineHeight = 14;
-  const columns = [
-    { title: "OK", x: 26, width: 28 },
-    { title: "Lagerauftrag", x: 58, width: 62 },
-    { title: "Von-HU", x: 124, width: 86 },
-    { title: "Bemerkung", x: 214, width: 92 },
-    { title: "Lagerplatz", x: 310, width: 74 },
-    { title: "Produkt", x: 388, width: 52 },
-    { title: "Soll", x: 444, width: 38 },
-    { title: "Ist", x: 486, width: 38 },
-    { title: "Einh.", x: 528, width: 32 },
-    { title: "Beschreibung", x: 564, width: 142 },
-    { title: "Nach-Platz", x: 710, width: 106 }
-  ];
-  const pages = [];
-  let ops = [];
-  let y = 552;
-
-  const addPage = () => {
-    if (ops.length) pages.push(ops);
-    ops = [];
-    y = 552;
-    text(ops, margin, y, "Kommissionierabschluss", 18);
-    y -= 22;
-    text(ops, margin, y, `Auftrag: ${state.orderNumber || "-"}`, 10);
-    text(ops, 220, y, `Kunde: ${state.customerName || "-"}`, 10);
-    text(ops, 430, y, `Datum: ${formatDateForDisplay(state.orderDate)} ${state.orderTime || ""}`.trim(), 10);
-    y -= 18;
-    text(ops, margin, y, `Europaletten: ${state.euroPallets || "0"}`, 10);
-    text(ops, 220, y, `Stellplätze: ${state.storageSpaces || "0"}`, 10);
-    text(ops, 430, y, `Erledigt: ${state.lines.filter((line) => line.picked).length}/${state.lines.length}`, 10);
-    y -= 18;
-    text(ops, margin, y, `Notiz: ${state.orderNote || "-"}`, 9);
-    y -= 22;
-    drawTableHeader();
-  };
-
-  const drawTableHeader = () => {
-    rect(ops, margin, y - 5, pageWidth - margin * 2, 20, "0.92 0.95 0.93");
-    columns.forEach((column) => text(ops, column.x, y, column.title, 7));
-    y -= 20;
-  };
-
-  addPage();
-
-  state.lines.forEach((line) => {
-    if (y < 52) addPage();
-
-    const description = fitText(line.description, 40);
-    const row = [
-      line.picked ? "ja" : "nein",
-      line.warehouseOrder,
-      line.fromHandlingUnit,
-      line.positionNote,
-      line.fromBin,
-      line.product,
-      line.targetQty,
-      line.actualQty,
-      line.unit,
-      description,
-      line.toBin
-    ];
-
-    linePath(ops, margin, y + 6, pageWidth - margin, y + 6);
-    row.forEach((cell, index) => {
-      text(ops, columns[index].x, y - 7, fitText(cell, Math.floor(columns[index].width / 4.4)), 7);
-    });
-    y -= lineHeight;
-  });
-
-  pages.push(ops);
-  return buildPdf(pages, pageWidth, pageHeight);
-}
-
-function buildPdf(pages, pageWidth, pageHeight) {
-  const objects = [];
-  const pageRefs = [];
-  objects.push("<< /Type /Catalog /Pages 2 0 R >>");
-  objects.push(null);
-  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
-
-  pages.forEach((pageOps) => {
-    const content = ["q", "1 1 1 rg 0 0 842 595 re f", "0 0 0 rg", "0 0 0 RG", "0.6 w", ...pageOps, "Q"].join("\n");
-    const pageObjectNumber = objects.length + 1;
-    const contentObjectNumber = pageObjectNumber + 1;
-    pageRefs.push(`${pageObjectNumber} 0 R`);
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentObjectNumber} 0 R >>`);
-    objects.push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
-  });
-
-  objects[1] = `<< /Type /Pages /Kids [${pageRefs.join(" ")}] /Count ${pageRefs.length} >>`;
-
-  let pdf = "%PDF-1.4\n";
-  const offsets = [0];
-  objects.forEach((object, index) => {
-    offsets.push(pdf.length);
-    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
-  });
-
-  const xref = pdf.length;
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  offsets.slice(1).forEach((offset) => {
-    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  });
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
-
-  return {
-    blob: new Blob([pdf], { type: "application/pdf" }),
-    dataUrl: `data:application/pdf;base64,${btoa(pdf)}`
-  };
-}
-
-function text(ops, x, y, value, size = 9) {
-  ops.push(`BT /F1 ${size} Tf ${x} ${y} Td (${escapePdfText(value)}) Tj ET`);
-}
-
-function rect(ops, x, y, width, height, fillColor) {
-  ops.push(`${fillColor} rg ${x} ${y} ${width} ${height} re f 0 0 0 rg`);
-}
-
-function linePath(ops, x1, y1, x2, y2) {
-  ops.push(`${x1} ${y1} m ${x2} ${y2} l S`);
-}
-
-function escapePdfText(value) {
-  return normalizePdfText(value)
-    .replace(/\\/g, "\\\\")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)");
-}
-
-function normalizePdfText(value) {
-  return String(value ?? "")
-    .replace(/ä/g, "ae")
-    .replace(/ö/g, "oe")
-    .replace(/ü/g, "ue")
-    .replace(/Ä/g, "Ae")
-    .replace(/Ö/g, "Oe")
-    .replace(/Ü/g, "Ue")
-    .replace(/ß/g, "ss")
-    .replace(/[^\x20-\x7E]/g, "")
-    .trim();
-}
-
-function fitText(value, maxLength) {
-  const textValue = normalizePdfText(value);
-  if (textValue.length <= maxLength) return textValue;
-  return `${textValue.slice(0, Math.max(0, maxLength - 3))}...`;
-}
-
-function formatDateForDisplay(value) {
-  if (!value) return "-";
-  const [year, month, day] = value.split("-");
-  return year && month && day ? `${day}.${month}.${year}` : value;
-}
-
-function buildPdfFileName(order) {
-  const orderNumber = sanitizeFileNamePart(order.orderNumber || order.id || "auftrag");
-  const orderDate = sanitizeFileNamePart(order.orderDate || new Date().toISOString().slice(0, 10));
-  return `kommissionierung-${orderNumber}-${orderDate}.pdf`;
-}
-
-function sanitizeFileNamePart(value) {
-  return String(value || "")
-    .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
-    .replace(/\s+/g, "_")
-    .slice(0, 80) || "auftrag";
-}
-
 function downloadBlob(blob, fileName, label = "Datei") {
   if (activeDownloadUrl) URL.revokeObjectURL(activeDownloadUrl);
   const url = URL.createObjectURL(blob);
@@ -3428,7 +3545,6 @@ function downloadBlob(blob, fileName, label = "Datei") {
   }
 
   showExportLink(url, fileName, label);
-  if (label === "PDF") showPdfPreview(url);
 }
 
 function showExportLink(url, fileName, label) {
@@ -3440,7 +3556,7 @@ function showExportLink(url, fileName, label) {
   openLink.href = url;
   openLink.target = "_blank";
   openLink.rel = "noopener";
-  openLink.textContent = "PDF öffnen";
+  openLink.textContent = label ? `${label} \u00f6ffnen` : "\u00d6ffnen";
   const spacer = document.createTextNode(" | ");
   const downloadLink = document.createElement("a");
   downloadLink.href = url;
@@ -3451,77 +3567,13 @@ function showExportLink(url, fileName, label) {
   elements.exportStatus.append(text, openLink, spacer, downloadLink);
 }
 
-function showPdfExport(url, fileName) {
-  if (!elements.exportStatus) return;
-  elements.exportStatus.hidden = false;
-  elements.exportStatus.innerHTML = "";
-
-  const text = document.createTextNode("PDF erstellt. ");
-  const openLink = document.createElement("a");
-  openLink.href = url;
-  openLink.target = "_blank";
-  openLink.rel = "noopener";
-  openLink.textContent = "PDF öffnen";
-
-  const spacer = document.createTextNode(" | ");
-  const downloadLink = document.createElement("a");
-  downloadLink.href = url;
-  downloadLink.download = fileName;
-  downloadLink.textContent = fileName;
-
-  elements.exportStatus.append(text, openLink, spacer, downloadLink);
-  showPdfPreview(url);
-}
-
 function showExportMessage(message) {
   if (!elements.exportStatus) return;
   elements.exportStatus.hidden = false;
   elements.exportStatus.textContent = message;
 }
 
-async function saveBlobWithPicker(blob, fileName) {
-  if (!window.showSaveFilePicker) return false;
-
-  try {
-    const handle = await window.showSaveFilePicker({
-      suggestedName: fileName,
-      types: [
-        {
-          description: "PDF-Datei",
-          accept: { "application/pdf": [".pdf"] }
-        }
-      ]
-    });
-    const writable = await handle.createWritable();
-    await writable.write(blob);
-    await writable.close();
-    return true;
-  } catch (error) {
-    if (!["AbortError", "SecurityError"].includes(error?.name)) console.error(error);
-    return false;
-  }
-}
-
-function showPdfPreview(url) {
-  if (!elements.pdfPreview) return;
-  elements.pdfPreview.hidden = false;
-  elements.pdfPreview.innerHTML = "";
-  const iframe = document.createElement("iframe");
-  iframe.title = "PDF-Vorschau";
-  iframe.src = url;
-  elements.pdfPreview.appendChild(iframe);
-}
-
 function escapeCsv(value) {
   const stringValue = String(value ?? "");
   return `"${stringValue.replace(/"/g, '""')}"`;
-}
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }
