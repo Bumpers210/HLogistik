@@ -4,22 +4,26 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#167a58">
-    <title>Tablet Pickliste</title>
+    <title>Tablet Logistik</title>
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="tablet.css?v=20260610-1">
-    <script src="tablet-legacy.js?v=20260610-1"></script>
+    <link rel="stylesheet" href="tablet.css?v=20260612-1">
+    <script src="tablet-legacy.js?v=20260612-5"></script>
   </head>
   <body>
     <header class="tablet-header">
       <div>
         <p>Lager</p>
-        <h1>Tablet Pickliste</h1>
+        <h1 id="tabletTitle">Tablet Pickliste</h1>
       </div>
       <div id="connectionStatus" class="connection-status">Prüfe Verbindung</div>
     </header>
 
     <main class="tablet-shell">
       <section class="tablet-controls">
+        <div class="tablet-mode-switch" role="group" aria-label="Arbeitsbereich">
+          <button id="pickingModeButton" type="button" class="is-active">Kommissionierung</button>
+          <button id="storageModeButton" type="button">Einlagerung</button>
+        </div>
         <label>
           Mitarbeiter
           <input id="userNameInput" type="text" autocomplete="name" placeholder="Name">
@@ -67,6 +71,9 @@
           </div>
         </div>
         <section id="lineList" class="line-list"></section>
+        <div id="storageLineActions" class="tablet-line-actions" hidden>
+          <button id="addStorageLineButton" type="button">Position hinzufügen</button>
+        </div>
       </section>
       <section class="tablet-completion" aria-label="Abschluss">
         <label>

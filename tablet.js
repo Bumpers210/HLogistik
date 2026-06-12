@@ -1,15 +1,17 @@
 const API_BASE = "";
 const USER_KEY = "tablet-pick-user-v1";
+const MODE_KEY = "tablet-pick-mode-v1";
 const SORT_MODE_KEY = "tablet-pick-sort-mode-v1";
 const MAIN_USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const CURRENT_ORDER_CACHE_KEY = "tablet-pick-current-order-v1";
-const ORDER_LIST_REFRESH_MS = 120000;
+const ORDER_LIST_REFRESH_MS = 30000;
 const AUTO_SAVE_MS = 10000;
 
 const elements = {};
 let currentOrder = null;
 let serverOnline = false;
+let currentMode = "picking";
 let dirty = false;
 let orderListTimer = null;
 let saveTimer = null;
@@ -29,12 +31,19 @@ window.addEventListener("online", () => {
 window.addEventListener("pagehide", persistCurrentOrderCache);
 window.addEventListener("beforeunload", persistCurrentOrderCache);
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) persistCurrentOrderCache();
+  if (document.hidden) {
+    persistCurrentOrderCache();
+  } else if (serverOnline) {
+    loadOrderList({ silent: true });
+  }
 });
 
 function bindElements() {
   [
     "connectionStatus",
+    "tabletTitle",
+    "pickingModeButton",
+    "storageModeButton",
     "userNameInput",
     "orderSelect",
     "sortModeSelect",
@@ -49,20 +58,29 @@ function bindElements() {
     "message",
     "pickHeader",
     "lineList",
+    "storageLineActions",
+    "addStorageLineButton",
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
   });
 }
 
 function bindEvents() {
+  elements.pickingModeButton.addEventListener("click", () => setMode("picking"));
+  elements.storageModeButton.addEventListener("click", () => setMode("storage"));
   elements.userNameInput.addEventListener("change", () => {
     saveUser();
     renderTakeOverButton();
   });
   elements.userNameInput.addEventListener("keyup", renderTakeOverButton);
   elements.orderSelect.addEventListener("change", () => {
-    if (elements.orderSelect.value) {
-      loadOrder(elements.orderSelect.value);
+    const nextOrderId = elements.orderSelect.value;
+    if (currentOrderLocksSwitch(nextOrderId)) {
+      keepCurrentOrderSelected();
+      return;
+    }
+    if (nextOrderId) {
+      loadOrder(nextOrderId);
       return;
     }
     resetToStart("Bitte Auftrag wählen.");
@@ -75,6 +93,7 @@ function bindEvents() {
   elements.takeOverButton.addEventListener("click", takeOverCurrentOrder);
   elements.saveButton.addEventListener("click", () => saveOrder(false));
   elements.exportPdfButton.addEventListener("click", exportPdf);
+  elements.addStorageLineButton.addEventListener("click", addManualStorageLine);
   elements.collapseDoneInput.addEventListener("change", () => {
     if (!currentOrder) return;
     currentOrder.collapseDone = elements.collapseDoneInput.checked;
@@ -91,7 +110,7 @@ async function initialize() {
     setConnectionStatus(true);
     await flushSyncQueue();
     loadOrderList();
-    if (!orderListTimer) orderListTimer = window.setInterval(loadOrderList, ORDER_LIST_REFRESH_MS);
+    if (!orderListTimer) orderListTimer = window.setInterval(() => loadOrderList({ silent: true }), ORDER_LIST_REFRESH_MS);
     if (!saveTimer) {
       saveTimer = window.setInterval(async () => {
         if (dirty) await saveOrder(true);
@@ -137,7 +156,7 @@ async function loadOrderListFromCache() {
   if (!window.OfflineStore) return false;
   try {
     const cached = (await OfflineStore.loadOrderSummaries())
-      .filter((o) => (o.orderType || "picking") === "picking");
+      .filter((o) => (o.orderType || "picking") === currentMode);
     if (!cached.length) return false;
     renderCachedOrderList(cached);
     return true;
@@ -148,12 +167,12 @@ async function loadOrderListFromCache() {
 
 function renderCachedOrderList(orders) {
   clearSelect(elements.orderSelect);
-  addOption(elements.orderSelect, "", "Auftrag wählen (Offline-Cache)");
+  addOption(elements.orderSelect, "", `${modeLabel()} waehlen (Offline-Cache)`);
   orders.forEach((order) => {
     addOption(
       elements.orderSelect,
       order.id,
-      `${order.orderNumber || order.id} - ${order.customerName || ""} (${order.picked}/${order.total}) [Cache]`
+      `${order.orderNumber || order.id} - ${order.customerName || ""}${order.orderWarehouse ? ` - ${order.orderWarehouse}` : ""} (${order.picked}/${order.total}) [Cache]`
     );
   });
 }
@@ -161,11 +180,15 @@ function renderCachedOrderList(orders) {
 function loadUser() {
   try {
     elements.userNameInput.value = localStorage.getItem(USER_KEY) || localStorage.getItem(MAIN_USER_KEY) || "";
+    currentMode = localStorage.getItem(MODE_KEY) === "storage" ? "storage" : "picking";
     elements.sortModeSelect.value = localStorage.getItem(SORT_MODE_KEY) || "fromBin";
+    localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch {
     elements.userNameInput.value = "";
+    currentMode = "picking";
     elements.sortModeSelect.value = "fromBin";
   }
+  updateModeUi();
 }
 
 function saveUser() {
@@ -173,6 +196,7 @@ function saveUser() {
     const name = elements.userNameInput.value || "";
     localStorage.setItem(USER_KEY, name);
     localStorage.setItem(MAIN_USER_KEY, name);
+    localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch {
     // Alte Browser können lokalen Speicher blockieren; die Pickliste bleibt trotzdem nutzbar.
   }
@@ -186,7 +210,55 @@ function saveSortMode() {
   }
 }
 
-async function loadOrderList() {
+function setMode(mode) {
+  const nextMode = mode === "storage" ? "storage" : "picking";
+  if (nextMode === currentMode) return;
+  if (currentOrderLocksModeSwitch(nextMode)) {
+    keepCurrentOrderSelected();
+    return;
+  }
+  if (dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
+  currentMode = nextMode;
+  try {
+    localStorage.setItem(MODE_KEY, currentMode);
+  } catch {
+    // Modus bleibt fuer diese Sitzung aktiv.
+  }
+  resetToStart(`Bitte ${modeLabel()} waehlen.`);
+  updateModeUi();
+  loadOrderList();
+}
+
+function modeLabel() {
+  return currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
+}
+
+function isStorageOrder() {
+  return (currentOrder && (currentOrder.orderType || "picking") === "storage") || (!currentOrder && currentMode === "storage");
+}
+
+function updateModeUi() {
+  const isStorage = isStorageOrder();
+  if (elements.tabletTitle) elements.tabletTitle.textContent = isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
+  if (elements.pickingModeButton) elements.pickingModeButton.classList.toggle("is-active", currentMode === "picking");
+  if (elements.storageModeButton) elements.storageModeButton.classList.toggle("is-active", currentMode === "storage");
+  if (elements.orderSelect && !elements.orderSelect.value && elements.orderSelect.options[0]) {
+    elements.orderSelect.options[0].text = isStorage ? "Einlagerung waehlen" : "Auftrag waehlen";
+  }
+  if (elements.sortModeSelect && elements.sortModeSelect.options.length) {
+    elements.sortModeSelect.options[0].text = isStorage ? "Stellplatz" : "Lagerplatz";
+  }
+  const grid = elements.pickHeader?.querySelector(".pick-column-grid");
+  if (grid) {
+    grid.innerHTML = isStorage
+      ? "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Soll</span><span>Ist</span><span>Einheit</span>"
+      : "<span>Artikelnummer</span><span>Lagerplatz</span><span>Produktbeschreibung</span><span>Soll</span><span>Ist</span><span>Einheit</span>";
+  }
+  if (elements.exportPdfButton) elements.exportPdfButton.textContent = isStorage ? "Einlagerung abschliessen" : "PDF exportieren";
+}
+
+async function loadOrderList(options = {}) {
+  const silent = options?.silent === true;
   if (!serverOnline) {
     await loadOrderListFromCache();
     return;
@@ -195,9 +267,10 @@ async function loadOrderList() {
     const orders = await apiJson("/api/orders");
     const selected = elements.orderSelect.value;
     clearSelect(elements.orderSelect);
-    addOption(elements.orderSelect, "", "Auftrag wählen");
+    addOption(elements.orderSelect, "", currentMode === "storage" ? "Einlagerung waehlen" : "Auftrag waehlen");
     orders.forEach((order) => {
-      if ((order.orderType || "picking") !== "picking") return;
+      if ((order.orderType || "picking") !== currentMode) return;
+      if (!isOpenOrder(order)) return;
       addOption(
         elements.orderSelect,
         order.id,
@@ -205,15 +278,23 @@ async function loadOrderList() {
       );
     });
     elements.orderSelect.value = selected;
-    setMessage(currentOrder ? "Auftragsliste aktualisiert." : "Bitte Auftrag wählen.", false);
-    try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders.filter((o) => (o.orderType || "picking") === "picking")); } catch { /* non-critical */ }
+    if (!silent) setMessage(currentOrder ? "Auftragsliste aktualisiert." : `Bitte ${modeLabel()} waehlen.`, false);
+    try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders.filter((o) => (o.orderType || "picking") === currentMode)); } catch { /* non-critical */ }
   } catch (error) {
-    setMessage(`Auftragsliste konnte nicht geladen werden: ${error.message}`, true);
+    if (!silent) setMessage(`Auftragsliste konnte nicht geladen werden: ${error.message}`, true);
   }
+}
+
+function isOpenOrder(order) {
+  return !order.exportedAt;
 }
 
 async function loadOrder(id) {
   if (!id) return;
+  if (currentOrderLocksSwitch(id)) {
+    keepCurrentOrderSelected();
+    return;
+  }
   if (dirty && !window.confirm("Es gibt ungespeicherte Änderungen. Auftrag trotzdem wechseln?")) {
     elements.orderSelect.value = currentOrder ? currentOrder.id : "";
     return;
@@ -228,6 +309,10 @@ async function loadOrder(id) {
         return;
       }
       currentOrder = cached;
+      currentMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
+      try {
+        localStorage.setItem(MODE_KEY, currentMode);
+      } catch { /* Modus bleibt fuer diese Sitzung aktiv. */ }
       currentOrder.collapseDone = currentOrder.collapseDone !== false;
       elements.collapseDoneInput.checked = currentOrder.collapseDone;
       dirty = false;
@@ -242,7 +327,11 @@ async function loadOrder(id) {
   try {
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
     const cachedOrder = restoreCachedOrderFor(order);
-    currentOrder = cachedOrder || order;
+    currentOrder = cachedOrder ? mergeServerLoadingSlipLines(cachedOrder, order) : order;
+    currentMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
+    try {
+      localStorage.setItem(MODE_KEY, currentMode);
+    } catch { /* Modus bleibt fuer diese Sitzung aktiv. */ }
     currentOrder.collapseDone = currentOrder.collapseDone !== false;
     elements.collapseDoneInput.checked = currentOrder.collapseDone;
     dirty = Boolean(cachedOrder);
@@ -252,8 +341,8 @@ async function loadOrder(id) {
       return;
     }
     setMessage(
-      currentOrder.activeUser && currentOrder.activeUser !== currentUserName()
-        ? `Auftrag geladen. Aktuell in Bearbeitung: ${currentOrder.activeUser}.`
+      currentOrder.acceptedBy && !sameUserName(currentOrder.acceptedBy, currentUserName())
+        ? `Auftrag geladen. Bereits von ${currentOrder.acceptedBy} uebernommen.`
         : "Auftrag geladen.",
       false
     );
@@ -266,9 +355,11 @@ async function loadOrder(id) {
 
 function renderOrder() {
   elements.lineList.innerHTML = "";
+  updateModeUi();
   renderTakeOverButton();
   if (!currentOrder || !currentOrder.lines || !currentOrder.lines.length) {
     elements.pickHeader.hidden = true;
+    renderStorageLineActions();
     updateCounts();
     return;
   }
@@ -276,16 +367,68 @@ function renderOrder() {
 
   const sorted = sortOrderLines(currentOrder.lines);
   sorted.forEach((line) => elements.lineList.appendChild(renderLine(line)));
+  renderStorageLineActions();
   updateCounts();
 }
 
+function renderStorageLineActions() {
+  if (!elements.storageLineActions || !elements.addStorageLineButton) return;
+  const isStorage = isStorageOrder();
+  elements.storageLineActions.hidden = !isStorage || !currentOrder;
+  elements.addStorageLineButton.disabled = !isStorage || !currentOrder;
+}
+
+function addManualStorageLine() {
+  if (!currentOrder || !isStorageOrder()) return;
+  if (!currentUserName()) {
+    setMessage("Bitte erst Mitarbeiter eintragen.", true);
+    return;
+  }
+  currentOrder.lines = Array.isArray(currentOrder.lines) ? currentOrder.lines : [];
+  currentOrder.lines.push({
+    id: createLineId(),
+    orderType: "storage",
+    manual: true,
+    warehouseOrder: nextManualStoragePosition(currentOrder.lines),
+    fromHandlingUnit: "",
+    fromHandlingUnitEditable: true,
+    positionNote: "",
+    fromBin: "",
+    product: "",
+    description: "",
+    targetQty: "",
+    actualQty: "",
+    unit: "Stk",
+    picked: false
+  });
+  markDirty();
+  renderOrder();
+  saveOrder(false);
+}
+
+function nextManualStoragePosition(lines) {
+  const numbers = (Array.isArray(lines) ? lines : [])
+    .map((line) => String(line.warehouseOrder || ""))
+    .filter((value) => /^M\d+$/i.test(value))
+    .map((value) => Number(value.replace(/\D/g, "")))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  return `M${(numbers.length ? Math.max(...numbers) : 0) + 1}`;
+}
+
+function createLineId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function sortOrderLines(lines) {
+  if (isStorageOrder()) return lines.slice();
   const sortMode = elements.sortModeSelect.value || "fromBin";
   const primary = sortMode === "product" ? "product" : "fromBin";
   const secondary = primary === "product" ? "fromBin" : "product";
   return lines.slice().sort((left, right) => {
     const leftLoadingSlip = left.lineType === "loading-slip";
     const rightLoadingSlip = right.lineType === "loading-slip";
+    if (leftLoadingSlip && rightLoadingSlip) return 0;
     if (leftLoadingSlip && !rightLoadingSlip) return 1;
     if (!leftLoadingSlip && rightLoadingSlip) return -1;
 
@@ -299,20 +442,53 @@ function compareLineValue(left, right) {
   return String(left || "").localeCompare(String(right || ""), "de", { numeric: true, sensitivity: "base" });
 }
 
+function sameUserName(left, right) {
+  return String(left || "").trim().toLowerCase() === String(right || "").trim().toLowerCase();
+}
+
+function currentOrderLocksSwitch(nextOrderId = "") {
+  if (!currentOrder?.id || currentOrder.exportedAt) return false;
+  if (String(nextOrderId || "") === String(currentOrder.id)) return false;
+  const acceptedBy = String(currentOrder.acceptedBy || "").trim();
+  return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+}
+
+function currentOrderLocksModeSwitch(nextMode) {
+  if (!currentOrder?.id || currentOrder.exportedAt) return false;
+  if ((currentOrder.orderType || "picking") === nextMode) return false;
+  const acceptedBy = String(currentOrder.acceptedBy || "").trim();
+  return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+}
+
+function keepCurrentOrderSelected() {
+  elements.orderSelect.value = currentOrder?.id || "";
+  setMessage(`Erst Auftrag ${lockedOrderLabel()} abschliessen: PDF auf dem Server erzeugen.`, true);
+}
+
+function lockedOrderLabel() {
+  if (!currentOrder) return "";
+  return [currentOrder.orderNumber, currentOrder.customerName]
+    .filter(Boolean)
+    .join(" - ") || currentOrder.id || "";
+}
+
 function formatOrderOptionLabel(order) {
   const status = orderStatusText(order);
-  return `${order.orderNumber || order.id} - ${order.customerName || ""} [${status}] (${order.picked}/${order.total})`;
+  const warehouse = order.orderWarehouse ? ` - ${order.orderWarehouse}` : "";
+  return `${order.orderNumber || order.id} - ${order.customerName || ""}${warehouse} [${status}] (${order.picked}/${order.total})`;
 }
 
 function orderStatusText(order) {
   if (order.completedAt && !order.exportedAt) return "Fertig, PDF fehlt";
-  const activeUser = String(order?.activeUser || "").trim();
-  if (!activeUser) return "Frei";
-  return activeUser === currentUserName() ? "Bearbeitet von mir" : `Bearbeitet von ${activeUser}`;
+  const acceptedBy = String(order?.acceptedBy || "").trim();
+  if (acceptedBy) return sameUserName(acceptedBy, currentUserName()) ? "Von mir uebernommen" : `Von ${acceptedBy} uebernommen`;
+  return "Frei";
 }
 
 function renderLine(line) {
   if (line.lineType === "loading-slip") return renderLoadingSlipLine(line);
+  const isStorage = isStorageOrder();
+  const isManualStorageLine = isStorage && line.manual === true;
 
   const card = document.createElement("article");
   card.className =
@@ -339,14 +515,28 @@ function renderLine(line) {
   body.className = "line-body";
 
   const isMissingHandlingUnit = !String(line.fromHandlingUnit || "").trim();
-  const canEditHandlingUnit = line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
+  const canEditHandlingUnit = isStorage || line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
 
   const top = document.createElement("div");
   top.className = "line-top";
-  top.appendChild(makeInput("Produkt", line.product, () => {}, { readOnly: true, className: "short-input" }));
-  top.appendChild(makeInput("Lagerplatz", line.fromBin, () => {}, { readOnly: true, className: "short-input" }));
-  top.appendChild(makeInput("Produktbeschreibung", line.description, () => {}, { readOnly: true }));
-  top.appendChild(makeInput("Soll", line.targetQty, () => {}, { readOnly: true, className: "short-input" }));
+  top.appendChild(makeInput(isStorage ? "Material" : "Produkt", line.product, (value) => {
+    line.product = value.trim();
+    markDirty();
+  }, { readOnly: !isManualStorageLine, className: "short-input" }));
+  top.appendChild(makeInput(isStorage ? "Stellplatz" : "Lagerplatz", line.fromBin, (value) => {
+    line.fromBin = value.toUpperCase();
+    markDirty();
+  }, { readOnly: !isStorage, className: "short-input" }));
+  top.appendChild(makeInput(isStorage ? "Artikelbezeichnung" : "Produktbeschreibung", line.description, (value) => {
+    line.description = value;
+    markDirty();
+  }, { readOnly: !isManualStorageLine }));
+  top.appendChild(makeInput("Soll", line.targetQty, (value) => {
+    line.targetQty = value;
+    if (!line.actualQty) line.actualQty = value;
+    markDirty();
+    updateCounts();
+  }, { readOnly: !isManualStorageLine, className: "short-input" }));
   top.appendChild(
     makeInput(
       "Ist",
@@ -356,32 +546,36 @@ function renderLine(line) {
         markDirty();
         updateCounts();
       },
-      { className: "short-input" }
+      { readOnly: isStorage && !isManualStorageLine, className: "short-input" }
     )
   );
-  top.appendChild(makeInput("Einheit", line.unit, () => {}, { readOnly: true, className: "short-input" }));
+  top.appendChild(makeInput("Einheit", line.unit, (value) => {
+    line.unit = value || "Stk";
+    markDirty();
+  }, { readOnly: !isManualStorageLine, className: "short-input" }));
   body.appendChild(top);
 
   const locationRow = document.createElement("div");
   locationRow.className = "location-row";
   locationRow.appendChild(
     makeInput(
-      "Von HU",
+      isStorage ? "HU" : "Von HU",
       line.fromHandlingUnit,
       (value) => {
-        line.fromHandlingUnit = value;
+        line.fromHandlingUnit = isStorage ? value.toUpperCase().replace(/[^A-Z0-9,-]/g, "") : value;
         line.fromHandlingUnitEditable = canEditHandlingUnit;
         markDirty();
       },
-      { readOnly: !canEditHandlingUnit, digitsOnly: true }
+      { readOnly: !canEditHandlingUnit, digitsOnly: !isStorage }
     )
   );
   locationRow.appendChild(
     makeInput("Zusatzbemerkung", line.positionNote, (value) => {
       line.positionNote = value;
       markDirty();
-    })
+    }, { readOnly: isStorage && !isManualStorageLine })
   );
+  if (isManualStorageLine) locationRow.appendChild(makeManualStorageDeleteButton(line));
   body.appendChild(locationRow);
 
   card.appendChild(body);
@@ -439,10 +633,48 @@ function renderLoadingSlipLine(line) {
 }
 
 function toggleLinePicked(line, card, button) {
+  if (!line.picked && storageLineCompletionErrors(line).length) {
+    setMessage(storageLineErrorMessage(line), true);
+    return;
+  }
   line.picked = !line.picked;
   updateLinePickedState(line, card, button);
   markDirty();
   updateCounts();
+}
+
+function makeManualStorageDeleteButton(line) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "danger-button manual-line-delete";
+  button.textContent = "Zeile loeschen";
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    removeManualStorageLine(line);
+  });
+  return button;
+}
+
+function removeManualStorageLine(line) {
+  if (!currentOrder || !line || line.manual !== true) return;
+  if (manualStorageLineHasContent(line) && !window.confirm("Manuell hinzugefuegte Zeile wirklich loeschen?")) return;
+  currentOrder.lines = (Array.isArray(currentOrder.lines) ? currentOrder.lines : []).filter((entry) => entry.id !== line.id);
+  markDirty();
+  renderOrder();
+  saveOrder(false);
+}
+
+function manualStorageLineHasContent(line) {
+  return [
+    line.product,
+    line.description,
+    line.targetQty,
+    line.actualQty,
+    line.fromHandlingUnit,
+    line.fromBin,
+    line.positionNote
+  ].some((value) => String(value ?? "").trim());
 }
 
 function updateLinePickedState(line, card, button) {
@@ -485,17 +717,34 @@ function makeInput(labelText, value, onChange, options = {}) {
 function renderTakeOverButton() {
   if (!elements.takeOverButton) return;
   const hasOrder = Boolean(currentOrder && currentOrder.id && currentOrder.lines && currentOrder.lines.length);
-  const activeUser = currentOrder ? String(currentOrder.activeUser || "").trim() : "";
+  const acceptedBy = currentOrder ? String(currentOrder.acceptedBy || "").trim() : "";
   const user = currentUserName();
-  const isMine = activeUser && activeUser === user;
+  const isMine = acceptedBy && sameUserName(acceptedBy, user);
   elements.takeOverButton.hidden = !hasOrder || isMine;
   elements.takeOverButton.disabled = !hasOrder || !user || !serverOnline;
   elements.takeOverButton.innerHTML = escapeHtml(
-    activeUser ? `Bearbeitung von ${activeUser} übernehmen` : "Bearbeitung übernehmen"
+    acceptedBy ? `Von ${acceptedBy} uebernommen` : "Bearbeitung uebernehmen"
   );
 }
 
-function takeOverCurrentOrder() {
+async function acceptOrderOnServer(id) {
+  if (!serverOnline) {
+    setMessage("Auftrag kann nur mit Serververbindung uebernommen werden.", true);
+    return null;
+  }
+  try {
+    return await apiJson(`/api/orders/${encodeURIComponent(id)}/accept`, {
+      method: "POST",
+      body: JSON.stringify({ userName: currentUserName() }),
+    });
+  } catch (error) {
+    setMessage(error.message || "Auftrag konnte nicht uebernommen werden.", true);
+    await loadOrderList();
+    return null;
+  }
+}
+
+async function takeOverCurrentOrder() {
   if (!currentOrder || !currentOrder.id) {
     setMessage("Kein Auftrag ausgewählt.", true);
     return;
@@ -504,10 +753,24 @@ function takeOverCurrentOrder() {
     setMessage("Bitte erst Mitarbeiter eintragen.", true);
     return;
   }
-  touchOrder();
-  dirty = true;
+  const accepted = await acceptOrderOnServer(currentOrder.id);
+  if (!accepted) return;
+  currentOrder = accepted.order || currentOrder;
+  currentOrder.collapseDone = currentOrder.collapseDone !== false;
+  dirty = false;
   renderTakeOverButton();
-  saveOrder(false);
+  renderOrder();
+  persistCurrentOrderCache();
+  await loadOrderList({ silent: true });
+  setMessage(acceptedOrderMessage(accepted), false);
+}
+
+function acceptedOrderMessage(result) {
+  const count = Number(result?.acceptedCount || 0);
+  if (count > 1) {
+    return `${count} Auftraege fuer Kunde ${result.customerName || ""} uebernommen.`;
+  }
+  return "Bearbeitung uebernommen. Bitte diesen Auftrag abschliessen.";
 }
 
 function markDirty() {
@@ -550,7 +813,7 @@ async function saveOrder(silent, onSuccess) {
     if (window.OfflineStore) {
       try {
         const url = `/api/orders/${encodeURIComponent(currentOrder.id)}`;
-        await OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder }));
+        await OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder, userName: currentUserName() }));
         await OfflineStore.saveOrder(currentOrder);
         dirty = false;
         if (!silent) setMessage("Offline gespeichert – wird synchronisiert, sobald der Server erreichbar ist.", false);
@@ -564,10 +827,12 @@ async function saveOrder(silent, onSuccess) {
   }
 
   try {
-    await apiJson(`/api/orders/${encodeURIComponent(currentOrder.id)}`, {
+    const result = await apiJson(`/api/orders/${encodeURIComponent(currentOrder.id)}`, {
       method: "PUT",
-      body: JSON.stringify({ order: currentOrder }),
+      body: JSON.stringify({ order: currentOrder, userName: currentUserName() }),
     });
+    currentOrder.acceptedBy = result.order?.acceptedBy || currentOrder.acceptedBy || "";
+    currentOrder.acceptedAt = result.order?.acceptedAt || currentOrder.acceptedAt || "";
     if (changeRevision === revision) {
       dirty = false;
       clearCurrentOrderCache();
@@ -596,22 +861,34 @@ async function exportPdf() {
     setMessage("Bitte erst Mitarbeiter eintragen.", true);
     return;
   }
+  pruneEmptyManualStorageLines();
+  const validationMessage = storageOrderExportMessage();
+  if (validationMessage) {
+    renderOrder();
+    setMessage(validationMessage, true);
+    window.alert(validationMessage);
+    return;
+  }
 
   setMessage("PDF wird auf dem Server erstellt...", false);
   await saveOrder(true, async () => {
     try {
       await apiJson(`/api/orders/${encodeURIComponent(currentOrder.id)}/export-pdf`, {
         method: "POST",
-        body: JSON.stringify({ order: currentOrder }),
+        body: JSON.stringify({ order: currentOrder, userName: currentUserName() }),
       });
       dirty = false;
       clearCurrentOrderCache();
-      resetToStart("PDF erfolgreich exportiert. Bitte Auftrag wählen.");
-      loadOrderList();
+      loadTabletStartPage();
     } catch (error) {
       setMessage(`PDF-Export fehlgeschlagen: ${error.message}`, true);
     }
   });
+}
+
+function loadTabletStartPage() {
+  resetToStart("PDF erfolgreich exportiert. Bitte Auftrag waehlen.");
+  window.location.href = `${window.location.pathname || "/tablet.html"}?start=${Date.now()}`;
 }
 
 function resetToStart(message) {
@@ -621,7 +898,7 @@ function resetToStart(message) {
   elements.orderSelect.value = "";
   elements.collapseDoneInput.checked = true;
   renderOrder();
-  setMessage(message || "Bitte Auftrag wählen.", false);
+  setMessage(message || "Bitte Auftrag waehlen.", false);
 }
 
 function persistCurrentOrderCache() {
@@ -644,6 +921,34 @@ function clearCurrentOrderCache() {
   } catch {
     // Nicht kritisch.
   }
+}
+
+function mergeServerLoadingSlipLines(order, serverOrder) {
+  if (!order || !Array.isArray(order.lines) || !Array.isArray(serverOrder?.lines)) return order;
+
+  const serverLoadingSlipLines = serverOrder.lines
+    .filter((line) => line?.lineType === "loading-slip" && String(line.barcode || "").trim());
+  if (!serverLoadingSlipLines.length) return order;
+
+  const previousByBarcode = new Map(
+    order.lines
+      .filter((line) => line?.lineType === "loading-slip" && String(line.barcode || "").trim())
+      .map((line) => [String(line.barcode || "").trim(), line])
+  );
+  const normalLines = order.lines.filter((line) => line?.lineType !== "loading-slip");
+  const mergedLoadingSlipLines = serverLoadingSlipLines.map((line) => {
+    const previous = previousByBarcode.get(String(line.barcode || "").trim());
+    return {
+      ...line,
+      picked: previous?.picked ?? line.picked,
+      positionNote: String(previous?.positionNote || "").trim() || line.positionNote || ""
+    };
+  });
+
+  return {
+    ...order,
+    lines: [...normalLines, ...mergedLoadingSlipLines]
+  };
 }
 
 function restoreCachedOrderFor(serverOrder) {
@@ -690,7 +995,54 @@ function updateCounts() {
 
 function allPicked() {
   const lines = currentOrder && currentOrder.lines ? currentOrder.lines : [];
-  return lines.length > 0 && lines.every((line) => line.picked);
+  return lines.length > 0 && lines.every((line) => isEmptyManualStorageLine(line) || line.picked);
+}
+
+function pruneEmptyManualStorageLines() {
+  if (!currentOrder || !Array.isArray(currentOrder.lines)) return;
+  const before = currentOrder.lines.length;
+  currentOrder.lines = currentOrder.lines.filter((line) => !isEmptyManualStorageLine(line));
+  if (currentOrder.lines.length !== before) markDirty();
+}
+
+function storageOrderExportMessage() {
+  if (!isStorageOrder() || !currentOrder) return "";
+  const errors = [];
+  (Array.isArray(currentOrder.lines) ? currentOrder.lines : []).forEach((line, index) => {
+    if (isEmptyManualStorageLine(line)) return;
+    storageLineCompletionErrors(line).forEach((error) => {
+      errors.push(`Pos. ${storageLinePosition(line, index)}: ${error}`);
+    });
+  });
+  if (!errors.length) return "";
+  return `Einlagerung unvollstaendig: ${errors.slice(0, 5).join("; ")}${errors.length > 5 ? "; weitere Fehler vorhanden" : ""}`;
+}
+
+function storageLineErrorMessage(line) {
+  return `Position kann noch nicht erledigt werden: ${storageLineCompletionErrors(line).join(", ")}`;
+}
+
+function storageLineCompletionErrors(line) {
+  if (!isStorageOrder() || !line || line.lineType === "loading-slip" || isEmptyManualStorageLine(line)) return [];
+  const errors = [];
+  if (!String(line.product || "").trim()) errors.push("Artikelnummer fehlt");
+  if (!String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
+  if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
+  if (!readTabletQuantity(line.actualQty || line.targetQty)) errors.push("Menge fehlt");
+  return errors;
+}
+
+function readTabletQuantity(value) {
+  const number = Number(String(value || "").replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(number) && number > 0;
+}
+
+function storageLinePosition(line, index) {
+  return line.warehouseOrder || index + 1;
+}
+
+function isEmptyManualStorageLine(line) {
+  return line?.manual === true && !manualStorageLineHasContent(line);
 }
 
 function setConnectionStatus(value) {

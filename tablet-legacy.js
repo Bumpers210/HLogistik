@@ -1,15 +1,17 @@
 var API_BASE = "";
 var USER_KEY = "tablet-pick-user-v1";
+var MODE_KEY = "tablet-pick-mode-v1";
 var SORT_MODE_KEY = "tablet-pick-sort-mode-v1";
 var MAIN_USER_KEY = "kommissionier-app-user-v1";
 var USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 var CURRENT_ORDER_CACHE_KEY = "tablet-pick-current-order-v1";
-var ORDER_LIST_REFRESH_MS = 120000;
+var ORDER_LIST_REFRESH_MS = 30000;
 var AUTO_SAVE_MS = 2500;
 
 var elements = {};
 var currentOrder = null;
 var serverOnline = false;
+var currentMode = "picking";
 var dirty = false;
 var orderListTimer = null;
 var autoSaveTimer = null;
@@ -27,12 +29,19 @@ document.addEventListener("DOMContentLoaded", function () {
 window.addEventListener("pagehide", persistCurrentOrderCache);
 window.addEventListener("beforeunload", persistCurrentOrderCache);
 document.addEventListener("visibilitychange", function () {
-  if (document.hidden) persistCurrentOrderCache();
+  if (document.hidden) {
+    persistCurrentOrderCache();
+  } else if (serverOnline) {
+    loadOrderList({ silent: true });
+  }
 });
 
 function bindElements() {
   var ids = [
     "connectionStatus",
+    "tabletTitle",
+    "pickingModeButton",
+    "storageModeButton",
     "userNameInput",
     "orderSelect",
     "sortModeSelect",
@@ -49,7 +58,9 @@ function bindElements() {
     "changedCount",
     "message",
     "pickHeader",
-    "lineList"
+    "lineList",
+    "storageLineActions",
+    "addStorageLineButton"
   ];
   for (var index = 0; index < ids.length; index += 1) {
     elements[ids[index]] = document.getElementById(ids[index]);
@@ -57,14 +68,21 @@ function bindElements() {
 }
 
 function bindEvents() {
+  elements.pickingModeButton.onclick = function () { setMode("picking"); };
+  elements.storageModeButton.onclick = function () { setMode("storage"); };
   elements.userNameInput.onchange = function () {
     saveUser();
     renderTakeOverButton();
   };
   elements.userNameInput.onkeyup = renderTakeOverButton;
   elements.orderSelect.onchange = function () {
-    if (elements.orderSelect.value) {
-      loadOrder(elements.orderSelect.value);
+    var nextOrderId = elements.orderSelect.value;
+    if (currentOrderLocksSwitch(nextOrderId)) {
+      keepCurrentOrderSelected();
+      return;
+    }
+    if (nextOrderId) {
+      loadOrder(nextOrderId);
     } else {
       resetToStart("Bitte Auftrag waehlen.");
     }
@@ -77,6 +95,7 @@ function bindEvents() {
   elements.takeOverButton.onclick = takeOverCurrentOrder;
   elements.saveButton.onclick = function () { saveOrder(false); };
   elements.exportPdfButton.onclick = exportPdf;
+  elements.addStorageLineButton.onclick = addManualStorageLine;
   elements.collapseDoneInput.onchange = function () {
     if (!currentOrder) return;
     currentOrder.collapseDone = elements.collapseDoneInput.checked;
@@ -97,7 +116,7 @@ function initialize() {
     serverOnline = true;
     setConnectionStatus(true);
     loadOrderList();
-    if (!orderListTimer) orderListTimer = window.setInterval(loadOrderList, ORDER_LIST_REFRESH_MS);
+    if (!orderListTimer) orderListTimer = window.setInterval(function () { loadOrderList({ silent: true }); }, ORDER_LIST_REFRESH_MS);
   }, function (message) {
     serverOnline = false;
     setConnectionStatus(false);
@@ -108,13 +127,16 @@ function initialize() {
 function loadUser() {
   try {
     elements.userNameInput.value = localStorage.getItem(USER_KEY) || localStorage.getItem(MAIN_USER_KEY) || "";
+    currentMode = localStorage.getItem(MODE_KEY) === "storage" ? "storage" : "picking";
     elements.sortModeSelect.value = localStorage.getItem(SORT_MODE_KEY) || "fromBin";
-    if (!localStorage.getItem(USER_GROUP_KEY)) localStorage.setItem(USER_GROUP_KEY, "tablet");
+    localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch (error) {
     void error;
     elements.userNameInput.value = "";
+    currentMode = "picking";
     elements.sortModeSelect.value = "fromBin";
   }
+  updateModeUi();
 }
 
 function saveUser() {
@@ -137,19 +159,67 @@ function saveSortMode() {
   }
 }
 
-function loadOrderList() {
+function setMode(mode) {
+  var nextMode = mode === "storage" ? "storage" : "picking";
+  if (nextMode === currentMode) return;
+  if (currentOrderLocksModeSwitch(nextMode)) {
+    keepCurrentOrderSelected();
+    return;
+  }
+  if (dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
+  currentMode = nextMode;
+  try {
+    localStorage.setItem(MODE_KEY, currentMode);
+  } catch (error) {
+    void error;
+  }
+  resetToStart("Bitte " + modeLabel() + " waehlen.");
+  updateModeUi();
+  loadOrderList();
+}
+
+function modeLabel() {
+  return currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
+}
+
+function isStorageOrder() {
+  return (currentOrder && (currentOrder.orderType || "picking") === "storage") || (!currentOrder && currentMode === "storage");
+}
+
+function updateModeUi() {
+  var isStorage = isStorageOrder();
+  if (elements.tabletTitle) elements.tabletTitle.textContent = isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
+  if (elements.pickingModeButton) elements.pickingModeButton.className = currentMode === "picking" ? "is-active" : "";
+  if (elements.storageModeButton) elements.storageModeButton.className = currentMode === "storage" ? "is-active" : "";
+  if (elements.orderSelect && !elements.orderSelect.value && elements.orderSelect.options[0]) {
+    elements.orderSelect.options[0].text = isStorage ? "Einlagerung waehlen" : "Auftrag waehlen";
+  }
+  if (elements.sortModeSelect && elements.sortModeSelect.options.length) {
+    elements.sortModeSelect.options[0].text = isStorage ? "Stellplatz" : "Lagerplatz";
+  }
+  var grid = elements.pickHeader && elements.pickHeader.querySelector(".pick-column-grid");
+  if (grid) {
+    grid.innerHTML = isStorage
+      ? "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Soll</span><span>Ist</span><span>Einheit</span>"
+      : "<span>Artikelnummer</span><span>Lagerplatz</span><span>Produktbeschreibung</span><span>Soll</span><span>Ist</span><span>Einheit</span>";
+  }
+  if (elements.exportPdfButton) elements.exportPdfButton.textContent = isStorage ? "Einlagerung abschliessen" : "PDF exportieren";
+}
+
+function loadOrderList(options) {
+  var silent = options && options.silent === true;
   if (!serverOnline) {
-    setMessage("Server nicht verbunden.", true);
+    if (!silent) setMessage("Server nicht verbunden.", true);
     return;
   }
   apiJson("/api/orders", null, function (orders) {
     var selected = elements.orderSelect.value;
     clearSelect(elements.orderSelect);
-    addOption(elements.orderSelect, "", "Auftrag waehlen");
+    addOption(elements.orderSelect, "", currentMode === "storage" ? "Einlagerung waehlen" : "Auftrag waehlen");
     var count = 0;
     for (var index = 0; index < orders.length; index += 1) {
       var order = orders[index];
-      if ((order.orderType || "picking") !== "picking") continue;
+      if ((order.orderType || "picking") !== currentMode) continue;
       if (!isOpenOrder(order)) continue;
       var createdTime = formatOrderCreatedAt(order.createdAt || order.updatedAt);
       var timeText = createdTime ? createdTime + " - " : "";
@@ -161,9 +231,9 @@ function loadOrderList() {
       count += 1;
     }
     elements.orderSelect.value = selected;
-    setMessage(count ? "Auftragsliste geladen: " + count + " Auftrag/Auftraege." : "Keine offenen Auftraege gefunden.", false);
+    if (!silent) setMessage(count ? "Auftragsliste geladen: " + count + " Auftrag/Auftraege." : "Keine offenen " + modeLabel() + "en gefunden.", false);
   }, function (message) {
-    setMessage("Auftragsliste konnte nicht geladen werden: " + message, true);
+    if (!silent) setMessage("Auftragsliste konnte nicht geladen werden: " + message, true);
   });
 }
 
@@ -184,25 +254,67 @@ function formatOrderCreatedAt(value) {
 
 function formatOrderOptionLabel(order, timeText) {
   var status = orderStatusText(order);
-  return timeText + (order.orderNumber || order.id) + " - " + (order.customerName || "") + " [" + status + "] (" + order.picked + "/" + order.total + ")";
+  var warehouse = order.orderWarehouse ? " - " + order.orderWarehouse : "";
+  return timeText + (order.orderNumber || order.id) + " - " + (order.customerName || "") + warehouse + " [" + status + "] (" + order.picked + "/" + order.total + ")";
 }
 
 function orderStatusText(order) {
   if (order.completedAt && !order.exportedAt) return "Fertig, PDF fehlt";
-  var activeUser = String(order && order.activeUser || "").trim();
-  if (!activeUser) return "Frei";
-  return activeUser === currentUserName() ? "Bearbeitet von mir" : "Bearbeitet von " + activeUser;
+  var acceptedBy = String(order && order.acceptedBy || "").trim();
+  if (acceptedBy) return sameUserName(acceptedBy, currentUserName()) ? "Von mir uebernommen" : "Von " + acceptedBy + " uebernommen";
+  return "Frei";
+}
+
+function sameUserName(left, right) {
+  return String(left || "").trim().toLowerCase() === String(right || "").trim().toLowerCase();
+}
+
+function currentOrderLocksSwitch(nextOrderId) {
+  if (!currentOrder || !currentOrder.id || currentOrder.exportedAt) return false;
+  if (String(nextOrderId || "") === String(currentOrder.id)) return false;
+  var acceptedBy = String(currentOrder.acceptedBy || "").trim();
+  return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+}
+
+function currentOrderLocksModeSwitch(nextMode) {
+  if (!currentOrder || !currentOrder.id || currentOrder.exportedAt) return false;
+  if ((currentOrder.orderType || "picking") === nextMode) return false;
+  var acceptedBy = String(currentOrder.acceptedBy || "").trim();
+  return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+}
+
+function keepCurrentOrderSelected() {
+  elements.orderSelect.value = currentOrder ? currentOrder.id : "";
+  setMessage("Erst Auftrag " + lockedOrderLabel() + " abschliessen: PDF auf dem Server erzeugen.", true);
+}
+
+function lockedOrderLabel() {
+  if (!currentOrder) return "";
+  var parts = [];
+  if (currentOrder.orderNumber) parts.push(currentOrder.orderNumber);
+  if (currentOrder.customerName) parts.push(currentOrder.customerName);
+  return parts.join(" - ") || currentOrder.id || "";
 }
 
 function loadOrder(id) {
   if (!id) return;
+  if (currentOrderLocksSwitch(id)) {
+    keepCurrentOrderSelected();
+    return;
+  }
   if (dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Auftrag trotzdem wechseln?")) {
     elements.orderSelect.value = currentOrder ? currentOrder.id : "";
     return;
   }
   apiJson("/api/orders/" + encodeURIComponent(id), null, function (order) {
     var cachedOrder = restoreCachedOrderFor(order);
-    currentOrder = cachedOrder || order;
+    currentOrder = cachedOrder ? mergeServerLoadingSlipLines(cachedOrder, order) : order;
+    currentMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
+    try {
+      localStorage.setItem(MODE_KEY, currentMode);
+    } catch (error) {
+      void error;
+    }
     currentOrder.collapseDone = currentOrder.collapseDone !== false;
     elements.collapseDoneInput.checked = currentOrder.collapseDone;
     renderCompletionFields();
@@ -213,8 +325,8 @@ function loadOrder(id) {
       return;
     }
     persistCurrentOrderCache();
-    setMessage(currentOrder.activeUser && currentOrder.activeUser !== currentUserName()
-      ? "Auftrag geladen. Aktuell in Bearbeitung: " + currentOrder.activeUser + "."
+    setMessage(currentOrder.acceptedBy && !sameUserName(currentOrder.acceptedBy, currentUserName())
+      ? "Auftrag geladen. Bereits von " + currentOrder.acceptedBy + " uebernommen."
       : "Auftrag geladen.", false);
   }, function (message) {
     setMessage("Auftrag konnte nicht geladen werden: " + message, true);
@@ -223,9 +335,11 @@ function loadOrder(id) {
 
 function renderOrder() {
   elements.lineList.innerHTML = "";
+  updateModeUi();
   renderTakeOverButton();
   if (!currentOrder || !currentOrder.lines || !currentOrder.lines.length) {
     setHidden(elements.pickHeader, true);
+    renderStorageLineActions();
     updateCounts();
     return;
   }
@@ -235,16 +349,69 @@ function renderOrder() {
   for (var index = 0; index < sorted.length; index += 1) {
     elements.lineList.appendChild(renderLine(sorted[index]));
   }
+  renderStorageLineActions();
   updateCounts();
 }
 
+function renderStorageLineActions() {
+  if (!elements.storageLineActions || !elements.addStorageLineButton) return;
+  var isStorage = isStorageOrder();
+  setHidden(elements.storageLineActions, !isStorage || !currentOrder);
+  elements.addStorageLineButton.disabled = !isStorage || !currentOrder;
+}
+
+function addManualStorageLine() {
+  if (!currentOrder || !isStorageOrder()) return;
+  if (!currentUserName()) {
+    setMessage("Bitte erst Mitarbeiter eintragen.", true);
+    return;
+  }
+  currentOrder.lines = Array.isArray(currentOrder.lines) ? currentOrder.lines : [];
+  currentOrder.lines.push({
+    id: createLineId(),
+    orderType: "storage",
+    manual: true,
+    warehouseOrder: nextManualStoragePosition(currentOrder.lines),
+    fromHandlingUnit: "",
+    fromHandlingUnitEditable: true,
+    positionNote: "",
+    fromBin: "",
+    product: "",
+    description: "",
+    targetQty: "",
+    actualQty: "",
+    unit: "Stk",
+    picked: false
+  });
+  markDirty();
+  renderOrder();
+  saveOrder(false);
+}
+
+function nextManualStoragePosition(lines) {
+  var numbers = [];
+  var source = Array.isArray(lines) ? lines : [];
+  for (var index = 0; index < source.length; index += 1) {
+    var value = String(source[index].warehouseOrder || "");
+    if (/^M\d+$/i.test(value)) numbers.push(Number(value.replace(/\D/g, "")));
+  }
+  return "M" + ((numbers.length ? Math.max.apply(null, numbers) : 0) + 1);
+}
+
+function createLineId() {
+  if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+  return "line-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+}
+
 function sortOrderLines(lines) {
+  if (isStorageOrder()) return lines.slice();
   var sortMode = elements.sortModeSelect.value || "fromBin";
   var primary = sortMode === "product" ? "product" : "fromBin";
   var secondary = primary === "product" ? "fromBin" : "product";
   return lines.slice().sort(function (left, right) {
     var leftLoadingSlip = left.lineType === "loading-slip";
     var rightLoadingSlip = right.lineType === "loading-slip";
+    if (leftLoadingSlip && rightLoadingSlip) return 0;
     if (leftLoadingSlip && !rightLoadingSlip) return 1;
     if (!leftLoadingSlip && rightLoadingSlip) return -1;
 
@@ -260,6 +427,8 @@ function compareLineValue(left, right) {
 
 function renderLine(line) {
   if (line.lineType === "loading-slip") return renderLoadingSlipLine(line);
+  var isStorage = isStorageOrder();
+  var isManualStorageLine = isStorage && line.manual === true;
 
   var card = document.createElement("article");
   card.className = "pick-item" + (line.picked ? " is-done" : "") + (line.picked && currentOrder.collapseDone ? " is-collapsed" : "");
@@ -285,30 +454,48 @@ function renderLine(line) {
   var top = document.createElement("div");
   top.className = "line-top";
 
-  top.appendChild(makeInput("Produkt", line.product, null, true, "short-input"));
-  top.appendChild(makeInput("Lagerplatz", line.fromBin, null, true, "short-input"));
-  top.appendChild(makeInput("Produktbeschreibung", line.description, null, true, ""));
-  top.appendChild(makeInput("Soll", line.targetQty, null, true, "short-input"));
+  top.appendChild(makeInput(isStorage ? "Material" : "Produkt", line.product, function (value) {
+    line.product = String(value || "").trim();
+    markDirty();
+  }, !isManualStorageLine, "short-input"));
+  top.appendChild(makeInput(isStorage ? "Stellplatz" : "Lagerplatz", line.fromBin, isStorage ? function (value) {
+    line.fromBin = value.toUpperCase();
+    markDirty();
+  } : null, !isStorage, "short-input"));
+  top.appendChild(makeInput(isStorage ? "Artikelbezeichnung" : "Produktbeschreibung", line.description, function (value) {
+    line.description = value;
+    markDirty();
+  }, !isManualStorageLine, ""));
+  top.appendChild(makeInput("Soll", line.targetQty, function (value) {
+    line.targetQty = value;
+    if (!line.actualQty) line.actualQty = value;
+    markDirty();
+    updateCounts();
+  }, !isManualStorageLine, "short-input"));
   top.appendChild(makeInput("Ist", line.actualQty, function (value) {
     line.actualQty = value;
     markDirty();
     updateCounts();
-  }, false, "short-input"));
-  top.appendChild(makeInput("Einheit", line.unit, null, true, "short-input"));
+  }, isStorage && !isManualStorageLine, "short-input"));
+  top.appendChild(makeInput("Einheit", line.unit, function (value) {
+    line.unit = value || "Stk";
+    markDirty();
+  }, !isManualStorageLine, "short-input"));
   body.appendChild(top);
 
   var locationRow = document.createElement("div");
   locationRow.className = "location-row";
-  var canEditHu = line.fromHandlingUnitEditable === true || !String(line.fromHandlingUnit || "").trim();
-  locationRow.appendChild(makeInput("Von HU", line.fromHandlingUnit, function (value) {
-    line.fromHandlingUnit = value.replace(/[^0-9,]/g, "");
+  var canEditHu = isStorage || line.fromHandlingUnitEditable === true || !String(line.fromHandlingUnit || "").trim();
+  locationRow.appendChild(makeInput(isStorage ? "HU" : "Von HU", line.fromHandlingUnit, function (value) {
+    line.fromHandlingUnit = isStorage ? value.toUpperCase().replace(/[^A-Z0-9,-]/g, "") : value.replace(/[^0-9,]/g, "");
     line.fromHandlingUnitEditable = canEditHu;
     markDirty();
   }, !canEditHu, ""));
   locationRow.appendChild(makeInput("Zusatzbemerkung", line.positionNote, function (value) {
     line.positionNote = value;
     markDirty();
-  }, false, ""));
+  }, isStorage && !isManualStorageLine, ""));
+  if (isManualStorageLine) locationRow.appendChild(makeManualStorageDeleteButton(line));
   body.appendChild(locationRow);
 
   card.appendChild(body);
@@ -362,10 +549,52 @@ function renderLoadingSlipLine(line) {
 }
 
 function toggleLinePicked(line, card, button) {
+  if (!line.picked && storageLineCompletionErrors(line).length) {
+    setMessage(storageLineErrorMessage(line), true);
+    return;
+  }
   line.picked = !line.picked;
   updateLinePickedState(line, card, button);
   markDirty();
   updateCounts();
+}
+
+function makeManualStorageDeleteButton(line) {
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "danger-button manual-line-delete";
+  button.textContent = "Zeile loeschen";
+  button.onclick = function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    removeManualStorageLine(line);
+  };
+  return button;
+}
+
+function removeManualStorageLine(line) {
+  if (!currentOrder || !line || line.manual !== true) return;
+  if (manualStorageLineHasContent(line) && !window.confirm("Manuell hinzugefuegte Zeile wirklich loeschen?")) return;
+  currentOrder.lines = (Array.isArray(currentOrder.lines) ? currentOrder.lines : []).filter(function (entry) {
+    return entry.id !== line.id;
+  });
+  markDirty();
+  renderOrder();
+  saveOrder(false);
+}
+
+function manualStorageLineHasContent(line) {
+  return [
+    line.product,
+    line.description,
+    line.targetQty,
+    line.actualQty,
+    line.fromHandlingUnit,
+    line.fromBin,
+    line.positionNote
+  ].some(function (value) {
+    return String(value == null ? "" : value).trim();
+  });
 }
 
 function updateLinePickedState(line, card, button) {
@@ -415,20 +644,47 @@ function makeInput(labelText, value, onChange, readOnly, className) {
 
 function renderTakeOverButton() {
   var hasOrder = Boolean(currentOrder && currentOrder.id && currentOrder.lines && currentOrder.lines.length);
-  var activeUser = currentOrder ? String(currentOrder.activeUser || "").trim() : "";
+  var acceptedBy = currentOrder ? String(currentOrder.acceptedBy || "").trim() : "";
   var user = currentUserName();
-  setHidden(elements.takeOverButton, !hasOrder || (activeUser && activeUser === user));
+  setHidden(elements.takeOverButton, !hasOrder || (acceptedBy && sameUserName(acceptedBy, user)));
   elements.takeOverButton.disabled = !hasOrder || !user || !serverOnline;
-  elements.takeOverButton.innerHTML = escapeHtml(activeUser ? "Bearbeitung von " + activeUser + " uebernehmen" : "Bearbeitung uebernehmen");
+  elements.takeOverButton.innerHTML = escapeHtml(acceptedBy ? "Von " + acceptedBy + " uebernommen" : "Bearbeitung uebernehmen");
+}
+
+function acceptOrderOnServer(id, success, failure) {
+  if (!serverOnline) {
+    if (failure) failure("Auftrag kann nur mit Serververbindung uebernommen werden.");
+    return;
+  }
+  apiJson("/api/orders/" + encodeURIComponent(id) + "/accept", {
+    method: "POST",
+    body: JSON.stringify({ userName: currentUserName() })
+  }, success, failure);
 }
 
 function takeOverCurrentOrder() {
   if (!currentOrder || !currentOrder.id) return setMessage("Kein Auftrag ausgewaehlt.", true);
   if (!currentUserName()) return setMessage("Bitte erst Mitarbeiter eintragen.", true);
-  touchOrder();
-  dirty = true;
-  renderTakeOverButton();
-  saveOrder(false);
+  acceptOrderOnServer(currentOrder.id, function (accepted) {
+    if (accepted && accepted.order) currentOrder = accepted.order;
+    currentOrder.collapseDone = currentOrder.collapseDone !== false;
+    dirty = false;
+    renderCompletionFields();
+    renderOrder();
+    persistCurrentOrderCache();
+    loadOrderList({ silent: true });
+    setMessage(acceptedOrderMessage(accepted), false);
+  }, function (message) {
+    setMessage("Bearbeitung konnte nicht uebernommen werden: " + message, true);
+  });
+}
+
+function acceptedOrderMessage(result) {
+  var count = Number(result && result.acceptedCount || 0);
+  if (count > 1) {
+    return count + " Auftraege fuer Kunde " + (result.customerName || "") + " uebernommen.";
+  }
+  return "Bearbeitung uebernommen. Bitte diesen Auftrag abschliessen.";
 }
 
 function renderCompletionFields() {
@@ -496,8 +752,10 @@ function saveOrder(silent, onSuccess) {
   var revision = changeRevision;
   apiJson("/api/orders/" + encodeURIComponent(currentOrder.id), {
     method: "PUT",
-    body: JSON.stringify({ order: currentOrder })
-  }, function () {
+    body: JSON.stringify({ order: currentOrder, userName: currentUserName() })
+  }, function (result) {
+    currentOrder.acceptedBy = result && result.order && result.order.acceptedBy || currentOrder.acceptedBy || "";
+    currentOrder.acceptedAt = result && result.order && result.order.acceptedAt || currentOrder.acceptedAt || "";
     savingOrder = false;
     if (changeRevision === revision) {
       dirty = false;
@@ -520,20 +778,32 @@ function saveOrder(silent, onSuccess) {
 function exportPdf() {
   if (!currentOrder || !currentOrder.id) return setMessage("Kein Auftrag ausgewaehlt.", true);
   if (!currentUserName()) return setMessage("Bitte erst Mitarbeiter eintragen.", true);
+  pruneEmptyManualStorageLines();
+  var validationMessage = storageOrderExportMessage();
+  if (validationMessage) {
+    renderOrder();
+    setMessage(validationMessage, true);
+    window.alert(validationMessage);
+    return;
+  }
   setMessage("PDF wird auf dem Server erstellt...", false);
   saveOrder(true, function () {
     apiJson("/api/orders/" + encodeURIComponent(currentOrder.id) + "/export-pdf", {
       method: "POST",
-      body: JSON.stringify({ order: currentOrder })
+      body: JSON.stringify({ order: currentOrder, userName: currentUserName() })
     }, function () {
       dirty = false;
       clearCurrentOrderCache();
-      resetToStart("PDF erfolgreich exportiert. Bitte Auftrag waehlen.");
-      loadOrderList();
+      loadTabletStartPage();
     }, function (message) {
       setMessage("PDF-Export fehlgeschlagen: " + message, true);
     });
   });
+}
+
+function loadTabletStartPage() {
+  resetToStart("PDF erfolgreich exportiert. Bitte Auftrag waehlen.");
+  window.location.href = (window.location.pathname || "/tablet.html") + "?start=" + Date.now();
 }
 
 function resetToStart(message) {
@@ -576,6 +846,44 @@ function clearCurrentOrderCache() {
   } catch (error) {
     void error;
   }
+}
+
+function mergeServerLoadingSlipLines(order, serverOrder) {
+  if (!order || !Array.isArray(order.lines) || !serverOrder || !Array.isArray(serverOrder.lines)) return order;
+
+  var serverLoadingSlipLines = serverOrder.lines.filter(function (line) {
+    return line && line.lineType === "loading-slip" && String(line.barcode || "").trim();
+  });
+  if (!serverLoadingSlipLines.length) return order;
+
+  var previousByBarcode = {};
+  order.lines.forEach(function (line) {
+    var barcode = line && line.lineType === "loading-slip" ? String(line.barcode || "").trim() : "";
+    if (barcode) previousByBarcode[barcode] = line;
+  });
+
+  var normalLines = order.lines.filter(function (line) {
+    return !line || line.lineType !== "loading-slip";
+  });
+  var mergedLoadingSlipLines = serverLoadingSlipLines.map(function (line) {
+    var previous = previousByBarcode[String(line.barcode || "").trim()];
+    var merged = {};
+    Object.keys(line).forEach(function (key) {
+      merged[key] = line[key];
+    });
+    if (previous && Object.prototype.hasOwnProperty.call(previous, "picked")) merged.picked = previous.picked;
+    merged.positionNote = previous && String(previous.positionNote || "").trim()
+      ? previous.positionNote
+      : line.positionNote || "";
+    return merged;
+  });
+
+  var mergedOrder = {};
+  Object.keys(order).forEach(function (key) {
+    mergedOrder[key] = order[key];
+  });
+  mergedOrder.lines = normalLines.concat(mergedLoadingSlipLines);
+  return mergedOrder;
 }
 
 function restoreCachedOrderFor(serverOrder) {
@@ -625,9 +933,61 @@ function allPicked() {
   var lines = currentOrder && currentOrder.lines ? currentOrder.lines : [];
   if (!lines.length) return false;
   for (var index = 0; index < lines.length; index += 1) {
+    if (isEmptyManualStorageLine(lines[index])) continue;
     if (!lines[index].picked) return false;
   }
   return true;
+}
+
+function pruneEmptyManualStorageLines() {
+  if (!currentOrder || !Array.isArray(currentOrder.lines)) return;
+  var before = currentOrder.lines.length;
+  currentOrder.lines = currentOrder.lines.filter(function (line) {
+    return !isEmptyManualStorageLine(line);
+  });
+  if (currentOrder.lines.length !== before) markDirty();
+}
+
+function storageOrderExportMessage() {
+  if (!isStorageOrder() || !currentOrder) return "";
+  var errors = [];
+  var lines = Array.isArray(currentOrder.lines) ? currentOrder.lines : [];
+  for (var index = 0; index < lines.length; index += 1) {
+    if (isEmptyManualStorageLine(lines[index])) continue;
+    var lineErrors = storageLineCompletionErrors(lines[index]);
+    for (var errorIndex = 0; errorIndex < lineErrors.length; errorIndex += 1) {
+      errors.push("Pos. " + storageLinePosition(lines[index], index) + ": " + lineErrors[errorIndex]);
+    }
+  }
+  if (!errors.length) return "";
+  return "Einlagerung unvollstaendig: " + errors.slice(0, 5).join("; ") + (errors.length > 5 ? "; weitere Fehler vorhanden" : "");
+}
+
+function storageLineErrorMessage(line) {
+  return "Position kann noch nicht erledigt werden: " + storageLineCompletionErrors(line).join(", ");
+}
+
+function storageLineCompletionErrors(line) {
+  if (!isStorageOrder() || !line || line.lineType === "loading-slip" || isEmptyManualStorageLine(line)) return [];
+  var errors = [];
+  if (!String(line.product || "").trim()) errors.push("Artikelnummer fehlt");
+  if (!String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
+  if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
+  if (!readTabletQuantity(line.actualQty || line.targetQty)) errors.push("Menge fehlt");
+  return errors;
+}
+
+function readTabletQuantity(value) {
+  var number = Number(String(value || "").replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(number) && number > 0;
+}
+
+function storageLinePosition(line, index) {
+  return line.warehouseOrder || (index + 1);
+}
+
+function isEmptyManualStorageLine(line) {
+  return line && line.manual === true && !manualStorageLineHasContent(line);
 }
 
 function apiJson(url, options, success, failure) {

@@ -15,6 +15,7 @@ import {
   safeResolve,
   readInteger,
   normalizeWarehouse,
+  normalizeSsiStorageBin,
   httpError,
   createId,
   createArticleId,
@@ -387,10 +388,16 @@ async function route(request, response) {
     return;
   }
 
+  if (pathname === "/api/orders/next-storage-number" && request.method === "GET") {
+    sendJson(response, 200, { ok: true, orderNumber: nextStorageOrderNumber() });
+    return;
+  }
+
   // Orders — create
   if (pathname === "/api/orders" && request.method === "POST") {
     const body = await readBody(request, maxBodyBytes);
     const order = normalizeOrder(body.order || body);
+    assignStorageOrderBasics(order);
     if (!order.lines.length) {
       sendJson(response, 400, { ok: false, error: "Leere Auftraege ohne Positionen werden nicht gespeichert" });
       return;
@@ -422,6 +429,26 @@ async function route(request, response) {
     return;
   }
 
+  const acceptOrderMatch = pathname.match(/^\/api\/orders\/([^/]+)\/accept$/);
+  if (acceptOrderMatch && request.method === "POST") {
+    requireGroup(request, ["tablet"]);
+    const body = await readBody(request, maxBodyBytes);
+    const order = findOrder(acceptOrderMatch[1]);
+    if (!order) return sendJson(response, 404, { ok: false, error: "Auftrag nicht gefunden" });
+    const userName = requestExplicitOrderUserName(body);
+    if (!userName) return sendJson(response, 400, { ok: false, error: "Mitarbeiter fehlt" });
+    const result = acceptTabletOrderGroup(order, userName);
+    if (result.blocked) return sendAcceptedOrderBlock(response, result.blocked);
+    sendJson(response, 200, {
+      ok: true,
+      order: result.order,
+      acceptedOrders: result.acceptedOrders.map(orderSummary),
+      acceptedCount: result.acceptedOrders.length,
+      customerName: result.customerName || ""
+    });
+    return;
+  }
+
   if (orderMatch && request.method === "PUT") {
     const body = await readBody(request, maxBodyBytes);
     const existing = findOrder(orderMatch[1]) || {};
@@ -431,6 +458,7 @@ async function route(request, response) {
       return;
     }
     const order = normalizeOrder({ ...existing, ...(body.order || body), id: orderMatch[1] });
+    assignStorageOrderBasics(order, existing);
     if (!order.lines.length) {
       sendJson(response, 400, { ok: false, error: "Leere Auftraege ohne Positionen werden nicht gespeichert" });
       return;
@@ -441,6 +469,11 @@ async function route(request, response) {
       return;
     }
     preserveClosedOrderStatus(order, existing);
+    preserveAcceptedOrderStatus(order, existing);
+    if (existing.id && isTabletRequest(request)) {
+      const tabletBlocked = tabletMutationBlocker(existing, requestOrderUserName(body, order));
+      if (tabletBlocked) return sendAcceptedOrderBlock(response, tabletBlocked);
+    }
     const duplicate = findDuplicateOrder(order, orderMatch[1]);
     if (duplicate) {
       sendJson(response, 409, { ok: false, error: `Auftrag ${duplicate.orderNumber || duplicate.id} wurde bereits eingelesen` });
@@ -468,18 +501,36 @@ async function route(request, response) {
     const savedOrder = findOrder(exportMatch[1]);
     const order = normalizeOrder({ ...(savedOrder || {}), ...(body.order || {}) });
     order.id = exportMatch[1];
-    const lineValidation = validateOrderLines(order);
+    const orderType = order.orderType || "picking";
+    const stockWarehouse = orderType === "storage" ? "SSI" : pickingOrderWarehouse(order, warehouse);
+    if (orderType === "storage") {
+      assignStorageOrderBasics(order, savedOrder);
+      normalizeStorageOrderBinsForExport(order);
+    }
+    preserveAcceptedOrderStatus(order, savedOrder || {});
+    if (savedOrder?.id && isTabletRequest(request)) {
+      const tabletBlocked = tabletMutationBlocker(savedOrder, requestOrderUserName(body, order));
+      if (tabletBlocked) return sendAcceptedOrderBlock(response, tabletBlocked);
+    }
+    const lineValidation = validateOrderLines(order, { forExport: true });
     if (lineValidation) {
       sendJson(response, 400, { ok: false, error: lineValidation });
       return;
     }
+    if (orderType === "storage") upsertOrder(order);
+    const storageArticles = orderType === "storage" && !savedOrder?.exportedAt
+      ? await ensureStorageOrderArticles(order, stockWarehouse)
+      : { created: [], updated: [] };
     const result = await exportPdf(order, exportDir, tempDir, requestOrigin(request), defaultExportDir);
-    const stockIssue = (order.orderType || "picking") === "picking" && !savedOrder?.exportedAt
-      ? bookPickingOrderIssues(order, warehouse)
+    const stockIssue = orderType === "picking" && !savedOrder?.exportedAt
+      ? bookPickingOrderIssues(order, stockWarehouse)
       : { booked: 0, errors: [] };
-    const stockIssueErrorLog = logPickingIssueErrors(order, stockIssue, result, warehouse);
+    const stockReceipt = orderType === "storage" && !savedOrder?.exportedAt
+      ? bookStorageOrderReceipts(order, stockWarehouse)
+      : { booked: 0, movements: [], locations: [] };
+    const stockIssueErrorLog = logPickingIssueErrors(order, stockIssue, result, stockWarehouse);
     const exportedAt = markOrderExported(order.id, result);
-    sendJson(response, 200, { ok: true, exportedAt, stockIssue, stockIssueErrorLog, ...result });
+    sendJson(response, 200, { ok: true, exportedAt, stockWarehouse, stockIssue, stockReceipt, storageArticles, stockIssueErrorLog, ...result });
     return;
   }
 
@@ -519,14 +570,202 @@ async function sendExportFile(response, requestPath) {
 
 // ── Security helpers ──────────────────────────────────────────────────────────
 
-function validateOrderLines(order) {
+function validateOrderLines(order, { forExport = false } = {}) {
   const conflicts = duplicateHandlingUnitConflicts(order.lines);
-  if (!conflicts.length) return "";
+  if (conflicts.length) {
+    return `LE/HU muss einmalig sein: ${conflicts
+      .slice(0, 3)
+      .map((conflict) => `LE/HU ${conflict.value} mehrfach (${formatHandlingUnitPositions(conflict.positions)})`)
+      .join("; ")}`;
+  }
 
-  return `LE/HU muss einmalig sein: ${conflicts
-    .slice(0, 3)
-    .map((conflict) => `LE/HU ${conflict.value} mehrfach (${formatHandlingUnitPositions(conflict.positions)})`)
-    .join("; ")}`;
+  if (forExport && (order.orderType || "picking") === "storage") {
+    return validateStorageOrderForExport(order);
+  }
+
+  return "";
+}
+
+function validateStorageOrderForExport(order) {
+  const lines = storageOrderLines(order);
+  if (!lines.length) return "Einlagerung hat keine Positionen.";
+
+  const errors = [];
+  lines.forEach((line, index) => {
+    const position = line.warehouseOrder || index + 1;
+    const materialnummer = String(line.product || "").trim();
+    const description = String(line.description || "").trim();
+    const lagerplatz = String(line.fromBin || "").trim();
+    const mengeStueck = readInteger(storageLineQuantity(line));
+
+    if (!line.picked) errors.push(`Pos. ${position}: nicht erledigt`);
+    if (!materialnummer) errors.push(`Pos. ${position}: Artikelnummer fehlt`);
+    if (!description) errors.push(`Pos. ${position}: Artikelbezeichnung fehlt`);
+    if (!lagerplatz) errors.push(`Pos. ${position}: Stellplatz fehlt`);
+    if (!Number.isInteger(mengeStueck) || mengeStueck <= 0) errors.push(`Pos. ${position}: Menge fehlt oder ist ungueltig`);
+  });
+
+  if (!errors.length) return "";
+  return `Einlagerung unvollstaendig: ${errors.slice(0, 5).join("; ")}${errors.length > 5 ? "; weitere Fehler vorhanden" : ""}`;
+}
+
+function storageOrderLines(order) {
+  return (Array.isArray(order?.lines) ? order.lines : [])
+    .filter((line) => line?.lineType !== "loading-slip" && !isEmptyManualStorageLine(line));
+}
+
+function isEmptyManualStorageLine(line) {
+  if (line?.manual !== true) return false;
+  return [
+    line.product,
+    line.description,
+    line.targetQty,
+    line.actualQty,
+    line.fromHandlingUnit,
+    line.fromBin,
+    line.positionNote
+  ].every((value) => !String(value ?? "").trim());
+}
+
+function storageLineQuantity(line) {
+  const actual = String(line?.actualQty ?? "").trim();
+  return actual ? line.actualQty : line?.targetQty;
+}
+
+function normalizeStorageOrderBinsForExport(order) {
+  const errors = [];
+  order.lines = (Array.isArray(order.lines) ? order.lines : []).map((line, index) => {
+    if (line?.lineType === "loading-slip" || isEmptyManualStorageLine(line)) return line;
+    const rawBin = String(line?.fromBin || "").trim();
+    if (!rawBin) return line;
+    const normalizedBin = normalizeSsiStorageBin(rawBin);
+    const position = line.warehouseOrder || index + 1;
+    if (!normalizedBin) {
+      errors.push(`Pos. ${position}: Stellplatz "${rawBin}" ist nicht bekannt`);
+      return { ...line, fromBin: rawBin.toUpperCase() };
+    }
+    return { ...line, fromBin: normalizedBin };
+  });
+  if (errors.length) {
+    throw httpError(400, `Einlagerung unvollstaendig: ${errors.slice(0, 5).join("; ")}${errors.length > 5 ? "; weitere Fehler vorhanden" : ""}`);
+  }
+}
+
+async function ensureStorageOrderArticles(order, warehouse = "SSI") {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const articles = await readArticles(normalizedWarehouse);
+  const byMaterial = new Map(articles.map((article, index) => [String(article.materialnummer || "").trim(), { article, index }]));
+  const created = [];
+  const updated = [];
+  const now = new Date().toISOString();
+
+  for (const line of storageOrderLines(order)) {
+    const materialnummer = String(line.product || "").trim();
+    if (!materialnummer) continue;
+    const values = storageArticleValues(line);
+    const existing = byMaterial.get(materialnummer);
+    if (existing) {
+      const nextArticle = mergeStorageArticle(existing.article, values, now);
+      if (!articleChanged(existing.article, nextArticle)) continue;
+      validateArticle(nextArticle);
+      articles[existing.index] = nextArticle;
+      byMaterial.set(materialnummer, { article: nextArticle, index: existing.index });
+      updated.push(articleSummary(nextArticle));
+      continue;
+    }
+
+    const article = normalizeArticle({
+      id: createArticleId(),
+      materialnummer,
+      materialbezeichnung: values.materialbezeichnung,
+      gebindeArt: values.gebindeArt,
+      mengeProKarton: values.mengeProKarton,
+      mengeProPalette: values.mengeProPalette,
+      lagerplatz: values.lagerplatz,
+      bemerkung: "Automatisch aus Einlagerung angelegt",
+      aktiv: true,
+      erstelltAm: now,
+      geaendertAm: now
+    });
+    validateArticle(article);
+    articles.push(article);
+    byMaterial.set(materialnummer, { article, index: articles.length - 1 });
+    created.push(articleSummary(article));
+  }
+
+  if (created.length || updated.length) await writeArticles(articles, normalizedWarehouse);
+  return { created, updated };
+}
+
+function storageArticleValues(line) {
+  const quantity = readInteger(storageLineQuantity(line));
+  const text = `${line.palletInfo || ""} ${line.positionNote || ""}`.toUpperCase();
+  const gebindeArt = /\bKAR\.?\b|\bKARTON/.test(text)
+    ? "KRT"
+    : /\bC\s*1\b/.test(text)
+      ? "C1"
+      : /\bC\s*2\b/.test(text)
+        ? "C2"
+        : "STK";
+  return {
+    materialbezeichnung: String(line.description || "").trim(),
+    gebindeArt,
+    mengeProKarton: gebindeArt === "KRT" ? quantity : 0,
+    mengeProPalette: gebindeArt === "KRT" ? 0 : quantity,
+    lagerplatz: String(line.fromBin || "").trim()
+  };
+}
+
+function mergeStorageArticle(article, values, now) {
+  const nextArticle = normalizeArticle({
+    ...article,
+    materialbezeichnung: article.materialbezeichnung || values.materialbezeichnung,
+    gebindeArt: article.gebindeArt || values.gebindeArt,
+    mengeProKarton: Number(article.mengeProKarton || 0) > 0 ? article.mengeProKarton : values.mengeProKarton,
+    mengeProPalette: Number(article.mengeProPalette || 0) > 0 ? article.mengeProPalette : values.mengeProPalette,
+    lagerplatz: article.lagerplatz || values.lagerplatz,
+    aktiv: true,
+    geaendertAm: now
+  });
+  return nextArticle;
+}
+
+function articleChanged(left, right) {
+  return JSON.stringify(left) !== JSON.stringify(right);
+}
+
+function bookStorageOrderReceipts(order, warehouse = "SSI") {
+  const orderNumber = order.orderNumber || order.id || "";
+  const receipts = storageOrderLines(order).map((line, index) => ({
+    materialnummer: String(line.product || "").trim(),
+    lagerplatz: String(line.fromBin || "").trim(),
+    leNummer: String(line.fromHandlingUnit || "").trim(),
+    mengeStueck: readInteger(storageLineQuantity(line)),
+    paletten: 1,
+    referenz: `Einlagerung ${orderNumber}`.trim(),
+    position: line.warehouseOrder || index + 1
+  }));
+  const result = bookStorageReceipts(receipts, warehouse);
+  return {
+    booked: result.movements.length,
+    movements: result.movements,
+    locations: result.locations
+  };
+}
+
+function assignStorageOrderBasics(order, existing = {}) {
+  if ((order.orderType || "picking") !== "storage") return;
+  order.orderNumber = String(order.orderNumber || existing.orderNumber || nextStorageOrderNumber()).trim();
+  order.customerName = "SSI";
+  order.orderWarehouse = "SSI";
+}
+
+function nextStorageOrderNumber() {
+  const numbers = readOrders()
+    .filter((order) => (order.orderType || "picking") === "storage")
+    .map((order) => Number(String(order.orderNumber || "").trim()))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  return String((numbers.length ? Math.max(...numbers) : 0) + 1);
 }
 
 function duplicateHandlingUnitConflicts(lines) {
@@ -561,6 +800,7 @@ function findDuplicateOrder(order, excludeId = "") {
   const orderNumber = String(order.orderNumber || "").trim().toLowerCase();
   const checkOrderNumber = orderNumber && !isReusableOrderNumber(orderNumber);
   const orderType = String(order.orderType || "picking").trim().toLowerCase();
+  if (orderType === "storage") return null;
   const fingerprint = orderFingerprint(order.rawText);
   if (!checkOrderNumber && !fingerprint) return null;
 
@@ -601,8 +841,180 @@ function preserveClosedOrderStatus(order, existing) {
   }
 }
 
+function preserveAcceptedOrderStatus(order, existing) {
+  if (!existing || !existing.id || !existing.acceptedBy) return;
+  order.acceptedBy = existing.acceptedBy;
+  order.acceptedAt = existing.acceptedAt || order.acceptedAt;
+}
+
+function requestOrderUserName(body, order = {}) {
+  return String(
+    body.userName ||
+    body.user ||
+    body.employee ||
+    order.lastEditedBy ||
+    order.activeUser ||
+    order.completedBy ||
+    ""
+  ).trim();
+}
+
+function requestExplicitOrderUserName(body) {
+  return String(body.userName || body.user || body.employee || "").trim();
+}
+
+function acceptTabletOrderGroup(order, userName) {
+  const targetBlocked = acceptTargetBlocker(order, userName);
+  if (targetBlocked) return { blocked: targetBlocked };
+
+  const acceptedGroup = tabletAcceptanceGroup(order, userName);
+  const groupIds = new Set(acceptedGroup.map((entry) => entry.id));
+  const blockingOrder = readOrders().find((entry) => (
+    !entry.exportedAt &&
+    sameUser(entry.acceptedBy, userName) &&
+    !groupIds.has(entry.id)
+  ));
+  if (blockingOrder) {
+    return {
+      blocked: {
+        status: 409,
+        message: `Erst Auftrag ${orderLabel(blockingOrder)} abschliessen: PDF auf dem Server erzeugen.`,
+        order: blockingOrder
+      }
+    };
+  }
+
+  const now = new Date().toISOString();
+  const acceptedOrders = acceptedGroup.map((entry) => {
+    applyOrderAcceptance(entry, userName, now);
+    entry.updatedAt = now;
+    upsertOrder(entry);
+    return entry;
+  });
+
+  return {
+    order: acceptedOrders.find((entry) => entry.id === order.id) || order,
+    acceptedOrders,
+    customerName: acceptanceCustomerName(order)
+  };
+}
+
+function acceptTargetBlocker(order, userName) {
+  const user = String(userName || "").trim();
+  if (!user) {
+    return { status: 400, message: "Mitarbeiter fehlt" };
+  }
+  if (order?.exportedAt) {
+    return {
+      status: 409,
+      message: `Auftrag ${orderLabel(order)} ist bereits abgeschlossen.`,
+      order
+    };
+  }
+
+  const acceptedBy = String(order?.acceptedBy || "").trim();
+  if (acceptedBy && !sameUser(acceptedBy, user)) {
+    return {
+      status: 409,
+      message: `Auftrag ${orderLabel(order)} ist bereits von ${acceptedBy} uebernommen.`,
+      order
+    };
+  }
+
+  return null;
+}
+
+function tabletAcceptanceGroup(order, userName) {
+  if (isSsiOrder(order)) return [order];
+
+  const customerName = acceptanceCustomerName(order);
+  if (!customerName) return [order];
+
+  const byId = new Map([[order.id, order]]);
+  readOrders()
+    .filter((entry) => (
+      entry.id &&
+      !entry.exportedAt &&
+      !isSsiOrder(entry) &&
+      acceptanceCustomerName(entry) === customerName &&
+      (!entry.acceptedBy || sameUser(entry.acceptedBy, userName))
+    ))
+    .forEach((entry) => byId.set(entry.id, entry));
+
+  return [...byId.values()];
+}
+
+function tabletMutationBlocker(order, userName) {
+  const user = String(userName || "").trim();
+  if (!user) return { status: 400, message: "Mitarbeiter fehlt" };
+  if (order?.exportedAt) return null;
+
+  const acceptedBy = String(order?.acceptedBy || "").trim();
+  if (!acceptedBy) {
+    return {
+      status: 409,
+      message: `Auftrag ${orderLabel(order)} zuerst am Tablet uebernehmen.`,
+      order
+    };
+  }
+  if (!sameUser(acceptedBy, user)) {
+    return {
+      status: 409,
+      message: `Auftrag ${orderLabel(order)} ist bereits von ${acceptedBy} uebernommen.`,
+      order
+    };
+  }
+  return null;
+}
+
+function applyOrderAcceptance(order, userName, timestamp = new Date().toISOString()) {
+  const user = String(userName || "").trim();
+  if (!user || order.exportedAt) return;
+  order.acceptedBy = order.acceptedBy || user;
+  order.acceptedAt = order.acceptedAt || timestamp;
+  order.activeUser = user;
+  order.activeUserAt = timestamp;
+  order.lastEditedBy = user;
+  order.createdBy = order.createdBy || user;
+}
+
+function sendAcceptedOrderBlock(response, blocked) {
+  sendJson(response, blocked.status || 409, {
+    ok: false,
+    error: blocked.message,
+    blockingOrder: blocked.order ? orderSummary(blocked.order) : null
+  });
+}
+
+function sameUser(left, right) {
+  return String(left || "").trim().toLowerCase() === String(right || "").trim().toLowerCase();
+}
+
+function isTabletRequest(request) {
+  return String(request.headers["x-user-group"] || "").trim().toLowerCase() === "tablet";
+}
+
+function isSsiOrder(order) {
+  return String(order?.orderNumber || "").trim().toLowerCase().startsWith("ssi");
+}
+
+function acceptanceCustomerName(order) {
+  return String(order?.customerName || "").trim();
+}
+
+function orderLabel(order) {
+  return [order?.orderNumber, order?.customerName]
+    .filter(Boolean)
+    .join(" - ") || order?.id || "ohne Nummer";
+}
+
 function requestWarehouse(request, url) {
   return normalizeWarehouse(request.headers["x-warehouse"] || url.searchParams.get("warehouse") || url.searchParams.get("lager"));
+}
+
+function pickingOrderWarehouse(order, fallbackWarehouse = "SSI") {
+  const value = String(order?.orderWarehouse || order?.pickingWarehouse || order?.detectedWarehouse || "").trim().toUpperCase();
+  return value === "SSI" || value === "SI" ? normalizeWarehouse(value) : normalizeWarehouse(fallbackWarehouse);
 }
 
 function orderFingerprint(text) {

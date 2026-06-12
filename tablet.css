@@ -162,6 +162,38 @@ button {
   margin: 4px 0;
 }
 
+.tablet-mode-switch {
+  display: table;
+  width: 100%;
+  margin-bottom: 10px;
+  overflow: hidden;
+  border: 1px solid #d8e0db;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #eef3ef;
+}
+
+.tablet-mode-switch button {
+  display: table-cell;
+  width: 50%;
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #17211b;
+  color: var(--ink);
+}
+
+.tablet-mode-switch button + button {
+  border-left: 1px solid #d8e0db;
+  border-left: 1px solid var(--line);
+}
+
+.tablet-mode-switch button.is-active {
+  background: #167a58;
+  background: var(--accent);
+  color: #fff;
+}
+
 .check-row {
   color: #17211b !important;
   color: var(--ink) !important;
@@ -241,6 +273,16 @@ button {
 
 .line-list {
   display: block;
+}
+
+.tablet-line-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.tablet-line-actions button {
+  min-width: 220px;
 }
 
 .pick-column-header {
@@ -420,6 +462,16 @@ button {
 
 .location-row {
   margin-top: 5px;
+}
+
+.location-row .manual-line-delete {
+  display: table-cell;
+  width: 150px;
+  min-height: 34px;
+  vertical-align: bottom;
+  background: #8a2f12;
+  background: var(--danger);
+  color: #fff;
 }
 
 .location-row label:first-child {

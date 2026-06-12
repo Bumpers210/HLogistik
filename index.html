@@ -15,7 +15,7 @@
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
     <script src="offline-store.js" defer></script>
-    <script src="app.js?v=20260610-7" defer></script>
+    <script src="app.js?v=20260612-5" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -163,6 +163,9 @@
             </div>
           </div>
           <div id="pickList" class="pick-list" aria-live="polite"></div>
+          <div id="storageLineActions" class="line-actions" hidden>
+            <button id="addStorageLineButton" class="secondary-button" type="button">Position hinzufügen</button>
+          </div>
           <div class="summary-box order-completion">
             <h2>Abschluss</h2>
             <div class="summary-fields">

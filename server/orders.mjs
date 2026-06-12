@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { getDb } from "./db.mjs";
-import { createId } from "./helpers.mjs";
+import { createId, normalizeWarehouse } from "./helpers.mjs";
 
 // ── SQLite CRUD ───────────────────────────────────────────────────────────────
 
@@ -9,8 +9,9 @@ export function readOrders() {
   return getDb()
     .prepare(
       `SELECT id, auftragsnummer, kundenname, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
-              auftrags_notiz, rohtext, collapse_done, auftrags_typ, erstellt_von,
+              auftrags_notiz, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
+              uebernommen_von, uebernommen_am,
               abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
               exportiert_pdf_pfad, positionen, erstellt_am, aktualisiert_am
        FROM auftraege`
@@ -23,8 +24,9 @@ export function findOrder(id) {
   const row = getDb()
     .prepare(
       `SELECT id, auftragsnummer, kundenname, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
-              auftrags_notiz, rohtext, collapse_done, auftrags_typ, erstellt_von,
+              auftrags_notiz, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
+              uebernommen_von, uebernommen_am,
               abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
               exportiert_pdf_pfad, positionen, erstellt_am, aktualisiert_am
        FROM auftraege WHERE id = ?`
@@ -38,11 +40,12 @@ export function upsertOrder(order) {
     .prepare(
       `INSERT INTO auftraege
          (id, auftragsnummer, kundenname, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
-          auftrags_notiz, rohtext, collapse_done, auftrags_typ, erstellt_von,
+         auftrags_notiz, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
           zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
+          uebernommen_von, uebernommen_am,
           abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
           exportiert_pdf_pfad, positionen, erstellt_am, aktualisiert_am)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET
          auftragsnummer = excluded.auftragsnummer,
          kundenname = excluded.kundenname,
@@ -54,10 +57,13 @@ export function upsertOrder(order) {
          rohtext = excluded.rohtext,
          collapse_done = excluded.collapse_done,
          auftrags_typ = excluded.auftrags_typ,
+         auftrags_lager = excluded.auftrags_lager,
          erstellt_von = excluded.erstellt_von,
          zuletzt_bearbeitet_von = excluded.zuletzt_bearbeitet_von,
          aktiver_benutzer = excluded.aktiver_benutzer,
          aktiver_benutzer_am = excluded.aktiver_benutzer_am,
+         uebernommen_von = excluded.uebernommen_von,
+         uebernommen_am = excluded.uebernommen_am,
          abgeschlossen_von = excluded.abgeschlossen_von,
          abgeschlossen_am = excluded.abgeschlossen_am,
          exportiert_am = excluded.exportiert_am,
@@ -79,10 +85,13 @@ export function upsertOrder(order) {
       order.rawText,
       order.collapseDone ? 1 : 0,
       order.orderType,
+      order.orderWarehouse,
       order.createdBy,
       order.lastEditedBy,
       order.activeUser,
       order.activeUserAt,
+      order.acceptedBy,
+      order.acceptedAt,
       order.completedBy,
       order.completedAt,
       order.exportedAt,
@@ -107,6 +116,17 @@ export function markOrderExported(id, exportResult) {
     )
     .run(exportedAt, exportResult.file || "", exportResult.path || "", exportedAt, id);
   return exportedAt;
+}
+
+export function findBlockingAcceptedOrder(userName, excludeId = "") {
+  const userKey = userLookupKey(userName);
+  if (!userKey) return null;
+
+  return readOrders().find((order) => {
+    if (excludeId && order.id === excludeId) return false;
+    if (order.exportedAt) return false;
+    return userLookupKey(order.acceptedBy) === userKey;
+  }) || null;
 }
 
 // ── Migration from orders.json ────────────────────────────────────────────────
@@ -155,6 +175,7 @@ export function normalizeOrder(order) {
     collapseDone: Boolean(order.collapseDone),
     lines: Array.isArray(order.lines) ? order.lines : [],
     orderType: String(order.orderType || "picking"),
+    orderWarehouse: normalizeOrderWarehouse(order.orderWarehouse || order.pickingWarehouse || order.detectedWarehouse),
     exportedAt: String(order.exportedAt || ""),
     exportedPdfFile: String(order.exportedPdfFile || ""),
     exportedPdfPath: String(order.exportedPdfPath || ""),
@@ -162,6 +183,8 @@ export function normalizeOrder(order) {
     lastEditedBy: String(order.lastEditedBy || ""),
     activeUser: String(order.activeUser || ""),
     activeUserAt: String(order.activeUserAt || ""),
+    acceptedBy: String(order.acceptedBy || ""),
+    acceptedAt: String(order.acceptedAt || ""),
     completedBy: String(order.completedBy || ""),
     completedAt: String(order.completedAt || ""),
     createdAt: order.createdAt || "",
@@ -182,8 +205,11 @@ export function orderSummary(order) {
     lastEditedBy: order.lastEditedBy || "",
     activeUser: order.activeUser || "",
     activeUserAt: order.activeUserAt || "",
+    acceptedBy: order.acceptedBy || "",
+    acceptedAt: order.acceptedAt || "",
     completedBy: order.completedBy || "",
     completedAt: order.completedAt || "",
+    orderWarehouse: order.orderWarehouse || "",
     exportedAt: order.exportedAt || "",
     orderType: order.orderType || "picking",
     createdAt: order.createdAt || "",
@@ -212,10 +238,13 @@ function orderFromRow(row) {
     rawText: String(row.rohtext || ""),
     collapseDone: Boolean(row.collapse_done),
     orderType: String(row.auftrags_typ || "picking"),
+    orderWarehouse: normalizeOrderWarehouse(row.auftrags_lager),
     createdBy: String(row.erstellt_von || ""),
     lastEditedBy: String(row.zuletzt_bearbeitet_von || ""),
     activeUser: String(row.aktiver_benutzer || ""),
     activeUserAt: String(row.aktiver_benutzer_am || ""),
+    acceptedBy: String(row.uebernommen_von || ""),
+    acceptedAt: String(row.uebernommen_am || ""),
     completedBy: String(row.abgeschlossen_von || ""),
     completedAt: String(row.abgeschlossen_am || ""),
     exportedAt: String(row.exportiert_am || ""),
@@ -225,4 +254,13 @@ function orderFromRow(row) {
     createdAt: String(row.erstellt_am || ""),
     updatedAt: String(row.aktualisiert_am || ""),
   };
+}
+
+function normalizeOrderWarehouse(value) {
+  const text = String(value || "").trim().toUpperCase();
+  return text === "SSI" || text === "SI" ? normalizeWarehouse(text) : "";
+}
+
+function userLookupKey(value) {
+  return String(value || "").trim().toLowerCase();
 }

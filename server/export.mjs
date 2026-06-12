@@ -37,16 +37,27 @@ async function copyPdfToExportFolder(sourcePath, copyDir, fileName) {
 }
 
 function printableHtml(order, fileName) {
+  const isStorage = (order.orderType || "picking") === "storage";
   const picked = order.lines.filter((line) => line.picked).length;
-  const changed = order.lines.filter(
-    (line) => String(line.actualQty || "").trim() !== String(line.targetQty || "").trim()
-  ).length;
+  const changed = order.lines.filter(isQuantityChanged).length;
   const normalLines = order.lines.filter((line) => line.lineType !== "loading-slip");
   const loadingSlipLines = order.lines.filter((line) => line.lineType === "loading-slip");
   const rows = normalLines
     .map(
-      (line) => `
-    <tr>
+      (line) => isStorage ? `
+    <tr${isQuantityChanged(line) ? ` class="changed-qty"` : ""}>
+      <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
+      <td>${escapeHtml(line.warehouseOrder)}</td>
+      <td>${escapeHtml(line.fromHandlingUnit)}</td>
+      <td>${escapeHtml(line.fromBin)}</td>
+      <td>${escapeHtml(line.product)}</td>
+      <td class="num">${escapeHtml(line.targetQty)}</td>
+      <td class="num">${escapeHtml(line.actualQty)}</td>
+      <td>${escapeHtml(line.unit)}</td>
+      <td>${escapeHtml(line.description)}</td>
+      <td>${escapeHtml(line.positionNote)}</td>
+    </tr>` : `
+    <tr${isQuantityChanged(line) ? ` class="changed-qty"` : ""}>
       <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
       <td>${escapeHtml(line.warehouseOrder)}</td>
       <td>${escapeHtml(line.fromHandlingUnit)}</td>
@@ -90,6 +101,10 @@ function printableHtml(order, fileName) {
       th { background: #e8eee9; text-align: left; font-size: 9px; }
       td { font-size: 9px; }
       .num { text-align: right; }
+      .changed-qty td { background: #fff3bf; font-weight: 700; }
+      .changed-qty td:nth-child(8) { border: 2px solid #111; }
+      .storage-table .changed-qty td:nth-child(7) { border: 2px solid #111; }
+      .storage-table { width: 100%; }
       .loading-slip { display: grid; grid-template-columns: 18mm 64mm 28mm 1fr 26mm; gap: 4px; margin-top: 10px; padding: 6px; border: 2px solid #111; break-inside: avoid; }
       .loading-slip > div { border: 1px solid #777; padding: 4px; min-height: 34px; }
       .loading-slip strong { display: block; margin-bottom: 3px; color: #555; font-size: 8px; }
@@ -104,7 +119,7 @@ function printableHtml(order, fileName) {
   <body>
     <header>
       <div>
-        <h1>Kommissionierabschluss</h1>
+        <h1>${escapeHtml(isStorage ? "Einlagerabschluss" : "Kommissionierabschluss")}</h1>
         <p><strong>Auftrag:</strong> ${escapeHtml(order.orderNumber || "-")}</p>
         <p><strong>Kunde:</strong> ${escapeHtml(order.customerName || "-")}</p>
         <p><strong>Bearbeiter:</strong> ${escapeHtml(order.lastEditedBy || "-")}</p>
@@ -123,8 +138,21 @@ function printableHtml(order, fileName) {
       <p><strong>Korrigiert:</strong> ${changed}</p>
     </section>
     <section class="note"><strong>Notiz:</strong> ${escapeHtml(order.orderNote || "-")}</section>
-    <table>
+    <table class="${isStorage ? "storage-table" : ""}">
       <thead>
+        ${isStorage ? `
+        <tr>
+          <th style="width:5%;">OK</th>
+          <th style="width:6%;">Pos.</th>
+          <th style="width:13%;">HU</th>
+          <th style="width:12%;">Stellplatz</th>
+          <th style="width:10%;">Material</th>
+          <th style="width:7%;">Soll</th>
+          <th style="width:7%;">Ist</th>
+          <th style="width:6%;">Einh.</th>
+          <th style="width:24%;">Artikelbezeichnung</th>
+          <th style="width:10%;">Bemerkung</th>
+        </tr>` : `
         <tr>
           <th style="width:4%;">OK</th>
           <th style="width:8%;">Lagerauftrag</th>
@@ -137,11 +165,11 @@ function printableHtml(order, fileName) {
           <th style="width:4%;">Einh.</th>
           <th style="width:23%;">Beschreibung</th>
           <th style="width:11%;">Nach-Lagerplatz</th>
-        </tr>
+        </tr>`}
       </thead>
-      <tbody>${rows || `<tr><td colspan="11">Keine Positionen vorhanden.</td></tr>`}</tbody>
+      <tbody>${rows || `<tr><td colspan="${isStorage ? 10 : 11}">Keine Positionen vorhanden.</td></tr>`}</tbody>
     </table>
-    ${loadingSlipRows}
+    ${isStorage ? "" : loadingSlipRows}
   </body>
 </html>`;
 }
@@ -191,6 +219,10 @@ function code128Svg(value) {
     <g fill="#111">${bars}</g>
     <text x="${width / 2}" y="56" text-anchor="middle">${escapeHtml(barcode)}</text>
   </svg>`;
+}
+
+function isQuantityChanged(line) {
+  return String(line?.actualQty || "").trim() !== String(line?.targetQty || "").trim();
 }
 
 function pdfFileBase(order) {

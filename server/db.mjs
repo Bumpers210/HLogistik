@@ -110,10 +110,13 @@ export function initializeDatabase() {
       rohtext TEXT NOT NULL DEFAULT '',
       collapse_done INTEGER NOT NULL DEFAULT 1,
       auftrags_typ TEXT NOT NULL DEFAULT 'picking',
+      auftrags_lager TEXT NOT NULL DEFAULT '',
       erstellt_von TEXT NOT NULL DEFAULT '',
       zuletzt_bearbeitet_von TEXT NOT NULL DEFAULT '',
       aktiver_benutzer TEXT NOT NULL DEFAULT '',
       aktiver_benutzer_am TEXT NOT NULL DEFAULT '',
+      uebernommen_von TEXT NOT NULL DEFAULT '',
+      uebernommen_am TEXT NOT NULL DEFAULT '',
       abgeschlossen_von TEXT NOT NULL DEFAULT '',
       abgeschlossen_am TEXT NOT NULL DEFAULT '',
       exportiert_am TEXT NOT NULL DEFAULT '',
@@ -129,6 +132,9 @@ export function initializeDatabase() {
 
   ensureArticleColumn("gebinde_art", "TEXT NOT NULL DEFAULT 'STK'");
   ensureOrderColumn("auftragszeit", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("auftrags_lager", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("uebernommen_von", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("uebernommen_am", "TEXT NOT NULL DEFAULT ''");
   migrateStorageWarehouseTables();
 }
 

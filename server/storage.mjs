@@ -1,5 +1,5 @@
 import { getDb } from "./db.mjs";
-import { createStorageId, createStorageMovementId, readInteger, normalizeSearch, normalizeWarehouse, httpError, withLineContext } from "./helpers.mjs";
+import { createStorageId, createStorageMovementId, readInteger, normalizeSearch, normalizeWarehouse, normalizeSsiStorageBin, httpError, withLineContext } from "./helpers.mjs";
 import { readArticlesSync, findArticleByCode } from "./articles.mjs";
 
 // ── Locations ─────────────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ export function bookStorageReceipts(receipts, warehouse = "SSI") {
   try {
     receipts.forEach((receipt, index) => {
       try {
-        const normalized = normalizeStorageReceipt(receipt);
+        const normalized = normalizeStorageReceipt(receipt, normalizedWarehouse);
         const article = findArticleByCode(articles, normalized.materialnummer);
         if (!article) throw httpError(400, "Artikelnummer ist nicht im Artikelstamm vorhanden");
         results.push(applyStorageReceipt(normalized, article, new Date().toISOString(), normalizedWarehouse));
@@ -523,10 +523,17 @@ function applyStorageIssue(normalized, article, now, warehouse) {
 
 // ── Normalization ─────────────────────────────────────────────────────────────
 
-function normalizeStorageReceipt(receipt) {
+function normalizeStorageReceipt(receipt, warehouse = "SSI") {
+  const rawLagerplatz = String(receipt.lagerplatz ?? receipt.storageBin ?? "").trim();
+  const normalizedLagerplatz = normalizeWarehouse(warehouse) === "SSI"
+    ? normalizeSsiStorageBin(rawLagerplatz)
+    : rawLagerplatz.toUpperCase();
+  if (rawLagerplatz && !normalizedLagerplatz) {
+    throw httpError(400, `Stellplatz "${rawLagerplatz}" ist fuer SSI nicht bekannt`);
+  }
   const normalized = {
     materialnummer: String(receipt.materialnummer ?? receipt.artikelnummer ?? receipt.articleNumber ?? "").trim(),
-    lagerplatz: String(receipt.lagerplatz ?? receipt.storageBin ?? "").trim().toUpperCase(),
+    lagerplatz: normalizedLagerplatz || "",
     leNummer: String(receipt.leNummer ?? receipt.le_nummer ?? receipt.LE ?? receipt.handlingUnit ?? "").trim(),
     mengeStueck: readInteger(receipt.mengeStueck ?? receipt.menge_stueck ?? receipt.stueckzahl ?? receipt.quantity),
     paletten: readInteger(receipt.paletten ?? receipt.palettenAnzahl ?? receipt.pallets ?? receipt.palletCount),

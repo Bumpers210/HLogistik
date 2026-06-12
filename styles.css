@@ -757,6 +757,16 @@ textarea[readonly] {
   gap: 5px;
 }
 
+.line-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.line-actions .secondary-button {
+  min-width: 220px;
+}
+
 .pick-column-header {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
@@ -890,6 +900,16 @@ textarea[readonly] {
   display: grid;
   grid-template-columns: minmax(150px, 260px) minmax(180px, 1fr);
   gap: 5px;
+}
+
+.location-row.has-manual-delete {
+  grid-template-columns: minmax(150px, 260px) minmax(180px, 1fr) minmax(130px, 160px);
+  align-items: end;
+}
+
+.manual-line-delete {
+  min-height: 34px;
+  padding-inline: 12px;
 }
 
 .pick-item.is-loading-slip .location-row {
