@@ -487,7 +487,12 @@ async function route(request, response) {
   }
 
   if (orderMatch && request.method === "DELETE") {
-    requireGroup(request, ["buero", "verwaltung"]);
+    requireGroup(request, ["buero", "lager", "tablet", "verwaltung"]);
+    const existing = findOrder(orderMatch[1]);
+    if (!existing) return sendJson(response, 404, { ok: false, error: "Auftrag nicht gefunden" });
+    if (existing.exportedAt) {
+      return sendJson(response, 409, { ok: false, error: "Abgeschlossene Auftraege koennen nicht geloescht werden." });
+    }
     const deleted = deleteOrder(orderMatch[1]);
     if (!deleted) return sendJson(response, 404, { ok: false, error: "Auftrag nicht gefunden" });
     sendJson(response, 200, { ok: true });

@@ -11,11 +11,11 @@
     <title>Kommissionier-App</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260610-7">
+    <link rel="stylesheet" href="styles.css?v=20260612-6">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
     <script src="offline-store.js" defer></script>
-    <script src="app.js?v=20260612-5" defer></script>
+    <script src="app.js?v=20260612-7" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -75,7 +75,7 @@
         <label id="fileDrop" class="file-drop" for="pdfInput">
           <span id="fileDropTitle" class="file-drop-title">PDF importieren</span>
           <span class="file-drop-copy">Auftrag auswählen, Positionen prüfen und digital abhaken.</span>
-          <input id="pdfInput" type="file" accept="application/pdf">
+          <input id="pdfInput" type="file" accept=".pdf,application/pdf">
           <input id="imageInput" type="file" accept="image/*" capture="environment">
         </label>
 

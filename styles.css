@@ -28,16 +28,9 @@ body {
   font-size: 16px;
 }
 
-body.is-storage-mode .order-picker,
-body.is-storage-mode .order-meta,
 body.is-storage-mode .summary-box:first-child,
-body.is-storage-mode #pdfInput,
-body:not(.is-storage-mode) #imageInput {
+#imageInput {
   display: none !important;
-}
-
-body.is-storage-mode .toolbar {
-  grid-template-columns: minmax(240px, 1fr);
 }
 
 body.is-storage-mode .side-panel {

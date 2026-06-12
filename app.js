@@ -3120,8 +3120,16 @@ function renderReleaseButton() {
 function renderDeleteOrderButton() {
   if (!elements.deleteOrderButton) return;
   const hasSavedOrder = Boolean(state.id);
-  elements.deleteOrderButton.hidden = !hasSavedOrder;
-  elements.deleteOrderButton.disabled = !hasSavedOrder || !serverOnline;
+  const canDelete = ["buero", "lager", "tablet"].includes(currentUser.group);
+  const isStorage = (state.orderType || currentMode) === "storage";
+  elements.deleteOrderButton.textContent = isStorage ? "Einlager-Auftrag löschen" : "Auftrag löschen";
+  elements.deleteOrderButton.hidden = !hasSavedOrder || !canDelete;
+  elements.deleteOrderButton.disabled = !hasSavedOrder || !serverOnline || !canDelete || Boolean(state.exportedAt);
+  elements.deleteOrderButton.title = state.exportedAt
+    ? "Abgeschlossene Aufträge können nicht gelöscht werden"
+    : isStorage
+      ? "Gespeicherten Einlager-Auftrag löschen"
+      : "Gespeicherten Auftrag löschen";
 }
 
 function renderTopControls() {
@@ -3757,12 +3765,12 @@ function discardCurrentDraft() {
 
   if (!confirm("Importierten Entwurf verwerfen und Seite leeren?")) return;
   resetCurrentOrderView();
-  setServerStatus("Entwurf verworfen. Die Kommissionier-Seite wurde geleert.", "ok");
+  setServerStatus(`Entwurf verworfen. Die ${modeLabel(currentMode)}-Seite wurde geleert.`, "ok");
 }
 
 async function deleteCurrentOrder() {
   if (!serverOnline) {
-    setServerStatus("Server nicht verbunden. Auftrag kann nicht gelöscht werden.", "error");
+    setServerStatus(`Server nicht verbunden. ${modeLabel(state.orderType || currentMode)} kann nicht gelöscht werden.`, "error");
     return;
   }
 
@@ -3771,12 +3779,19 @@ async function deleteCurrentOrder() {
     return;
   }
 
+  if (state.exportedAt) {
+    setServerStatus("Abgeschlossene Aufträge können nicht gelöscht werden.", "error");
+    return;
+  }
+
+  const isStorage = (state.orderType || currentMode) === "storage";
+  const typeLabel = isStorage ? "Einlager-Auftrag" : "Auftrag";
   const label = orderNoticeLabel({
     id: state.id,
     orderNumber: state.orderNumber,
     customerName: state.customerName
   });
-  if (!confirm(`Auftrag "${label}" wirklich aus der Liste löschen?`)) return;
+  if (!confirm(`${typeLabel} "${label}" wirklich aus der Liste löschen?`)) return;
 
   window.clearTimeout(saveTimer);
   saveTimer = null;
@@ -3786,7 +3801,7 @@ async function deleteCurrentOrder() {
     knownOrderIds.delete(state.id);
     localStorage.setItem(KNOWN_ORDERS_KEY, JSON.stringify([...knownOrderIds]));
     resetCurrentOrderView();
-    setServerStatus("Auftrag gelöscht.", "ok");
+    setServerStatus(`${typeLabel} gelöscht.`, "ok");
     await loadOrderList();
   } catch (error) {
     setServerStatus(`Löschen fehlgeschlagen: ${error.message}`, "error");
