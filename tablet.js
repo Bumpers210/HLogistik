@@ -491,10 +491,12 @@ function renderLine(line) {
   const isManualStorageLine = isStorage && line.manual === true;
 
   const card = document.createElement("article");
+  const binWarningText = String(line.binWarning || "").trim();
   card.className =
     "pick-item" +
     (line.picked ? " is-done" : "") +
-    (line.picked && currentOrder.collapseDone ? " is-collapsed" : "");
+    (line.picked && currentOrder.collapseDone ? " is-collapsed" : "") +
+    (binWarningText ? " has-bin-warning" : "");
 
   const checkWrap = document.createElement("button");
   checkWrap.type = "button";
@@ -523,10 +525,16 @@ function renderLine(line) {
     line.product = value.trim();
     markDirty();
   }, { readOnly: !isManualStorageLine, className: "short-input" }));
+  const canEditBin = isStorage || Boolean(binWarningText);
   top.appendChild(makeInput(isStorage ? "Stellplatz" : "Lagerplatz", line.fromBin, (value) => {
     line.fromBin = value.toUpperCase();
+    if (shouldClearBinWarning(line, line.fromBin)) {
+      line.binWarning = "";
+      line.binWarningValue = "";
+      renderOrder();
+    }
     markDirty();
-  }, { readOnly: !isStorage, className: "short-input" }));
+  }, { readOnly: !canEditBin, className: "short-input", warning: binWarningText }));
   top.appendChild(makeInput(isStorage ? "Artikelbezeichnung" : "Produktbeschreibung", line.description, (value) => {
     line.description = value;
     markDirty();
@@ -693,11 +701,13 @@ function updateLinePickedState(line, card, button) {
 
 function makeInput(labelText, value, onChange, options = {}) {
   const label = document.createElement("label");
+  if (options.warning) label.className = "has-field-warning";
   label.appendChild(document.createTextNode(labelText));
   const input = document.createElement("input");
   input.type = "text";
   input.value = value || "";
-  input.className = options.className || "";
+  input.className = `${options.className || ""}${options.warning ? " is-warning" : ""}`.trim();
+  if (options.warning) input.title = options.warning;
   if (options.readOnly) {
     input.readOnly = true;
     input.setAttribute("readonly", "");
@@ -711,6 +721,12 @@ function makeInput(labelText, value, onChange, options = {}) {
   input.addEventListener("change", handleChange);
   input.addEventListener("keyup", handleChange);
   label.appendChild(input);
+  if (options.warning) {
+    const warning = document.createElement("span");
+    warning.className = "field-warning";
+    warning.textContent = options.warning;
+    label.appendChild(warning);
+  }
   return label;
 }
 
@@ -1030,6 +1046,40 @@ function storageLineCompletionErrors(line) {
   if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
   if (!readTabletQuantity(line.actualQty || line.targetQty)) errors.push("Menge fehlt");
   return errors;
+}
+
+function shouldClearBinWarning(line, nextBin) {
+  if (!String(line?.binWarning || "").trim()) return false;
+  const previous = normalizePickingBinText(line.binWarningValue || line.fromBin);
+  const next = normalizePickingBinText(nextBin);
+  return Boolean(next && next !== previous && isPlausiblePickingBin(next) && !suspiciousPickingBinWarning({ fromBin: next }));
+}
+
+function suspiciousPickingBinWarning(line) {
+  if (!line || line.lineType === "loading-slip") return "";
+  const bin = normalizePickingBinText(line.fromBin);
+  if (!bin) return "";
+  if (!isPlausiblePickingBin(bin)) return `Lagerplatz unklar: ${bin}.`;
+
+  const h1LetterInNumberSlot = bin.match(/^002-H1-SA[A-Z]([A-Z])[A-D]\d$/i);
+  if (h1LetterInNumberSlot) return `Lagerplatz unklar: ${bin}.`;
+
+  return "";
+}
+
+function isPlausiblePickingBin(value) {
+  const bin = normalizePickingBinText(value);
+  return /^(?:002|022)-H\d{1,2}-(?:S[A-Z0-9]{2,10}|R\d{1,3})$/i.test(bin);
+}
+
+function normalizePickingBinText(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "")
+    .replace(/[‐‑‒–—]/g, "-")
+    .replace(/^O/, "0")
+    .replace(/^QD/, "00");
 }
 
 function readTabletQuantity(value) {

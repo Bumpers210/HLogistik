@@ -431,7 +431,8 @@ function renderLine(line) {
   var isManualStorageLine = isStorage && line.manual === true;
 
   var card = document.createElement("article");
-  card.className = "pick-item" + (line.picked ? " is-done" : "") + (line.picked && currentOrder.collapseDone ? " is-collapsed" : "");
+  var binWarningText = String(line.binWarning || "").trim();
+  card.className = "pick-item" + (line.picked ? " is-done" : "") + (line.picked && currentOrder.collapseDone ? " is-collapsed" : "") + (binWarningText ? " has-bin-warning" : "");
 
   var checkWrap = document.createElement("button");
   checkWrap.type = "button";
@@ -458,10 +459,18 @@ function renderLine(line) {
     line.product = String(value || "").trim();
     markDirty();
   }, !isManualStorageLine, "short-input"));
-  top.appendChild(makeInput(isStorage ? "Stellplatz" : "Lagerplatz", line.fromBin, isStorage ? function (value) {
+  var canEditBin = isStorage || Boolean(binWarningText);
+  var binInput = makeInput(isStorage ? "Stellplatz" : "Lagerplatz", line.fromBin, canEditBin ? function (value) {
     line.fromBin = value.toUpperCase();
+    if (shouldClearBinWarning(line, line.fromBin)) {
+      line.binWarning = "";
+      line.binWarningValue = "";
+      renderOrder();
+    }
     markDirty();
-  } : null, !isStorage, "short-input"));
+  } : null, !canEditBin, "short-input");
+  if (binWarningText) decorateBinWarningLabel(binInput, binWarningText);
+  top.appendChild(binInput);
   top.appendChild(makeInput(isStorage ? "Artikelbezeichnung" : "Produktbeschreibung", line.description, function (value) {
     line.description = value;
     markDirty();
@@ -640,6 +649,20 @@ function makeInput(labelText, value, onChange, readOnly, className) {
   };
   label.appendChild(input);
   return label;
+}
+
+function decorateBinWarningLabel(label, message) {
+  if (!label) return;
+  label.className = "has-field-warning";
+  var input = label.querySelector("input");
+  if (input) {
+    input.className = (input.className ? input.className + " " : "") + "is-warning";
+    input.title = message;
+  }
+  var warning = document.createElement("span");
+  warning.className = "field-warning";
+  warning.appendChild(document.createTextNode(message));
+  label.appendChild(warning);
 }
 
 function renderTakeOverButton() {
@@ -975,6 +998,40 @@ function storageLineCompletionErrors(line) {
   if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
   if (!readTabletQuantity(line.actualQty || line.targetQty)) errors.push("Menge fehlt");
   return errors;
+}
+
+function shouldClearBinWarning(line, nextBin) {
+  if (!String(line && line.binWarning || "").trim()) return false;
+  var previous = normalizePickingBinText(line.binWarningValue || line.fromBin);
+  var next = normalizePickingBinText(nextBin);
+  return Boolean(next && next !== previous && isPlausiblePickingBin(next) && !suspiciousPickingBinWarning({ fromBin: next }));
+}
+
+function suspiciousPickingBinWarning(line) {
+  if (!line || line.lineType === "loading-slip") return "";
+  var bin = normalizePickingBinText(line.fromBin);
+  if (!bin) return "";
+  if (!isPlausiblePickingBin(bin)) return "Lagerplatz unklar: " + bin + ".";
+
+  var h1LetterInNumberSlot = bin.match(/^002-H1-SA[A-Z]([A-Z])[A-D]\d$/i);
+  if (h1LetterInNumberSlot) return "Lagerplatz unklar: " + bin + ".";
+
+  return "";
+}
+
+function isPlausiblePickingBin(value) {
+  var bin = normalizePickingBinText(value);
+  return /^(?:002|022)-H\d{1,2}-(?:S[A-Z0-9]{2,10}|R\d{1,3})$/i.test(bin);
+}
+
+function normalizePickingBinText(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "")
+    .replace(/[‐‑‒–—]/g, "-")
+    .replace(/^O/, "0")
+    .replace(/^QD/, "00");
 }
 
 function readTabletQuantity(value) {
