@@ -209,6 +209,7 @@ function bindEvents() {
       state[id] = elements[id].value;
       markOrderTouched();
       saveState();
+      renderDiscardButton();
       updateCounts();
     });
   });
@@ -2915,6 +2916,7 @@ function render() {
   renderModeControls();
   renderWarehouseHint();
   renderReleaseButton();
+  renderDiscardButton();
   renderTakeOverButton();
   renderDeleteOrderButton();
   syncFields();
@@ -3624,9 +3626,30 @@ function renderReleaseButton() {
   );
   elements.releaseOrderButton.hidden = !isDraft;
   elements.releaseOrderButton.disabled = !isDraft || !serverOnline || !currentUser.name;
+}
+
+function hasCurrentOrderData() {
+  return Boolean(
+    state.id ||
+    state.lines.length ||
+    state.rawText ||
+    state.orderNumber ||
+    state.customerName ||
+    state.euroPallets ||
+    state.storageSpaces ||
+    state.orderNote
+  );
+}
+
+function renderDiscardButton() {
   if (elements.discardDraftButton) {
-    elements.discardDraftButton.hidden = !isDraft;
-    elements.discardDraftButton.disabled = !isDraft;
+    const hasData = hasCurrentOrderData();
+    elements.discardDraftButton.textContent = state.awaitingRelease ? "Entwurf verwerfen" : "Maske verwerfen";
+    elements.discardDraftButton.hidden = !hasData;
+    elements.discardDraftButton.disabled = !hasData;
+    elements.discardDraftButton.title = state.id
+      ? "Aktuelle Maske leeren, gespeicherten Auftrag aber behalten"
+      : "Aktuelle Maske und lokalen Entwurf leeren";
   }
 }
 
@@ -4286,15 +4309,27 @@ async function releaseCurrentOrder() {
   await loadOrderList();
 }
 
-function discardCurrentDraft() {
-  if (!state.awaitingRelease && !state.lines.length) {
+async function discardCurrentDraft() {
+  if (!hasCurrentOrderData()) {
     resetCurrentOrderView();
     return;
   }
 
-  if (!confirm("Importierten Entwurf verwerfen und Seite leeren?")) return;
+  const isSavedOrder = Boolean(state.id);
+  const question = isSavedOrder
+    ? "Aktuelle Maske leeren? Der gespeicherte Auftrag bleibt in der Auftragsliste erhalten."
+    : "Aktuellen Entwurf verwerfen und Maske leeren?";
+  if (!confirm(question)) return;
+
+  await releaseCurrentOrderActivity();
   resetCurrentOrderView();
-  setServerStatus(`Entwurf verworfen. Die ${modeLabel(currentMode)}-Seite wurde geleert.`, "ok");
+  setServerStatus(
+    isSavedOrder
+      ? `Maske geleert. Der gespeicherte ${modeLabel(currentMode)}-Auftrag bleibt erhalten.`
+      : `Entwurf verworfen. Die ${modeLabel(currentMode)}-Seite wurde geleert.`,
+    "ok"
+  );
+  if (serverOnline) await loadOrderList();
 }
 
 async function deleteCurrentOrder() {
