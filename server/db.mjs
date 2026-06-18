@@ -102,6 +102,7 @@ export function initializeDatabase() {
       id TEXT PRIMARY KEY,
       auftragsnummer TEXT NOT NULL DEFAULT '',
       kundenname TEXT NOT NULL DEFAULT '',
+      kunden_gruppe TEXT NOT NULL DEFAULT '',
       auftragsdatum TEXT NOT NULL DEFAULT '',
       auftragszeit TEXT NOT NULL DEFAULT '',
       euro_paletten TEXT NOT NULL DEFAULT '',
@@ -132,6 +133,7 @@ export function initializeDatabase() {
 
   ensureArticleColumn("gebinde_art", "TEXT NOT NULL DEFAULT 'STK'");
   ensureOrderColumn("auftragszeit", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("kunden_gruppe", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("auftrags_lager", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("uebernommen_von", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("uebernommen_am", "TEXT NOT NULL DEFAULT ''");

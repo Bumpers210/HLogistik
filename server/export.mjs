@@ -38,15 +38,15 @@ async function copyPdfToExportFolder(sourcePath, copyDir, fileName) {
 
 function printableHtml(order, fileName) {
   const isStorage = (order.orderType || "picking") === "storage";
-  const picked = order.lines.filter((line) => line.picked).length;
-  const changed = order.lines.filter(isQuantityChanged).length;
+  const picked = order.lines.filter((line) => line.picked || isMissingStorageLine(line)).length;
+  const changed = order.lines.filter(isChangedLine).length;
   const normalLines = order.lines.filter((line) => line.lineType !== "loading-slip");
   const loadingSlipLines = order.lines.filter((line) => line.lineType === "loading-slip");
   const rows = normalLines
     .map(
       (line) => isStorage ? `
-    <tr${isQuantityChanged(line) ? ` class="changed-qty"` : ""}>
-      <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
+    <tr${lineRowClass(line)}>
+      <td>${escapeHtml(storageLineStatus(line))}</td>
       <td>${escapeHtml(line.warehouseOrder)}</td>
       <td>${escapeHtml(line.fromHandlingUnit)}</td>
       <td>${escapeHtml(line.fromBin)}</td>
@@ -55,13 +55,13 @@ function printableHtml(order, fileName) {
       <td class="num">${escapeHtml(line.actualQty)}</td>
       <td>${escapeHtml(line.unit)}</td>
       <td>${escapeHtml(line.description)}</td>
-      <td>${escapeHtml(line.positionNote)}</td>
+      <td>${escapeHtml(storageLineNote(line))}</td>
     </tr>` : `
-    <tr${isQuantityChanged(line) ? ` class="changed-qty"` : ""}>
+    <tr${lineRowClass(line)}>
       <td>${escapeHtml(line.picked ? "ja" : "nein")}</td>
       <td>${escapeHtml(line.warehouseOrder)}</td>
       <td>${escapeHtml(line.fromHandlingUnit)}</td>
-      <td>${escapeHtml(line.positionNote)}</td>
+      <td>${escapeHtml(combinedPositionNote(line))}</td>
       <td>${escapeHtml(line.fromBin)}</td>
       <td>${escapeHtml(line.product)}</td>
       <td class="num">${escapeHtml(line.targetQty)}</td>
@@ -79,7 +79,7 @@ function printableHtml(order, fileName) {
       <div><strong>Artikelnummer</strong><span>${escapeHtml(line.product)}</span></div>
       <div><strong>Produktbeschreibung</strong><span>${escapeHtml(line.description)}</span></div>
       <div><strong>Soll</strong><span>${escapeHtml(line.targetQty)} ${escapeHtml(line.unit)}</span></div>
-      <div class="loading-slip-note"><strong>Zusatzbemerkung</strong><span>${escapeHtml(line.positionNote || "-")}</span></div>
+      <div class="loading-slip-note"><strong>Zusatzbemerkung</strong><span>${escapeHtml(combinedPositionNote(line) || "-")}</span></div>
     </section>`).join("");
 
   return `<!doctype html>
@@ -90,30 +90,30 @@ function printableHtml(order, fileName) {
     <style>
       @page { size: A4 landscape; margin: 12mm; }
       * { box-sizing: border-box; }
-      body { margin: 0; color: #111; font-family: Arial, Helvetica, sans-serif; font-size: 10px; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      body { margin: 0; color: #111; font-family: Arial, Helvetica, sans-serif; font-size: 12px; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
       header { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #111; }
-      h1 { margin: 0 0 6px; font-size: 20px; }
+      h1 { margin: 0 0 6px; font-size: 24px; }
       p { margin: 0 0 4px; }
-      .meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 18px; margin-bottom: 10px; font-size: 11px; }
+      .meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 18px; margin-bottom: 10px; font-size: 12px; }
       .note { min-height: 28px; margin-bottom: 10px; padding: 6px; border: 1px solid #777; }
-      table { width: calc(100% - 50mm); border-collapse: collapse; table-layout: fixed; }
+      table { width: calc(100% - 20mm); border-collapse: collapse; table-layout: fixed; }
       th, td { padding: 4px 3px; border: 1px solid #555; vertical-align: top; overflow-wrap: anywhere; }
-      th { background: #e8eee9; text-align: left; font-size: 9px; }
-      td { font-size: 9px; }
+      th { background: #e8eee9; text-align: left; font-size: 11px; }
+      td { font-size: 11px; }
       .num { text-align: right; }
       .changed-qty td { background: #fff3bf; font-weight: 700; }
+      .missing-line td { background: #ffe2d6; color: #7b1f0f; font-weight: 700; }
       .changed-qty td:nth-child(8) { border: 2px solid #111; }
       .storage-table .changed-qty td:nth-child(7) { border: 2px solid #111; }
-      .storage-table { width: 100%; }
       .loading-slip { display: grid; grid-template-columns: 18mm 64mm 28mm 1fr 26mm; gap: 4px; margin-top: 10px; padding: 6px; border: 2px solid #111; break-inside: avoid; }
       .loading-slip > div { border: 1px solid #777; padding: 4px; min-height: 34px; }
-      .loading-slip strong { display: block; margin-bottom: 3px; color: #555; font-size: 8px; }
-      .loading-slip span { font-size: 11px; font-weight: 700; }
+      .loading-slip strong { display: block; margin-bottom: 3px; color: #555; font-size: 10px; }
+      .loading-slip span { font-size: 13px; font-weight: 700; }
       .loading-slip-barcode { padding: 2px !important; background: #fff; }
       .loading-slip-check { display: grid; place-items: center; font-weight: 700; }
       .loading-slip-note { grid-column: 2 / -1; }
       .code128 { display: block; width: 100%; height: 16mm; }
-      .code128 text { fill: #111; font: 700 7px Arial, Helvetica, sans-serif; letter-spacing: 0; }
+      .code128 text { fill: #111; font: 700 9px Arial, Helvetica, sans-serif; letter-spacing: 0; }
     </style>
   </head>
   <body>
@@ -144,25 +144,25 @@ function printableHtml(order, fileName) {
         <tr>
           <th style="width:5%;">OK</th>
           <th style="width:6%;">Pos.</th>
-          <th style="width:13%;">HU</th>
+          <th style="width:10%;">HU</th>
           <th style="width:12%;">Stellplatz</th>
           <th style="width:10%;">Material</th>
-          <th style="width:7%;">Soll</th>
+          <th style="width:5%;">Soll</th>
           <th style="width:7%;">Ist</th>
-          <th style="width:6%;">Einh.</th>
+          <th style="width:11%;">Einh.</th>
           <th style="width:24%;">Artikelbezeichnung</th>
           <th style="width:10%;">Bemerkung</th>
         </tr>` : `
         <tr>
           <th style="width:4%;">OK</th>
           <th style="width:8%;">Lagerauftrag</th>
-          <th style="width:11%;">Von-HU</th>
+          <th style="width:8%;">Von-HU</th>
           <th style="width:13%;">Bemerkung</th>
           <th style="width:9%;">Lagerplatz</th>
           <th style="width:7%;">Produkt</th>
-          <th style="width:5%;">Soll</th>
+          <th style="width:4%;">Soll</th>
           <th style="width:5%;">Ist</th>
-          <th style="width:4%;">Einh.</th>
+          <th style="width:8%;">Einh.</th>
           <th style="width:23%;">Beschreibung</th>
           <th style="width:11%;">Nach-Lagerplatz</th>
         </tr>`}
@@ -223,6 +223,60 @@ function code128Svg(value) {
 
 function isQuantityChanged(line) {
   return String(line?.actualQty || "").trim() !== String(line?.targetQty || "").trim();
+}
+
+function isMissingStorageLine(line) {
+  return line?.missing === true;
+}
+
+function isChangedLine(line) {
+  return isQuantityChanged(line) || isMissingStorageLine(line);
+}
+
+function lineRowClass(line) {
+  const classes = [];
+  if (isQuantityChanged(line)) classes.push("changed-qty");
+  if (isMissingStorageLine(line)) classes.push("missing-line");
+  return classes.length ? ` class="${classes.join(" ")}"` : "";
+}
+
+function storageLineStatus(line) {
+  if (isMissingStorageLine(line)) return "FEHLT";
+  return line?.picked ? "ja" : "nein";
+}
+
+function storageLineNote(line) {
+  if (!isMissingStorageLine(line)) return combinedPositionNote(line);
+  const parts = ["nicht geliefert"];
+  if (line?.missingBy) parts.push(`markiert von ${line.missingBy}`);
+  const note = combinedPositionNote(line);
+  if (note) parts.push(note);
+  return parts.join(" - ");
+}
+
+function combinedPositionNote(line) {
+  return combineUniqueNoteParts([line?.positionNote, ...autoPositionNoteValues(line)]);
+}
+
+function autoPositionNoteValues(line) {
+  const notes = line?.autoPositionNotes && typeof line.autoPositionNotes === "object" ? line.autoPositionNotes : {};
+  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function combineUniqueNoteParts(parts) {
+  const seen = new Set();
+  return parts
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .filter((part) => {
+      const key = part.toUpperCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join("; ");
 }
 
 function pdfFileBase(order) {

@@ -16,6 +16,8 @@ let dirty = false;
 let orderListTimer = null;
 let saveTimer = null;
 let changeRevision = 0;
+let listedOrdersById = new Map();
+let manualStorageCustomerEdited = false;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -48,7 +50,14 @@ function bindElements() {
     "orderSelect",
     "sortModeSelect",
     "refreshButton",
+    "manualStorageCustomerRow",
+    "manualStorageCustomerInput",
+    "manualStorageWarehouseRow",
+    "manualStorageWarehouseSelect",
+    "manualStorageStartButton",
     "takeOverButton",
+    "leaveOrderButton",
+    "discardOrderButton",
     "saveButton",
     "exportPdfButton",
     "collapseDoneInput",
@@ -70,9 +79,13 @@ function bindEvents() {
   elements.storageModeButton.addEventListener("click", () => setMode("storage"));
   elements.userNameInput.addEventListener("change", () => {
     saveUser();
+    renderManualStorageStartButton();
     renderTakeOverButton();
   });
-  elements.userNameInput.addEventListener("keyup", renderTakeOverButton);
+  elements.userNameInput.addEventListener("keyup", () => {
+    renderManualStorageStartButton();
+    renderTakeOverButton();
+  });
   elements.orderSelect.addEventListener("change", () => {
     const nextOrderId = elements.orderSelect.value;
     if (currentOrderLocksSwitch(nextOrderId)) {
@@ -90,7 +103,24 @@ function bindEvents() {
     renderOrder();
   });
   elements.refreshButton.addEventListener("click", loadOrderList);
+  if (elements.manualStorageCustomerInput) {
+    elements.manualStorageCustomerInput.addEventListener("input", () => {
+      manualStorageCustomerEdited = true;
+      renderManualStorageStartButton();
+    });
+    elements.manualStorageCustomerInput.addEventListener("change", () => {
+      manualStorageCustomerEdited = true;
+      renderManualStorageStartButton();
+    });
+    elements.manualStorageCustomerInput.addEventListener("keyup", () => {
+      manualStorageCustomerEdited = true;
+      renderManualStorageStartButton();
+    });
+  }
+  if (elements.manualStorageStartButton) elements.manualStorageStartButton.addEventListener("click", startManualStorageOrder);
   elements.takeOverButton.addEventListener("click", takeOverCurrentOrder);
+  if (elements.leaveOrderButton) elements.leaveOrderButton.addEventListener("click", leaveCurrentOrder);
+  if (elements.discardOrderButton) elements.discardOrderButton.addEventListener("click", discardCurrentManualStorageOrder);
   elements.saveButton.addEventListener("click", () => saveOrder(false));
   elements.exportPdfButton.addEventListener("click", exportPdf);
   elements.addStorageLineButton.addEventListener("click", addManualStorageLine);
@@ -134,29 +164,93 @@ async function flushSyncQueue() {
     const pending = await OfflineStore.getPending();
     if (!pending.length) return;
 
-    const latestByUrl = new Map();
+    const latestByKey = new Map();
     pending.forEach((item) => {
-      const existing = latestByUrl.get(item.url);
-      if (!existing || item.timestamp > existing.timestamp) latestByUrl.set(item.url, item);
+      const key = syncQueueEntryKey(item);
+      const existing = latestByKey.get(key);
+      if (!existing || item.timestamp > existing.timestamp) latestByKey.set(key, item);
     });
 
     let synced = 0;
-    for (const [, item] of latestByUrl) {
+    for (const [, item] of latestByKey) {
       try {
-        await apiJson(item.url, { method: item.method, body: item.body });
+        const result = await apiJson(item.url, { method: item.method, body: item.body });
+        await handleSyncedQueueItem(item, result);
+        const itemKey = syncQueueEntryKey(item);
+        await Promise.all(pending
+          .filter((entry) => syncQueueEntryKey(entry) === itemKey)
+          .map((entry) => OfflineStore.dequeue(entry.queueId)));
         synced++;
       } catch { /* weiter */ }
     }
-    await OfflineStore.clearQueue();
     if (synced > 0) setMessage(`${synced} Offline-Änderung${synced !== 1 ? "en" : ""} synchronisiert.`, false);
   } catch { /* non-critical */ }
+}
+
+function syncQueueEntryKey(item) {
+  return String(item?.dedupeKey || item?.url || "");
+}
+
+async function handleSyncedQueueItem(item, result) {
+  if (item?.method !== "POST" || item.url !== "/api/orders" || !window.OfflineStore) return;
+  let payload = {};
+  try {
+    payload = item.body ? JSON.parse(item.body) : {};
+  } catch {
+    return;
+  }
+  const localOrder = payload.order || {};
+  if (!localOrder.id) return;
+  const syncedOrder = applyOrderSummaryToOrder(localOrder, result?.order);
+  await saveOrderToOfflineStore(syncedOrder);
+  if (currentOrder && String(currentOrder.id) === String(localOrder.id)) {
+    applyOrderSummaryToOrder(currentOrder, result?.order);
+    persistCurrentOrderCache();
+    renderOrder();
+  }
+}
+
+function applyOrderSummaryToOrder(order, summary) {
+  if (!order || !summary) return order;
+  [
+    "id",
+    "orderNumber",
+    "customerName",
+    "customerGroupKey",
+    "orderDate",
+    "orderTime",
+    "createdBy",
+    "lastEditedBy",
+    "activeUser",
+    "activeUserAt",
+    "acceptedBy",
+    "acceptedAt",
+    "completedBy",
+    "completedAt",
+    "orderWarehouse",
+    "exportedAt",
+    "orderType",
+    "createdAt",
+    "updatedAt",
+  ].forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(summary, field)) order[field] = summary[field];
+  });
+  return order;
 }
 
 async function loadOrderListFromCache() {
   if (!window.OfflineStore) return false;
   try {
-    const cached = (await OfflineStore.loadOrderSummaries())
-      .filter((o) => (o.orderType || "picking") === currentMode);
+    const cachedOrders = OfflineStore.loadOrders
+      ? await OfflineStore.loadOrders()
+      : await OfflineStore.loadOrderSummaries();
+    const cached = cachedOrders
+      .filter((o) => (
+        (o.orderType || "picking") === currentMode
+        && isOpenOrder(o)
+        && isAcceptedByCurrentUser(o)
+      ))
+      .map(normalizeOrderListEntry);
     if (!cached.length) return false;
     renderCachedOrderList(cached);
     return true;
@@ -168,13 +262,158 @@ async function loadOrderListFromCache() {
 function renderCachedOrderList(orders) {
   clearSelect(elements.orderSelect);
   addOption(elements.orderSelect, "", `${modeLabel()} waehlen (Offline-Cache)`);
+  rememberListedOrders(orders);
   orders.forEach((order) => {
     addOption(
       elements.orderSelect,
       order.id,
-      `${order.orderNumber || order.id} - ${order.customerName || ""}${order.orderWarehouse ? ` - ${order.orderWarehouse}` : ""} (${order.picked}/${order.total}) [Cache]`
+      `${formatOrderOptionLabel(order)} [Cache]`
     );
   });
+  elements.orderSelect.value = currentOrder?.id || "";
+}
+
+function ensureCurrentOrderInSelect() {
+  if (!currentOrder?.id || !elements.orderSelect) return;
+  const summary = orderSummaryFromOrder(currentOrder);
+  listedOrdersById.set(String(summary.id), summary);
+  let option = null;
+  for (let index = 0; index < elements.orderSelect.options.length; index++) {
+    if (String(elements.orderSelect.options[index].value) === String(summary.id)) {
+      option = elements.orderSelect.options[index];
+      break;
+    }
+  }
+  const label = formatOrderOptionLabel(summary);
+  if (option) option.text = label;
+  else addOption(elements.orderSelect, summary.id, label);
+  elements.orderSelect.value = summary.id;
+}
+
+function normalizeOrderListEntry(order) {
+  return Array.isArray(order?.lines) ? orderSummaryFromOrder(order) : order;
+}
+
+function rememberListedOrders(orders) {
+  listedOrdersById = new Map((orders || [])
+    .filter((order) => order?.id)
+    .map((order) => [String(order.id), order]));
+}
+
+async function cacheAcceptedOpenOrders(orders) {
+  if (!window.OfflineStore || !serverOnline) return;
+  await Promise.all((orders || [])
+    .filter((order) => isOpenOrder(order) && isAcceptedByCurrentUser(order))
+    .map(async (order) => {
+      try {
+        await saveOrderToOfflineStore(await apiJson(`/api/orders/${encodeURIComponent(order.id)}`));
+      } catch {
+        // Best-effort cache refresh.
+      }
+    }));
+}
+
+async function cacheOrderDetailsFromAccept(result) {
+  if (!window.OfflineStore || !result) return;
+  try {
+    const details = Array.isArray(result.acceptedOrderDetails) ? result.acceptedOrderDetails : [];
+    const orders = details.length ? details : (result.order ? [result.order] : []);
+    for (const order of orders) {
+      await saveOrderToOfflineStore(order);
+    }
+
+    if (Array.isArray(result.acceptedOrders) && result.acceptedOrders.length) {
+      const existing = await OfflineStore.loadOrderSummaries().catch(() => []);
+      const byId = new Map(existing.filter((order) => order?.id).map((order) => [String(order.id), order]));
+      result.acceptedOrders.forEach((order) => {
+        if (order?.id) byId.set(String(order.id), order);
+      });
+      await OfflineStore.saveOrderSummaries([...byId.values()]).catch(() => {});
+    }
+  } catch {
+    // Best-effort cache update.
+  }
+}
+
+async function saveOrderToOfflineStore(order) {
+  if (!window.OfflineStore || !order?.id) return;
+  await OfflineStore.saveOrder(order);
+  await updateCachedOrderSummary(order);
+}
+
+async function updateCachedOrderSummary(order) {
+  if (!window.OfflineStore || !order?.id) return;
+  const existing = await OfflineStore.loadOrderSummaries().catch(() => []);
+  const byId = new Map(existing.filter((entry) => entry?.id).map((entry) => [String(entry.id), entry]));
+  byId.set(String(order.id), orderSummaryFromOrder(order));
+  await OfflineStore.saveOrderSummaries([...byId.values()]);
+}
+
+function orderSummaryFromOrder(order) {
+  const lines = Array.isArray(order?.lines) ? order.lines : [];
+  return {
+    id: order.id,
+    orderNumber: order.orderNumber || (order.manualStorageDraft ? "" : order.id),
+    customerName: order.customerName || "",
+    customerGroupKey: order.customerGroupKey || "",
+    orderDate: order.orderDate || "",
+    orderTime: order.orderTime || "",
+    total: lines.length,
+    picked: lines.filter((line) => line?.picked).length,
+    createdBy: order.createdBy || "",
+    lastEditedBy: order.lastEditedBy || "",
+    activeUser: order.activeUser || "",
+    activeUserAt: order.activeUserAt || "",
+    acceptedBy: order.acceptedBy || "",
+    acceptedAt: order.acceptedAt || "",
+    completedBy: order.completedBy || "",
+    completedAt: order.completedAt || "",
+    orderWarehouse: order.orderWarehouse || "",
+    exportedAt: order.exportedAt || "",
+    orderType: order.orderType || "picking",
+    createdAt: order.createdAt || "",
+    updatedAt: order.updatedAt || "",
+    manualStorageDraft: order.manualStorageDraft === true,
+    localDraft: order.localDraft === true,
+  };
+}
+
+function isAcceptedByCurrentUser(order) {
+  return sameUserName(order?.acceptedBy, currentUserName());
+}
+
+function normalizeAutoPositionNotes(notes) {
+  const source = notes && typeof notes === "object" ? notes : {};
+  return {
+    destination: String(source.destination || "").trim(),
+    quantity: String(source.quantity || "").trim(),
+    storagePallet: String(source.storagePallet || "").trim(),
+    loadingSlip: String(source.loadingSlip || "").trim(),
+  };
+}
+
+function autoPositionNoteText(line) {
+  const notes = normalizeAutoPositionNotes(line?.autoPositionNotes);
+  const seen = new Set();
+  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .filter((value) => {
+      const key = value.toUpperCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join("; ");
+}
+
+function decorateAutoPositionNoteLabel(label, line) {
+  const text = autoPositionNoteText(line);
+  if (!label || !text) return;
+  const note = document.createElement("span");
+  note.className = "auto-position-note";
+  note.textContent = text;
+  label.appendChild(note);
 }
 
 function loadUser() {
@@ -237,6 +476,18 @@ function isStorageOrder() {
   return (currentOrder && (currentOrder.orderType || "picking") === "storage") || (!currentOrder && currentMode === "storage");
 }
 
+function isManualStorageOrder(order) {
+  if (!order || (order.orderType || "picking") !== "storage") return false;
+  if (order.manualStorageDraft === true || order.localDraft === true || isLocalStorageOrderId(order.id)) return true;
+  const lines = (Array.isArray(order.lines) ? order.lines : [])
+    .filter((line) => line && line.lineType !== "loading-slip" && !isEmptyManualStorageLine(line));
+  return Boolean(lines.length && lines.every((line) => line.manual === true));
+}
+
+function isLocalStorageOrderId(id) {
+  return String(id || "").startsWith("local-storage-");
+}
+
 function updateModeUi() {
   const isStorage = isStorageOrder();
   if (elements.tabletTitle) elements.tabletTitle.textContent = isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
@@ -255,6 +506,7 @@ function updateModeUi() {
       : "<span>Artikelnummer</span><span>Lagerplatz</span><span>Produktbeschreibung</span><span>Soll</span><span>Ist</span><span>Einheit</span>";
   }
   if (elements.exportPdfButton) elements.exportPdfButton.textContent = isStorage ? "Einlagerung abschliessen" : "PDF exportieren";
+  renderManualStorageStartButton();
 }
 
 async function loadOrderList(options = {}) {
@@ -265,7 +517,19 @@ async function loadOrderList(options = {}) {
   }
   try {
     const orders = await apiJson("/api/orders");
-    const selected = elements.orderSelect.value;
+    const currentMissingOnServer = Boolean(currentOrder?.id && !orders.some((order) => order.id === currentOrder.id));
+    let statusMessage = "";
+    if (currentMissingOnServer && !dirty) {
+      clearCurrentOrderCache();
+      currentOrder = null;
+      dirty = false;
+      elements.collapseDoneInput.checked = true;
+      renderOrder();
+      statusMessage = "Der geoeffnete Auftrag ist auf dem Server nicht mehr vorhanden. Tablet wurde freigegeben.";
+    } else if (currentMissingOnServer) {
+      statusMessage = "Der geoeffnete Auftrag ist auf dem Server nicht mehr vorhanden. Nutze Auftrag verlassen, um das Tablet freizugeben.";
+    }
+    const selected = currentMissingOnServer ? "" : elements.orderSelect.value;
     clearSelect(elements.orderSelect);
     addOption(elements.orderSelect, "", currentMode === "storage" ? "Einlagerung waehlen" : "Auftrag waehlen");
     orders.forEach((order) => {
@@ -277,9 +541,12 @@ async function loadOrderList(options = {}) {
         formatOrderOptionLabel(order)
       );
     });
+    rememberListedOrders(orders);
     elements.orderSelect.value = selected;
-    if (!silent) setMessage(currentOrder ? "Auftragsliste aktualisiert." : `Bitte ${modeLabel()} waehlen.`, false);
-    try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders.filter((o) => (o.orderType || "picking") === currentMode)); } catch { /* non-critical */ }
+    if (statusMessage) setMessage(statusMessage, currentMissingOnServer && dirty);
+    else if (!silent) setMessage(currentOrder ? "Auftragsliste aktualisiert." : `Bitte ${modeLabel()} waehlen.`, false);
+    try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders); } catch { /* non-critical */ }
+    cacheAcceptedOpenOrders(orders);
   } catch (error) {
     if (!silent) setMessage(`Auftragsliste konnte nicht geladen werden: ${error.message}`, true);
   }
@@ -294,6 +561,13 @@ async function loadOrder(id) {
   if (currentOrderLocksSwitch(id)) {
     keepCurrentOrderSelected();
     return;
+  }
+  if (dirty && currentOrderAcceptedByCurrentUser() && isAcceptedByCurrentUser(listedOrdersById.get(String(id)))) {
+    await saveOrder(true);
+    if (dirty) {
+      elements.orderSelect.value = currentOrder ? currentOrder.id : "";
+      return;
+    }
   }
   if (dirty && !window.confirm("Es gibt ungespeicherte Änderungen. Auftrag trotzdem wechseln?")) {
     elements.orderSelect.value = currentOrder ? currentOrder.id : "";
@@ -347,7 +621,7 @@ async function loadOrder(id) {
       false
     );
     persistCurrentOrderCache();
-    try { if (window.OfflineStore) await OfflineStore.saveOrder(order); } catch { /* non-critical */ }
+    try { await saveOrderToOfflineStore(order); } catch { /* non-critical */ }
   } catch (error) {
     setMessage(`Auftrag konnte nicht geladen werden: ${error.message}`, true);
   }
@@ -374,8 +648,30 @@ function renderOrder() {
 function renderStorageLineActions() {
   if (!elements.storageLineActions || !elements.addStorageLineButton) return;
   const isStorage = isStorageOrder();
+  renderManualStorageStartButton();
   elements.storageLineActions.hidden = !isStorage || !currentOrder;
-  elements.addStorageLineButton.disabled = !isStorage || !currentOrder;
+  elements.addStorageLineButton.disabled = !isStorage || !currentOrder || !canEditCurrentOrder();
+}
+
+function renderManualStorageStartButton() {
+  if (!elements.manualStorageStartButton) return;
+  const visible = currentMode === "storage" && !currentOrder;
+  if (elements.manualStorageCustomerRow) elements.manualStorageCustomerRow.hidden = !visible;
+  if (elements.manualStorageWarehouseRow) elements.manualStorageWarehouseRow.hidden = !visible;
+  clearAutofilledManualStorageCustomer(visible);
+  elements.manualStorageStartButton.hidden = !visible;
+  const invalidCustomer = visible && !manualStorageCustomerIsValid();
+  elements.manualStorageStartButton.disabled = !visible || !currentUserName() || invalidCustomer || (!serverOnline && !window.OfflineStore);
+  elements.manualStorageStartButton.title = !currentUserName()
+    ? "Bitte erst Mitarbeiter eintragen."
+    : (invalidCustomer
+      ? "Bitte Kunde eintragen."
+      : (!serverOnline && !window.OfflineStore ? "Offline-Cache ist nicht verfuegbar." : ""));
+}
+
+function clearAutofilledManualStorageCustomer(visible) {
+  if (!visible || manualStorageCustomerEdited || !elements.manualStorageCustomerInput) return;
+  if (manualStorageCustomerName().toUpperCase() === "SSI") elements.manualStorageCustomerInput.value = "";
 }
 
 function addManualStorageLine() {
@@ -384,15 +680,27 @@ function addManualStorageLine() {
     setMessage("Bitte erst Mitarbeiter eintragen.", true);
     return;
   }
+  if (!canEditCurrentOrder()) {
+    setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
   currentOrder.lines = Array.isArray(currentOrder.lines) ? currentOrder.lines : [];
-  currentOrder.lines.push({
+  currentOrder.lines.push(createManualStorageLine(currentOrder.lines));
+  markDirty();
+  renderOrder();
+  saveOrder(false);
+}
+
+function createManualStorageLine(lines) {
+  return {
     id: createLineId(),
     orderType: "storage",
     manual: true,
-    warehouseOrder: nextManualStoragePosition(currentOrder.lines),
+    warehouseOrder: nextManualStoragePosition(lines),
     fromHandlingUnit: "",
     fromHandlingUnitEditable: true,
     positionNote: "",
+    autoPositionNotes: {},
     fromBin: "",
     product: "",
     description: "",
@@ -400,10 +708,183 @@ function addManualStorageLine() {
     actualQty: "",
     unit: "Stk",
     picked: false
-  });
-  markDirty();
+  };
+}
+
+async function startManualStorageOrder() {
+  if (!currentUserName()) {
+    setMessage("Bitte erst Mitarbeiter eintragen.", true);
+    renderManualStorageStartButton();
+    return;
+  }
+  if (!manualStorageCustomerIsValid()) {
+    setMessage("Bitte Kunde eintragen.", true);
+    renderManualStorageStartButton();
+    return;
+  }
+  if (currentOrder) {
+    setMessage("Bitte den geoeffneten Auftrag erst abschliessen oder verlassen.", true);
+    return;
+  }
+  currentMode = "storage";
+  try {
+    localStorage.setItem(MODE_KEY, currentMode);
+  } catch {
+    // Modus bleibt fuer diese Sitzung aktiv.
+  }
+  currentOrder = createManualStorageOrder();
+  dirty = true;
+  changeRevision += 1;
+  ensureCurrentOrderInSelect();
   renderOrder();
-  saveOrder(false);
+  persistCurrentOrderCache();
+  if (serverOnline) {
+    await createManualStorageOrderOnServer();
+    return;
+  }
+  await persistManualStorageOrderOffline("Offline: Manuelle Einlagerung lokal gestartet. Sie wird bei Verbindung angelegt.");
+}
+
+function createManualStorageOrder() {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const user = currentUserName();
+  const customerName = manualStorageCustomerName();
+  const warehouse = manualStorageWarehouse();
+  const lines = [];
+  lines.push(createManualStorageLine(lines));
+  return {
+    id: createLocalStorageOrderId(),
+    orderNumber: "",
+    customerName,
+    customerGroupKey: manualStorageCustomerGroupKey(customerName),
+    orderDate: formatLocalDate(now),
+    orderTime: formatLocalTime(now),
+    euroPallets: "",
+    storageSpaces: "",
+    orderNote: "",
+    rawText: "",
+    collapseDone: true,
+    orderType: "storage",
+    orderWarehouse: warehouse,
+    manualStorageDraft: true,
+    localDraft: true,
+    exportedAt: "",
+    exportedPdfFile: "",
+    exportedPdfPath: "",
+    createdBy: user,
+    lastEditedBy: user,
+    activeUser: user,
+    activeUserAt: nowIso,
+    acceptedBy: user,
+    acceptedAt: nowIso,
+    completedBy: "",
+    completedAt: "",
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    lines,
+  };
+}
+
+function manualStorageCustomerName() {
+  return String(elements.manualStorageCustomerInput?.value || "").trim();
+}
+
+function manualStorageCustomerIsValid() {
+  const customerName = manualStorageCustomerName();
+  return Boolean(customerName && (manualStorageCustomerEdited || customerName.toUpperCase() !== "SSI"));
+}
+
+function manualStorageCustomerGroupKey(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ");
+}
+
+function manualStorageWarehouse() {
+  const value = String(elements.manualStorageWarehouseSelect?.value || "SSI").trim().toUpperCase();
+  return value === "SI" ? "SI" : "SSI";
+}
+
+function createLocalStorageOrderId() {
+  if (window.crypto?.randomUUID) return `local-storage-${window.crypto.randomUUID()}`;
+  return `local-storage-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function formatLocalDate(date) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function formatLocalTime(date) {
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+async function createManualStorageOrderOnServer() {
+  if (!currentOrder) return;
+  try {
+    const result = await apiJson("/api/orders", {
+      method: "POST",
+      body: JSON.stringify({ order: currentOrder, userName: currentUserName() }),
+    });
+    applyOrderSummaryToOrder(currentOrder, result?.order);
+    currentOrder.localDraft = false;
+    dirty = false;
+    clearCurrentOrderCache();
+    ensureCurrentOrderInSelect();
+    renderOrder();
+    await saveOrderToOfflineStore(currentOrder);
+    loadOrderList({ silent: true });
+    setMessage("Manuelle Einlagerung gestartet.", false);
+  } catch (error) {
+    persistCurrentOrderCache();
+    if (!window.OfflineStore) {
+      setMessage(`Manuelle Einlagerung konnte nicht angelegt werden: ${error.message}`, true);
+      return;
+    }
+    await persistManualStorageOrderOffline("Server nicht erreichbar: Manuelle Einlagerung lokal gestartet und wird synchronisiert.");
+  }
+}
+
+async function persistManualStorageOrderOffline(message) {
+  if (!window.OfflineStore || !currentOrder) {
+    setMessage("Offline-Cache ist nicht verfuegbar.", true);
+    return;
+  }
+  try {
+    await queueManualStorageOrderCreate(currentOrder);
+    await saveOrderToOfflineStore(currentOrder);
+    dirty = false;
+    clearCurrentOrderCache();
+    ensureCurrentOrderInSelect();
+    renderOrder();
+    setMessage(message, false);
+  } catch {
+    dirty = true;
+    persistCurrentOrderCache();
+    setMessage("Offline: Manuelle Einlagerung konnte nicht lokal gespeichert werden.", true);
+  }
+}
+
+function queueManualStorageOrderCreate(order) {
+  return OfflineStore.enqueue(
+    "POST",
+    "/api/orders",
+    JSON.stringify({ order, userName: currentUserName() }),
+    manualStorageCreateDedupeKey(order.id)
+  );
+}
+
+function manualStorageCreateDedupeKey(orderId) {
+  return `POST:/api/orders:${String(orderId || "")}`;
+}
+
+function storageOrderPutDedupeKey(orderId) {
+  return `PUT:/api/orders/${encodeURIComponent(orderId)}`;
 }
 
 function nextManualStoragePosition(lines) {
@@ -446,11 +927,23 @@ function sameUserName(left, right) {
   return String(left || "").trim().toLowerCase() === String(right || "").trim().toLowerCase();
 }
 
+function currentOrderAcceptedByCurrentUser() {
+  if (!currentOrder?.id || currentOrder.exportedAt) return false;
+  const acceptedBy = String(currentOrder.acceptedBy || "").trim();
+  return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+}
+
+function canEditCurrentOrder() {
+  return currentOrderAcceptedByCurrentUser();
+}
+
 function currentOrderLocksSwitch(nextOrderId = "") {
   if (!currentOrder?.id || currentOrder.exportedAt) return false;
   if (String(nextOrderId || "") === String(currentOrder.id)) return false;
   const acceptedBy = String(currentOrder.acceptedBy || "").trim();
-  return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+  if (!acceptedBy || !sameUserName(acceptedBy, currentUserName())) return false;
+  const target = listedOrdersById.get(String(nextOrderId || ""));
+  return !target || !isAcceptedByCurrentUser(target);
 }
 
 function currentOrderLocksModeSwitch(nextMode) {
@@ -475,7 +968,8 @@ function lockedOrderLabel() {
 function formatOrderOptionLabel(order) {
   const status = orderStatusText(order);
   const warehouse = order.orderWarehouse ? ` - ${order.orderWarehouse}` : "";
-  return `${order.orderNumber || order.id} - ${order.customerName || ""}${warehouse} [${status}] (${order.picked}/${order.total})`;
+  const number = order.orderNumber || (order.manualStorageDraft ? "Manuelle Einlagerung" : order.id);
+  return `${number} - ${order.customerName || ""}${warehouse} [${status}] (${order.picked}/${order.total})`;
 }
 
 function orderStatusText(order) {
@@ -489,6 +983,8 @@ function renderLine(line) {
   if (line.lineType === "loading-slip") return renderLoadingSlipLine(line);
   const isStorage = isStorageOrder();
   const isManualStorageLine = isStorage && line.manual === true;
+  const canEditOrder = canEditCurrentOrder();
+  const missing = isMissingStorageLine(line);
 
   const card = document.createElement("article");
   const binWarningText = String(line.binWarning || "").trim();
@@ -496,11 +992,13 @@ function renderLine(line) {
     "pick-item" +
     (line.picked ? " is-done" : "") +
     (line.picked && currentOrder.collapseDone ? " is-collapsed" : "") +
-    (binWarningText ? " has-bin-warning" : "");
+    (binWarningText ? " has-bin-warning" : "") +
+    (missing ? " is-missing" : "");
 
   const checkWrap = document.createElement("button");
   checkWrap.type = "button";
   checkWrap.className = `check-target${line.picked ? " is-picked" : ""}`;
+  checkWrap.disabled = !canEditOrder || missing;
   checkWrap.setAttribute("aria-pressed", line.picked ? "true" : "false");
   checkWrap.setAttribute("aria-label", line.picked ? "Position wieder öffnen" : "Position abhaken");
   const checkmark = document.createElement("span");
@@ -522,29 +1020,29 @@ function renderLine(line) {
   const top = document.createElement("div");
   top.className = "line-top";
   top.appendChild(makeInput(isStorage ? "Material" : "Produkt", line.product, (value) => {
-    line.product = value.trim();
+    line.product = normalizeDigits(value);
     markDirty();
-  }, { readOnly: !isManualStorageLine, className: "short-input" }));
-  const canEditBin = isStorage || Boolean(binWarningText);
+  }, { readOnly: !canEditOrder || missing || !isManualStorageLine, className: "short-input", ...numericInputOptions() }));
+  const canEditBin = canEditOrder && !missing && (isStorage || Boolean(binWarningText));
   top.appendChild(makeInput(isStorage ? "Stellplatz" : "Lagerplatz", line.fromBin, (value) => {
-    line.fromBin = value.toUpperCase();
+    line.fromBin = normalizeUppercaseText(value);
     if (shouldClearBinWarning(line, line.fromBin)) {
       line.binWarning = "";
       line.binWarningValue = "";
       renderOrder();
     }
     markDirty();
-  }, { readOnly: !canEditBin, className: "short-input", warning: binWarningText }));
+  }, { readOnly: !canEditBin, className: "short-input", warning: binWarningText, ...uppercaseInputOptions() }));
   top.appendChild(makeInput(isStorage ? "Artikelbezeichnung" : "Produktbeschreibung", line.description, (value) => {
     line.description = value;
     markDirty();
-  }, { readOnly: !isManualStorageLine }));
+  }, { readOnly: !canEditOrder || missing || !isManualStorageLine }));
   top.appendChild(makeInput("Soll", line.targetQty, (value) => {
     line.targetQty = value;
     if (!line.actualQty) line.actualQty = value;
     markDirty();
     updateCounts();
-  }, { readOnly: !isManualStorageLine, className: "short-input" }));
+  }, { readOnly: !canEditOrder || missing || !isManualStorageLine, className: "short-input" }));
   top.appendChild(
     makeInput(
       "Ist",
@@ -554,13 +1052,13 @@ function renderLine(line) {
         markDirty();
         updateCounts();
       },
-      { readOnly: isStorage && !isManualStorageLine, className: "short-input" }
+      { readOnly: !canEditOrder || missing || (isStorage && !isManualStorageLine), className: "short-input" }
     )
   );
   top.appendChild(makeInput("Einheit", line.unit, (value) => {
     line.unit = value || "Stk";
     markDirty();
-  }, { readOnly: !isManualStorageLine, className: "short-input" }));
+  }, { readOnly: !canEditOrder || missing || !isManualStorageLine, className: "short-input" }));
   body.appendChild(top);
 
   const locationRow = document.createElement("div");
@@ -570,20 +1068,21 @@ function renderLine(line) {
       isStorage ? "HU" : "Von HU",
       line.fromHandlingUnit,
       (value) => {
-        line.fromHandlingUnit = isStorage ? value.toUpperCase().replace(/[^A-Z0-9,-]/g, "") : value;
+        line.fromHandlingUnit = normalizeDigits(value);
         line.fromHandlingUnitEditable = canEditHandlingUnit;
         markDirty();
       },
-      { readOnly: !canEditHandlingUnit, digitsOnly: !isStorage }
+      { readOnly: !canEditOrder || missing || !canEditHandlingUnit, ...numericInputOptions() }
     )
   );
-  locationRow.appendChild(
-    makeInput("Zusatzbemerkung", line.positionNote, (value) => {
-      line.positionNote = value;
-      markDirty();
-    }, { readOnly: isStorage && !isManualStorageLine })
-  );
-  if (isManualStorageLine) locationRow.appendChild(makeManualStorageDeleteButton(line));
+  const noteInput = makeInput("Zusatzbemerkung", line.positionNote, (value) => {
+    line.positionNote = value;
+    markDirty();
+  }, { readOnly: !canEditOrder || missing || (isStorage && !isManualStorageLine) });
+  decorateAutoPositionNoteLabel(noteInput, line);
+  locationRow.appendChild(noteInput);
+  if (isStorage && !isEmptyManualStorageLine(line)) locationRow.appendChild(makeStorageMissingButton(line));
+  if (isManualStorageLine && canEditOrder && !missing) locationRow.appendChild(makeManualStorageDeleteButton(line));
   body.appendChild(locationRow);
 
   card.appendChild(body);
@@ -591,6 +1090,7 @@ function renderLine(line) {
 }
 
 function renderLoadingSlipLine(line) {
+  const canEditOrder = canEditCurrentOrder();
   const card = document.createElement("article");
   card.className =
     "pick-item is-loading-slip" +
@@ -600,6 +1100,7 @@ function renderLoadingSlipLine(line) {
   const checkWrap = document.createElement("button");
   checkWrap.type = "button";
   checkWrap.className = `check-target${line.picked ? " is-picked" : ""}`;
+  checkWrap.disabled = !canEditOrder;
   checkWrap.setAttribute("aria-pressed", line.picked ? "true" : "false");
   checkWrap.setAttribute("aria-label", line.picked ? "Position wieder oeffnen" : "Position abhaken");
   const checkmark = document.createElement("span");
@@ -628,12 +1129,12 @@ function renderLoadingSlipLine(line) {
 
   const noteRow = document.createElement("div");
   noteRow.className = "location-row loading-slip-note-row";
-  noteRow.appendChild(
-    makeInput("Zusatzbemerkung", line.positionNote, (value) => {
-      line.positionNote = value;
-      markDirty();
-    })
-  );
+  const noteInput = makeInput("Zusatzbemerkung", line.positionNote, (value) => {
+    line.positionNote = value;
+    markDirty();
+  }, { readOnly: !canEditOrder });
+  decorateAutoPositionNoteLabel(noteInput, line);
+  noteRow.appendChild(noteInput);
   body.appendChild(noteRow);
 
   card.appendChild(body);
@@ -641,6 +1142,11 @@ function renderLoadingSlipLine(line) {
 }
 
 function toggleLinePicked(line, card, button) {
+  if (!canEditCurrentOrder()) {
+    setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
+  if (isMissingStorageLine(line)) return;
   if (!line.picked && storageLineCompletionErrors(line).length) {
     setMessage(storageLineErrorMessage(line), true);
     return;
@@ -649,6 +1155,46 @@ function toggleLinePicked(line, card, button) {
   updateLinePickedState(line, card, button);
   markDirty();
   updateCounts();
+}
+
+function makeStorageMissingButton(line) {
+  const missing = isMissingStorageLine(line);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `missing-line-toggle${missing ? " restore-missing" : " danger-button"}`;
+  button.textContent = missing ? "Wiederherstellen" : "Fehlmenge";
+  button.disabled = !canEditCurrentOrder();
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleStorageLineMissing(line);
+  });
+  return button;
+}
+
+function toggleStorageLineMissing(line) {
+  if (!currentOrder || !isStorageOrder() || !line || isEmptyManualStorageLine(line)) return;
+  if (!canEditCurrentOrder()) {
+    setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
+  if (isMissingStorageLine(line)) {
+    if (!window.confirm("Fehlmenge fuer diese Position wiederherstellen?")) return;
+    delete line.missing;
+    delete line.missingBy;
+    delete line.missingAt;
+    delete line.missingNote;
+  } else {
+    if (!window.confirm("Diese Position als Fehlmenge markieren? Sie wird nicht als Wareneingang gebucht.")) return;
+    line.missing = true;
+    line.missingBy = currentUserName() || "Tablet";
+    line.missingAt = new Date().toISOString();
+    line.missingNote = line.missingNote || "nicht geliefert";
+    line.picked = false;
+  }
+  markDirty();
+  renderOrder();
+  saveOrder(false);
 }
 
 function makeManualStorageDeleteButton(line) {
@@ -707,6 +1253,9 @@ function makeInput(labelText, value, onChange, options = {}) {
   input.type = "text";
   input.value = value || "";
   input.className = `${options.className || ""}${options.warning ? " is-warning" : ""}`.trim();
+  if (options.inputMode) input.inputMode = options.inputMode;
+  if (options.pattern) input.pattern = options.pattern;
+  if (options.autocapitalize) input.setAttribute("autocapitalize", options.autocapitalize);
   if (options.warning) input.title = options.warning;
   if (options.readOnly) {
     input.readOnly = true;
@@ -715,9 +1264,10 @@ function makeInput(labelText, value, onChange, options = {}) {
   }
   const handleChange = () => {
     if (input.readOnly) return;
-    if (options.digitsOnly) input.value = input.value.replace(/[^0-9,]/g, "");
+    if (options.normalize) input.value = options.normalize(input.value);
     onChange(input.value);
   };
+  input.addEventListener("input", handleChange);
   input.addEventListener("change", handleChange);
   input.addEventListener("keyup", handleChange);
   label.appendChild(input);
@@ -730,17 +1280,59 @@ function makeInput(labelText, value, onChange, options = {}) {
   return label;
 }
 
+function normalizeDigits(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function normalizeUppercaseText(value) {
+  return String(value || "").toUpperCase();
+}
+
+function numericInputOptions() {
+  return {
+    inputMode: "numeric",
+    pattern: "[0-9]*",
+    normalize: normalizeDigits,
+  };
+}
+
+function uppercaseInputOptions() {
+  return {
+    autocapitalize: "characters",
+    normalize: normalizeUppercaseText,
+  };
+}
+
 function renderTakeOverButton() {
-  if (!elements.takeOverButton) return;
   const hasOrder = Boolean(currentOrder && currentOrder.id && currentOrder.lines && currentOrder.lines.length);
   const acceptedBy = currentOrder ? String(currentOrder.acceptedBy || "").trim() : "";
   const user = currentUserName();
   const isMine = acceptedBy && sameUserName(acceptedBy, user);
-  elements.takeOverButton.hidden = !hasOrder || isMine;
-  elements.takeOverButton.disabled = !hasOrder || !user || !serverOnline;
-  elements.takeOverButton.innerHTML = escapeHtml(
-    acceptedBy ? `Von ${acceptedBy} uebernommen` : "Bearbeitung uebernehmen"
-  );
+  const canEditOrder = hasOrder && Boolean(isMine);
+  const manualStorage = isManualStorageOrder(currentOrder);
+  if (elements.takeOverButton) {
+    elements.takeOverButton.hidden = !hasOrder || isMine;
+    elements.takeOverButton.disabled = !hasOrder || !user || !serverOnline;
+    elements.takeOverButton.innerHTML = escapeHtml(
+      acceptedBy ? `Von ${acceptedBy} uebernommen` : "Bearbeitung uebernehmen"
+    );
+  }
+  if (elements.leaveOrderButton) {
+    elements.leaveOrderButton.hidden = !hasOrder || !isMine || manualStorage;
+    elements.leaveOrderButton.disabled = !hasOrder;
+  }
+  renderDiscardOrderButton(hasOrder, isMine, manualStorage);
+  if (elements.saveButton) elements.saveButton.disabled = !canEditOrder;
+  if (elements.exportPdfButton) elements.exportPdfButton.disabled = !canEditOrder;
+  renderManualStorageStartButton();
+  renderStorageLineActions();
+}
+
+function renderDiscardOrderButton(hasOrder, isMine, manualStorage) {
+  if (!elements.discardOrderButton) return;
+  const visible = Boolean(hasOrder && isMine && manualStorage);
+  elements.discardOrderButton.hidden = !visible;
+  elements.discardOrderButton.disabled = !visible || (!serverOnline && !window.OfflineStore);
 }
 
 async function acceptOrderOnServer(id) {
@@ -769,16 +1361,179 @@ async function takeOverCurrentOrder() {
     setMessage("Bitte erst Mitarbeiter eintragen.", true);
     return;
   }
+  const localOrderBeforeAccept = currentOrderAcceptedByCurrentUser() ? currentOrder : null;
+  const hadLocalChanges = dirty && Boolean(localOrderBeforeAccept);
   const accepted = await acceptOrderOnServer(currentOrder.id);
   if (!accepted) return;
-  currentOrder = accepted.order || currentOrder;
+  currentOrder = localOrderBeforeAccept ? mergeLocalOrderAfterAccept(accepted.order, localOrderBeforeAccept) : accepted.order;
   currentOrder.collapseDone = currentOrder.collapseDone !== false;
-  dirty = false;
   renderTakeOverButton();
   renderOrder();
   persistCurrentOrderCache();
+  await cacheOrderDetailsFromAccept(accepted);
+  if (hadLocalChanges) {
+    await saveOrder(true);
+  } else {
+    dirty = false;
+  }
   await loadOrderList({ silent: true });
   setMessage(acceptedOrderMessage(accepted), false);
+}
+
+async function releaseOrderOnServer(id) {
+  if (!serverOnline) return { ok: true, localOnly: true };
+  return apiJson(`/api/orders/${encodeURIComponent(id)}/release`, {
+    method: "POST",
+    body: JSON.stringify({ userName: currentUserName() }),
+  });
+}
+
+async function leaveCurrentOrder() {
+  if (!currentOrder || !currentOrder.id) {
+    resetToStart("Tablet freigegeben.");
+    return;
+  }
+  const label = lockedOrderLabel();
+  const warning = dirty
+    ? `Auftrag ${label} verlassen? Ungespeicherte Aenderungen auf diesem Tablet werden verworfen.`
+    : `Auftrag ${label} verlassen und zur Auftragsauswahl zurueckkehren?`;
+  if (!window.confirm(warning)) return;
+
+  const leavingOrderId = currentOrder.id;
+  try {
+    await releaseOrderOnServer(leavingOrderId);
+    resetToStart("Auftrag verlassen. Bitte Auftrag waehlen.");
+    await loadOrderList({ silent: true });
+  } catch (error) {
+    resetToStart("Auftrag lokal verlassen. Serverfreigabe konnte nicht bestaetigt werden.");
+    await loadOrderList({ silent: true });
+    setMessage(`Auftrag lokal verlassen. Servermeldung: ${error.message}`, true);
+  }
+}
+
+async function discardCurrentManualStorageOrder() {
+  if (!currentOrder?.id || !isManualStorageOrder(currentOrder)) {
+    setMessage("Kein manueller Einlagerauftrag geoeffnet.", true);
+    return;
+  }
+  if (!canEditCurrentOrder()) {
+    setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
+  const orderId = currentOrder.id;
+  const label = lockedOrderLabel() || "manuelle Einlagerung";
+  if (!window.confirm(`Auftrag ${label} wirklich verwerfen? Der Auftrag wird geloescht und nicht synchronisiert.`)) return;
+
+  if (serverOnline && !isLocalStorageOrderId(orderId)) {
+    try {
+      await apiJson(`/api/orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
+      await removeOrderFromOfflineStore(orderId);
+      resetToStart("Manuelle Einlagerung verworfen.");
+      await loadOrderList({ silent: true });
+    } catch (error) {
+      setMessage(`Auftrag konnte nicht verworfen werden: ${error.message}`, true);
+    }
+    return;
+  }
+
+  try {
+    await removeOrderFromOfflineStore(orderId);
+    if (!isLocalStorageOrderId(orderId) && window.OfflineStore) {
+      await OfflineStore.enqueue("DELETE", `/api/orders/${encodeURIComponent(orderId)}`, "", deleteOrderDedupeKey(orderId));
+    }
+    resetToStart("Manuelle Einlagerung verworfen.");
+    await loadOrderList({ silent: true });
+  } catch {
+    setMessage("Auftrag konnte lokal nicht verworfen werden.", true);
+  }
+}
+
+async function removeOrderFromOfflineStore(orderId) {
+  if (!window.OfflineStore || !orderId) return;
+  await removeQueuedOrderMutations(orderId);
+  if (OfflineStore.deleteOrder) await OfflineStore.deleteOrder(orderId);
+  if (OfflineStore.deleteOrderSummary) {
+    await OfflineStore.deleteOrderSummary(orderId);
+    return;
+  }
+  const summaries = await OfflineStore.loadOrderSummaries().catch(() => []);
+  await OfflineStore.saveOrderSummaries(summaries.filter((order) => String(order?.id || "") !== String(orderId)));
+}
+
+async function removeQueuedOrderMutations(orderId) {
+  if (!window.OfflineStore?.getPending) return;
+  const pending = await OfflineStore.getPending().catch(() => []);
+  await Promise.all(pending
+    .filter((entry) => queuedMutationMatchesOrder(entry, orderId))
+    .map((entry) => OfflineStore.dequeue(entry.queueId)));
+}
+
+function queuedMutationMatchesOrder(entry, orderId) {
+  const id = String(orderId || "");
+  const encodedId = encodeURIComponent(id);
+  const key = syncQueueEntryKey(entry);
+  if (key === manualStorageCreateDedupeKey(id) || key === storageOrderPutDedupeKey(id) || key === deleteOrderDedupeKey(id)) return true;
+  if (String(entry?.url || "") === `/api/orders/${encodedId}`) return true;
+  try {
+    const payload = entry?.body ? JSON.parse(entry.body) : {};
+    return String(payload?.order?.id || "") === id;
+  } catch {
+    return false;
+  }
+}
+
+function deleteOrderDedupeKey(orderId) {
+  return `DELETE:/api/orders/${encodeURIComponent(orderId)}`;
+}
+
+function mergeLocalOrderAfterAccept(acceptedOrder, localOrder) {
+  if (!acceptedOrder || !localOrder) return acceptedOrder || localOrder;
+  const merged = { ...localOrder, ...acceptedOrder };
+  ["euroPallets", "storageSpaces", "orderNote"].forEach((field) => {
+    if (String(localOrder[field] || "").trim()) merged[field] = localOrder[field];
+  });
+
+  const serverLines = Array.isArray(acceptedOrder.lines) ? acceptedOrder.lines : [];
+  const localLines = Array.isArray(localOrder.lines) ? localOrder.lines : [];
+  if (!localLines.length) return merged;
+
+  const editableFields = [
+    "actualQty",
+    "autoPositionNotes",
+    "binWarning",
+    "binWarningValue",
+    "description",
+    "fromBin",
+    "fromHandlingUnit",
+    "manualStorageLine",
+    "missing",
+    "missingAt",
+    "missingBy",
+    "missingNote",
+    "palletInfo",
+    "picked",
+    "positionNote",
+    "product",
+    "targetQty",
+    "unit",
+  ];
+  const localById = new Map(localLines.map((line) => [line.id, line]));
+  const serverIds = new Set(serverLines.map((line) => line.id));
+  const mergedLines = serverLines.map((line) => {
+    const localLine = localById.get(line.id);
+    if (!localLine) return line;
+    const nextLine = { ...line };
+    editableFields.forEach((field) => {
+      if (Object.prototype.hasOwnProperty.call(localLine, field)) nextLine[field] = localLine[field];
+    });
+    return nextLine;
+  });
+
+  localLines.forEach((line) => {
+    if (!serverIds.has(line.id) && !isEmptyManualStorageLine(line)) mergedLines.push(line);
+  });
+  merged.lines = mergedLines.length ? mergedLines : localLines;
+  return merged;
 }
 
 function acceptedOrderMessage(result) {
@@ -821,6 +1576,10 @@ function currentUserName() {
 
 async function saveOrder(silent, onSuccess) {
   if (!currentOrder || !currentOrder.id) return;
+  if (!canEditCurrentOrder()) {
+    if (!silent) setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
   touchOrder();
   persistCurrentOrderCache();
   const revision = changeRevision;
@@ -829,9 +1588,16 @@ async function saveOrder(silent, onSuccess) {
     if (window.OfflineStore) {
       try {
         const url = `/api/orders/${encodeURIComponent(currentOrder.id)}`;
-        await OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder, userName: currentUserName() }));
-        await OfflineStore.saveOrder(currentOrder);
-        dirty = false;
+        await OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder, userName: currentUserName() }), storageOrderPutDedupeKey(currentOrder.id));
+        await saveOrderToOfflineStore(currentOrder);
+        if (changeRevision === revision) {
+          dirty = false;
+          clearCurrentOrderCache();
+        } else {
+          dirty = true;
+          persistCurrentOrderCache();
+        }
+        if (onSuccess) onSuccess();
         if (!silent) setMessage("Offline gespeichert – wird synchronisiert, sobald der Server erreichbar ist.", false);
       } catch {
         if (!silent) setMessage("Offline: Lokales Speichern fehlgeschlagen.", true);
@@ -847,8 +1613,7 @@ async function saveOrder(silent, onSuccess) {
       method: "PUT",
       body: JSON.stringify({ order: currentOrder, userName: currentUserName() }),
     });
-    currentOrder.acceptedBy = result.order?.acceptedBy || currentOrder.acceptedBy || "";
-    currentOrder.acceptedAt = result.order?.acceptedAt || currentOrder.acceptedAt || "";
+    applyOrderSummaryToOrder(currentOrder, result.order);
     if (changeRevision === revision) {
       dirty = false;
       clearCurrentOrderCache();
@@ -857,6 +1622,7 @@ async function saveOrder(silent, onSuccess) {
       persistCurrentOrderCache();
     }
     setMessage(silent ? "Automatisch gespeichert." : "Auftrag gespeichert.", false);
+    await saveOrderToOfflineStore(currentOrder);
     loadOrderList();
     if (onSuccess) onSuccess();
   } catch (error) {
@@ -875,6 +1641,10 @@ async function exportPdf() {
   }
   if (!currentUserName()) {
     setMessage("Bitte erst Mitarbeiter eintragen.", true);
+    return;
+  }
+  if (!canEditCurrentOrder()) {
+    setMessage("Bearbeitung erst uebernehmen.", true);
     return;
   }
   pruneEmptyManualStorageLines();
@@ -957,7 +1727,8 @@ function mergeServerLoadingSlipLines(order, serverOrder) {
     return {
       ...line,
       picked: previous?.picked ?? line.picked,
-      positionNote: String(previous?.positionNote || "").trim() || line.positionNote || ""
+      positionNote: String(previous?.positionNote || "").trim() || line.positionNote || "",
+      autoPositionNotes: normalizeAutoPositionNotes(previous?.autoPositionNotes || line.autoPositionNotes)
     };
   });
 
@@ -973,6 +1744,7 @@ function restoreCachedOrderFor(serverOrder) {
   if (payload.dirty !== true) return null;
   if (String(payload.orderId || payload.order.id) !== String(serverOrder.id)) return null;
   if (serverOrder.exportedAt) return null;
+  if (!sameUserName(serverOrder.acceptedBy, currentUserName())) return null;
   if (!Array.isArray(payload.order.lines) || !Array.isArray(serverOrder.lines)) return null;
   if (payload.order.lines.length !== serverOrder.lines.length) return null;
   const cachedAt = dateToMs(payload.cachedAt);
@@ -997,12 +1769,13 @@ function dateToMs(value) {
 }
 
 function updateCounts() {
-  const lines = currentOrder && currentOrder.lines ? currentOrder.lines : [];
+  const lines = (currentOrder && currentOrder.lines ? currentOrder.lines : [])
+    .filter((line) => !isEmptyManualStorageLine(line));
   let done = 0;
   let changed = 0;
   lines.forEach((line) => {
-    if (line.picked) done += 1;
-    if (String(line.actualQty || "").trim() !== String(line.targetQty || "").trim()) changed += 1;
+    if (line.picked || isMissingStorageLine(line)) done += 1;
+    if (isMissingStorageLine(line) || storageLineQuantityChanged(line)) changed += 1;
   });
   elements.doneCount.innerHTML = done;
   elements.openCount.innerHTML = Math.max(lines.length - done, 0);
@@ -1011,7 +1784,7 @@ function updateCounts() {
 
 function allPicked() {
   const lines = currentOrder && currentOrder.lines ? currentOrder.lines : [];
-  return lines.length > 0 && lines.every((line) => isEmptyManualStorageLine(line) || line.picked);
+  return lines.length > 0 && lines.every((line) => isEmptyManualStorageLine(line) || line.picked || isMissingStorageLine(line));
 }
 
 function pruneEmptyManualStorageLines() {
@@ -1040,12 +1813,28 @@ function storageLineErrorMessage(line) {
 
 function storageLineCompletionErrors(line) {
   if (!isStorageOrder() || !line || line.lineType === "loading-slip" || isEmptyManualStorageLine(line)) return [];
+  if (isMissingStorageLine(line)) return [];
   const errors = [];
-  if (!String(line.product || "").trim()) errors.push("Artikelnummer fehlt");
-  if (!String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
+  const product = String(line.product || "").trim();
+  const handlingUnit = String(line.fromHandlingUnit || "").trim();
+  if (!product) errors.push("Artikelnummer fehlt");
+  else if (!/^\d+$/.test(product)) errors.push("Artikelnummer darf nur Zahlen enthalten");
+  if (line.manual !== true && !String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
   if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
+  if (handlingUnit && !/^\d+$/.test(handlingUnit)) errors.push("HU darf nur Zahlen enthalten");
+  if (requiresStorageHandlingUnit() && !handlingUnit) errors.push("HU fehlt");
   if (!readTabletQuantity(line.actualQty || line.targetQty)) errors.push("Menge fehlt");
   return errors;
+}
+
+function storageLineQuantityChanged(line) {
+  if (line?.manual === true && !String(line.targetQty || "").trim()) return false;
+  return String(line?.actualQty || "").trim() !== String(line?.targetQty || "").trim();
+}
+
+function requiresStorageHandlingUnit() {
+  const warehouse = String(currentOrder?.orderWarehouse || currentOrder?.warehouse || "").trim().toUpperCase();
+  return warehouse === "SSI" || warehouse === "SI";
 }
 
 function shouldClearBinWarning(line, nextBin) {
@@ -1061,25 +1850,29 @@ function suspiciousPickingBinWarning(line) {
   if (!bin) return "";
   if (!isPlausiblePickingBin(bin)) return `Lagerplatz unklar: ${bin}.`;
 
-  const h1LetterInNumberSlot = bin.match(/^002-H1-SA[A-Z]([A-Z])[A-D]\d$/i);
-  if (h1LetterInNumberSlot) return `Lagerplatz unklar: ${bin}.`;
-
   return "";
 }
 
 function isPlausiblePickingBin(value) {
   const bin = normalizePickingBinText(value);
-  return /^(?:002|022)-H\d{1,2}-(?:S[A-Z0-9]{2,10}|R\d{1,3})$/i.test(bin);
+  if (/^(?:002|022)-H\d{1,2}-R\d{1,3}$/i.test(bin)) return true;
+  if (/^002-H1-A[A-L]1$/i.test(bin)) return true;
+  if (/^002-H1-SA[A-T](?:[1-9]|1[0-2])[A-D][1-3]$/i.test(bin)) return true;
+  if (/^002-H3-S[O-Z](?:[1-9]|1[0-2])[A-D][1-3]$/i.test(bin)) return true;
+  if (/^002-H4-S[A-N](?:[1-9]|1[0-2])[A-D][1-4]$/i.test(bin)) return true;
+  return false;
 }
 
 function normalizePickingBinText(value) {
-  return String(value || "")
+  const bin = String(value || "")
     .trim()
     .toUpperCase()
     .replace(/\s+/g, "")
     .replace(/[‐‑‒–—]/g, "-")
     .replace(/^O/, "0")
     .replace(/^QD/, "00");
+  if (/^H1A[A-L]1$/i.test(bin)) return `002-H1-${bin.slice(2)}`;
+  return bin;
 }
 
 function readTabletQuantity(value) {
@@ -1093,6 +1886,10 @@ function storageLinePosition(line, index) {
 
 function isEmptyManualStorageLine(line) {
   return line?.manual === true && !manualStorageLineHasContent(line);
+}
+
+function isMissingStorageLine(line) {
+  return line?.missing === true;
 }
 
 function setConnectionStatus(value) {

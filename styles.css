@@ -50,6 +50,11 @@ textarea {
   font: inherit;
 }
 
+.uppercase-input,
+input[autocapitalize="characters"] {
+  text-transform: uppercase;
+}
+
 button {
   border: 0;
   cursor: pointer;
@@ -911,6 +916,15 @@ input.is-warning[readonly] {
 .location-row.has-manual-delete {
   grid-template-columns: minmax(150px, 260px) minmax(180px, 1fr) minmax(130px, 160px);
   align-items: end;
+}
+
+.auto-position-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.25;
 }
 
 .bin-warning {

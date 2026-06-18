@@ -6,9 +6,11 @@ const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
 const OCR_LANGUAGE = "deu+eng";
-const OCR_RENDER_SCALE = 2.5;
-const OCR_PRECISE_RENDER_SCALE = 4;
-const BESTELLSCHEIN_PRECISE_OCR_SCALES = [3, OCR_PRECISE_RENDER_SCALE];
+const OCR_RENDER_SCALE = 5;
+const OCR_PRECISE_RENDER_SCALE = 6.25;
+const OCR_RENDER_DPI = "360";
+const OCR_PRECISE_RENDER_DPI = "450";
+const BESTELLSCHEIN_PRECISE_OCR_SCALES = [OCR_PRECISE_RENDER_SCALE];
 const OCR_ROTATIONS = [0, 90, 180, 270];
 const STORAGE_IMAGE_ROTATIONS = [0, -2, 2, -4, 4];
 const OCR_STRONG_CANDIDATE_SCORE = 6500;
@@ -24,6 +26,7 @@ const state = {
   id: "",
   orderNumber: "",
   customerName: "",
+  customerGroupKey: "",
   orderDate: new Date().toISOString().slice(0, 10),
   orderTime: "",
   euroPallets: "",
@@ -422,8 +425,9 @@ async function handlePdfUpload(event) {
       const preciseBinNotice = result.binCorrections ? ` ${result.binCorrections} Stellplatz(e) per genauer Pruefung korrigiert.` : "";
       const binWarningNotice = result.binWarnings ? ` ${result.binWarnings} Stellplatz(e) bitte pruefen.` : "";
       const warehouseNotice = result.warehouseHint?.shortMessage ? ` ${result.warehouseHint.shortMessage}` : "";
+      const loadingSlipNotice = result.loadingSlips ? ` ${result.loadingSlips} Ladeliste(n) als Barcode-Position angehaengt.` : "";
       const statusType = imported.pageNotice?.startsWith("Achtung") || result.warehouseHint?.type === "warning" || result.binWarnings ? "warning" : "ok";
-      setImportStatus(`${result.lines} Positionen${suffix} als Entwurf importiert.${binNotice}${preciseBinNotice}${binWarningNotice} Bitte pruefen und freigeben.${pageNotice}${warehouseNotice}`, statusType, 100);
+      setImportStatus(`${result.lines} Positionen${suffix} als Entwurf importiert.${binNotice}${preciseBinNotice}${binWarningNotice}${loadingSlipNotice} Bitte pruefen und freigeben.${pageNotice}${warehouseNotice}`, statusType, 100);
     } else if (imported.text.trim()) {
       setImportStatus("Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
     } else {
@@ -578,63 +582,105 @@ async function readPdfPages(pdf) {
 }
 
 async function chooseBestImportText(pdf, fullText, pageTexts = []) {
-  let parsed = parseOrderText(fullText);
-  if (parsed.lines.length) {
-    const binScan = await refinePickingBinsWithPreciseScan(pdf, pageTexts, parsed);
-    const sanitizedParsed = sanitizeBestellscheinHandlingUnitDuplicates(binScan.parsed, fullText);
-    return {
-      text: fullText,
-      parsed: sanitizedParsed,
-      source: "pdf-text",
-      pageNotice: bestellscheinPageNotice(fullText, pdf.numPages),
-      binScan
-    };
+  setImportStatus("Starte hochaufloesende OCR ...", "", 5);
+  let ocrText = "";
+  try {
+    ocrText = await readPdfWithOcr(pdf);
+  } catch (error) {
+    console.warn("Hochaufloesende OCR fehlgeschlagen.", error);
   }
 
-  const reason = fullText.trim()
-    ? "PDF-Text erkannt, aber keine Tabellenzeilen. Starte OCR ..."
-    : "Scan erkannt. Starte OCR ...";
-  setImportStatus(reason, "", 5);
+  const fastCandidate = await buildPickingImportCandidate(pdf, pageTexts, fullText, "pdf-text");
+  if (!ocrText.trim()) return fastCandidate;
 
-  const ocrText = await readPdfWithOcr(pdf);
-  if (!ocrText.trim()) return { text: fullText, parsed, source: "pdf-text" };
-
-  const combinedText = fullText.trim() ? `${fullText}\n${ocrText}` : ocrText;
-  parsed = parseOrderText(combinedText);
-  const binScan = await refinePickingBinsWithPreciseScan(pdf, pageTexts, parsed);
-  const sanitizedParsed = sanitizeBestellscheinHandlingUnitDuplicates(binScan.parsed, combinedText);
-  return {
-    text: combinedText,
-    parsed: sanitizedParsed,
-    source: "ocr",
-    pageNotice: bestellscheinPageNotice(combinedText, pdf.numPages),
-    binScan
-  };
+  const ocrCandidate = await buildPickingImportCandidate(pdf, pageTexts, ocrText, "ocr");
+  return chooseBestPickingImportCandidate([ocrCandidate, fastCandidate]);
 }
 
 async function chooseBestStorageImportText(pdf, fullText, fileName = "", pageTexts = []) {
-  let parsed = parseStorageSlipText(fullText, fileName, pageTexts);
-  if (parsed.lines.length) return {
+  setImportStatus("Starte hochaufloesende OCR ...", "", 5);
+  let ocrText = "";
+  try {
+    ocrText = await readPdfWithOcr(pdf, (text) => parseStorageSlipText(text, fileName), scoreStorageOcrCandidate);
+  } catch (error) {
+    console.warn("Hochaufloesende OCR fehlgeschlagen.", error);
+  }
+
+  const fastCandidate = {
     text: fullText,
-    parsed,
+    parsed: parseStorageSlipText(fullText, fileName, pageTexts),
     source: "pdf-text"
   };
+  if (!ocrText.trim()) return fastCandidate;
 
-  const reason = fullText.trim()
-    ? "PDF-Text erkannt, aber keine Lieferscheinpositionen. Starte OCR ..."
-    : "Scan erkannt. Starte OCR ...";
-  setImportStatus(reason, "", 5);
-
-  const ocrText = await readPdfWithOcr(pdf, (text) => parseStorageSlipText(text, fileName), scoreStorageOcrCandidate);
-  if (!ocrText.trim()) return { text: fullText, parsed, source: "pdf-text" };
-
-  const combinedText = fullText.trim() ? `${fullText}\n${ocrText}` : ocrText;
-  parsed = parseStorageSlipText(combinedText, fileName);
-  return {
-    text: combinedText,
-    parsed,
+  const ocrCandidate = {
+    text: ocrText,
+    parsed: parseStorageSlipText(ocrText, fileName),
     source: "ocr"
   };
+  return chooseBestStorageImportCandidate([ocrCandidate, fastCandidate]);
+}
+
+async function buildPickingImportCandidate(pdf, pageTexts, text, source) {
+  const parsed = parseOrderText(text);
+  const binScan = parsed.lines.length
+    ? await refinePickingBinsWithPreciseScan(pdf, pageTexts, parsed)
+    : { parsed, corrected: 0, warnings: 0, scannedPages: 0 };
+  const sanitizedParsed = sanitizeBestellscheinHandlingUnitDuplicates(binScan.parsed, text);
+  const issues = validatePickingImport(text, sanitizedParsed);
+
+  return {
+    text,
+    parsed: sanitizedParsed,
+    source,
+    pageNotice: bestellscheinPageNotice(text, pdf.numPages),
+    binScan,
+    issues,
+    qualityScore: scorePickingImportCandidate(text, sanitizedParsed, issues)
+  };
+}
+
+function chooseBestPickingImportCandidate(candidates) {
+  return candidates
+    .filter(Boolean)
+    .sort((left, right) => {
+      const leftIssues = left.issues?.length || 0;
+      const rightIssues = right.issues?.length || 0;
+      if (leftIssues !== rightIssues) return leftIssues - rightIssues;
+      return (right.qualityScore || 0) - (left.qualityScore || 0);
+    })[0] || candidates[0];
+}
+
+function scorePickingImportCandidate(text, parsed, issues = []) {
+  const parsedLines = Array.isArray(parsed?.lines) ? parsed.lines : [];
+  const normalLines = parsedLines.filter((line) => line?.lineType !== "loading-slip");
+  const completeLines = normalLines.filter((line) => {
+    if (!isCompleteImportLine(line)) return false;
+    if (isWarehouseLikeText(text) && !String(line.fromBin || "").trim()) return false;
+    return true;
+  }).length;
+  const loadingSlips = countLoadingSlipLines(parsedLines);
+  const binWarnings = countOpenBinWarnings(parsedLines);
+
+  return completeLines * 2500
+    + normalLines.length * 250
+    + loadingSlips * 500
+    + Math.min(String(text || "").length, 500)
+    - (issues.length * 10000)
+    - (binWarnings * 250);
+}
+
+function chooseBestStorageImportCandidate(candidates) {
+  return candidates
+    .filter(Boolean)
+    .sort((left, right) => scoreStorageImportQuality(right) - scoreStorageImportQuality(left))[0] || candidates[0];
+}
+
+function scoreStorageImportQuality(candidate) {
+  const lines = candidate?.parsed?.lines?.length || 0;
+  const warnings = candidate?.parsed?.warnings?.length || 0;
+  const sourceBonus = candidate?.source === "ocr" ? 150 : 0;
+  return lines * 1200 - warnings * 900 + sourceBonus;
 }
 
 async function refinePickingBinsWithPreciseScan(pdf, pageTexts = [], parsed = {}) {
@@ -666,10 +712,7 @@ async function refinePickingBinsWithPreciseScan(pdf, pageTexts = [], parsed = {}
 
   targets.forEach(({ line, index, warning }) => {
     const originalBin = normalizePickingBinText(line.fromBin);
-    const candidates = [
-      preciseScanBinCandidate(line, ocrLines),
-      ...pickingBinCorrectionCandidates(originalBin)
-    ]
+    const candidates = [preciseScanBinCandidate(line, ocrLines)]
       .map(normalizePickingBinText)
       .filter((value) => value && value !== originalBin && isPlausiblePickingBin(value) && !suspiciousPickingBinWarning({ fromBin: value }));
 
@@ -707,51 +750,29 @@ function suspiciousPickingBinWarning(line) {
   if (!bin) return "";
   if (!isPlausiblePickingBin(bin)) return `Lagerplatz unklar: ${bin}.`;
 
-  const h1LetterInNumberSlot = bin.match(/^002-H1-SA[A-Z]([A-Z])[A-D]\d$/i);
-  if (h1LetterInNumberSlot) return `Lagerplatz unklar: ${bin}.`;
-
   return "";
 }
 
 function isPlausiblePickingBin(value) {
   const bin = normalizePickingBinText(value);
-  return /^(?:002|022)-H\d{1,2}-(?:S[A-Z0-9]{2,10}|R\d{1,3})$/i.test(bin);
+  if (/^(?:002|022)-H\d{1,2}-R\d{1,3}$/i.test(bin)) return true;
+  if (/^002-H1-A[A-L]1$/i.test(bin)) return true;
+  if (/^002-H1-SA[A-T](?:[1-9]|1[0-2])[A-D][1-3]$/i.test(bin)) return true;
+  if (/^002-H3-S[O-Z](?:[1-9]|1[0-2])[A-D][1-3]$/i.test(bin)) return true;
+  if (/^002-H4-S[A-N](?:[1-9]|1[0-2])[A-D][1-4]$/i.test(bin)) return true;
+  return false;
 }
 
 function normalizePickingBinText(value) {
-  return String(value || "")
+  const bin = String(value || "")
     .trim()
     .toUpperCase()
     .replace(/\s+/g, "")
     .replace(/[‐‑‒–—]/g, "-")
     .replace(/^O/, "0")
     .replace(/^QD/, "00");
-}
-
-function pickingBinCorrectionCandidates(value) {
-  const bin = normalizePickingBinText(value);
-  const h1Match = bin.match(/^(002-H1-SA[A-Z])([A-Z])([A-D]\d)$/i);
-  if (!h1Match) return [];
-
-  const digit = ocrDigitForBin(h1Match[2]);
-  if (digit === "") return [];
-  return [`${h1Match[1]}${digit}${h1Match[3]}`];
-}
-
-function ocrDigitForBin(value) {
-  const text = String(value || "").trim().toUpperCase();
-  const map = {
-    O: "0",
-    D: "0",
-    Q: "0",
-    I: "1",
-    L: "1",
-    Z: "2",
-    S: "5",
-    E: "5",
-    B: "8"
-  };
-  return /^\d$/.test(text) ? text : map[text] || "";
+  if (/^H1A[A-L]1$/i.test(bin)) return `002-H1-${bin.slice(2)}`;
+  return bin;
 }
 
 function pageNumbersForPickingBinScan(pageTexts, targets) {
@@ -789,13 +810,13 @@ async function readPdfPagesWithPreciseOcr(pdf, pageNumbers) {
     .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber >= 1 && pageNumber <= pdf.numPages);
   if (!pages.length || !window.Tesseract?.createWorker) return "";
 
-  const worker = await createOcrWorker(pages.length);
+  const worker = await createOcrWorker(pages.length, OCR_PRECISE_RENDER_DPI);
   const texts = [];
   try {
     await worker.setParameters({
       preserve_interword_spaces: "1",
       tessedit_pageseg_mode: window.Tesseract.PSM?.AUTO || "3",
-      user_defined_dpi: "450"
+      user_defined_dpi: OCR_PRECISE_RENDER_DPI
     });
 
     for (const pageNumber of pages) {
@@ -843,7 +864,7 @@ async function readPdfWithOcr(pdf, parseCandidate = parseOrderText, scoreCandida
     throw new Error("OCR-Modul konnte nicht geladen werden. Internetverbindung prüfen und Seite neu laden.");
   }
 
-  const worker = await createOcrWorker(pdf.numPages * OCR_ROTATIONS.length);
+  const worker = await createOcrWorker(pdf.numPages * OCR_ROTATIONS.length, OCR_RENDER_DPI);
   const pages = [];
 
   try {
@@ -884,7 +905,7 @@ async function readPdfWithOcr(pdf, parseCandidate = parseOrderText, scoreCandida
   return pages.join("\n");
 }
 
-async function createOcrWorker(totalSteps) {
+async function createOcrWorker(totalSteps, dpi = OCR_RENDER_DPI) {
   let currentStep = 1;
   const worker = await window.Tesseract.createWorker(OCR_LANGUAGE, 1, {
     workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/worker.min.js",
@@ -902,7 +923,7 @@ async function createOcrWorker(totalSteps) {
   await worker.setParameters({
     preserve_interword_spaces: "1",
     tessedit_pageseg_mode: window.Tesseract.PSM?.AUTO || "3",
-    user_defined_dpi: "300"
+    user_defined_dpi: dpi
   });
 
   const originalRecognize = worker.recognize.bind(worker);
@@ -1177,6 +1198,7 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
 
   if (parsed.orderNumber) state.orderNumber = parsed.orderNumber;
   if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
+  state.customerGroupKey = parsed.customerGroupKey || customerGroupKeyForImport(state.customerName);
 
   const fallbackLine = parsed.lines.length ? null : fallbackImportLine(text);
   if (!parsed.lines.length && !fallbackLine) {
@@ -1199,6 +1221,7 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
   render();
   return {
     lines: parsed.lines.length,
+    loadingSlips: countLoadingSlipLines(state.lines),
     autoBins: binResult.applied,
     warehouseHint,
     binCorrections: Number(parsed.binCorrections || 0),
@@ -1368,9 +1391,9 @@ async function applyStorageBinsFromArticleStock(lines) {
     const nextBin = String(match.lagerplatz || "").trim();
     const stockQty = Number(match.mengeStueck || match.menge_stueck || 0) || 0;
     const quantityRemark = storageQuantityRemarkForLine(line, stockQty);
-    const nextNote = updateStorageQuantityRemark(line.positionNote, quantityRemark);
+    const nextAutoNotes = setAutoPositionNote(line.autoPositionNotes, "quantity", quantityRemark);
     const binChanged = Boolean(nextBin && String(line.fromBin || "").trim().toUpperCase() !== nextBin.toUpperCase());
-    const noteChanged = nextNote !== String(line.positionNote || "").trim();
+    const noteChanged = JSON.stringify(nextAutoNotes) !== JSON.stringify(normalizeAutoPositionNotes(line.autoPositionNotes));
 
     if (!binChanged && !noteChanged && Number(line.stockQty || 0) === stockQty) return line;
 
@@ -1380,7 +1403,7 @@ async function applyStorageBinsFromArticleStock(lines) {
       fromBin: binChanged ? nextBin : line.fromBin,
       binWarning: binChanged ? "" : line.binWarning || "",
       binWarningValue: binChanged ? "" : line.binWarningValue || "",
-      positionNote: nextNote,
+      autoPositionNotes: nextAutoNotes,
       stockQty
     };
   });
@@ -1401,18 +1424,6 @@ function storageQuantityRemarkForLine(line, stockQty) {
   return "";
 }
 
-function updateStorageQuantityRemark(note, remark) {
-  const cleanedParts = String(note || "")
-    .split(/\s*;\s*/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .filter((part) => !/^1\s*Pal\.?$/i.test(part) && !/^com$/i.test(part));
-
-  const nextRemark = String(remark || "").trim();
-  if (nextRemark) cleanedParts.push(nextRemark);
-  return cleanedParts.join("; ");
-}
-
 function normalizeHandlingUnitLookup(value) {
   return String(value || "")
     .trim()
@@ -1430,6 +1441,7 @@ async function importStorageText(text, fileName = "", parsed = parseStorageSlipT
   state.orderTime = currentTimeValue();
   state.orderNumber = parsed.orderNumber || await nextStorageOrderNumber();
   state.customerName = "SSI";
+  state.customerGroupKey = parsed.customerGroupKey || customerGroupKeyForImport(state.customerName);
   state.lines = parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })];
   topControlsCollapsed = state.lines.length > 0;
   markOrderTouched();
@@ -1558,6 +1570,7 @@ function parseOrderText(text) {
   ]);
   const explicitCustomerName = findFirst(text, [
     /Auslagerung\s*[:#-]?\s*([^\n\t]{3,80})/i,
+    /(?:kunde|lieferadresse|empf.{0,3}nger)\s*[:#-]?\s*([^\n\t]{3,80})/i,
     /(?:kunde|lieferadresse|empfänger)\s*[:#-]?\s*([^\n\t]{3,80})/i
   ]);
 
@@ -1565,13 +1578,14 @@ function parseOrderText(text) {
   const stackedRows = tableRows.length ? [] : annotateDestinationExceptions(collectStackedWarehouseRows(pickingLines));
   const splitRows = tableRows.length || stackedRows.length ? [] : annotateDestinationExceptions(collectSplitWarehouseRows(pickingLines));
   const warehouseRows = tableRows.length ? tableRows : stackedRows.length ? stackedRows : splitRows;
-  const destinationCustomerName = destinationToCustomerName(warehouseRows);
-  const customerName = destinationCustomerName || cleanCustomerName(explicitCustomerName || findCustomerFromHeader(pickingLines));
+  const customerName = cleanCustomerName(explicitCustomerName || findCustomerFromHeader(pickingLines));
+  const customerGroupKey = customerGroupKeyForImport(customerName, destinationToCustomerGroupFallback(warehouseRows));
 
   if (warehouseRows.length) {
     return {
       orderNumber: "",
       customerName: customerName || "",
+      customerGroupKey,
       lines: appendLoadingSlipLines(warehouseRows.map((line) => createLine({
         ...line,
         actualQty: line.targetQty,
@@ -1585,6 +1599,7 @@ function parseOrderText(text) {
     return {
       orderNumber: orderNumber || "",
       customerName: cleanCustomerName(explicitCustomerName || "Bestellschein"),
+      customerGroupKey: customerGroupKeyForImport(cleanCustomerName(explicitCustomerName || "Bestellschein")),
       lines: appendLoadingSlipLines(bestellscheinRows.map((line, index) => createLine({
         ...line,
         warehouseOrder: String(index + 1),
@@ -1598,6 +1613,7 @@ function parseOrderText(text) {
     return {
       orderNumber: orderNumber || "",
       customerName: customerName || "",
+      customerGroupKey,
       lines: []
     };
   }
@@ -1627,6 +1643,7 @@ function parseOrderText(text) {
   return {
     orderNumber: orderNumber || "",
     customerName: customerName || "",
+    customerGroupKey,
     lines: appendLoadingSlipLines(candidates.map((line, index) => createLine({
       ...line,
       warehouseOrder: line.position || String(index + 1),
@@ -1650,6 +1667,12 @@ function appendLoadingSlipLines(lines, loadingSlipLines) {
   return result;
 }
 
+function countLoadingSlipLines(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .filter((line) => line?.lineType === "loading-slip" && String(line.barcode || "").trim())
+    .length;
+}
+
 function mergeServerLoadingSlipLines(order, serverOrder) {
   if (!order || !Array.isArray(order.lines) || !Array.isArray(serverOrder?.lines)) return order;
 
@@ -1668,7 +1691,8 @@ function mergeServerLoadingSlipLines(order, serverOrder) {
     return {
       ...line,
       picked: previous?.picked ?? line.picked,
-      positionNote: String(previous?.positionNote || "").trim() || line.positionNote || ""
+      positionNote: String(previous?.positionNote || "").trim() || line.positionNote || "",
+      autoPositionNotes: normalizeAutoPositionNotes(previous?.autoPositionNotes || line.autoPositionNotes)
     };
   });
 
@@ -1693,6 +1717,68 @@ function parseLoadingSlipLines(lines) {
     });
 }
 
+function auditLoadingSlipImport(lines, parsedLines = []) {
+  const blocks = loadingSlipBlocksFrom(lines);
+  if (!blocks.length) {
+    return {
+      expected: 0,
+      attached: countLoadingSlipLines(parsedLines),
+      issues: []
+    };
+  }
+
+  const parsedBlocks = blocks.map((block, index) => {
+    const line = parseLoadingSlipBlock(block);
+    return {
+      index: index + 1,
+      barcode: String(line?.barcode || extractLoadingSlipHeaderBarcode(block) || "").trim(),
+      parsed: Boolean(line)
+    };
+  });
+
+  const attached = countLoadingSlipLines(parsedLines);
+  const issues = [];
+  const missing = parsedBlocks.filter((entry) => !entry.parsed || !entry.barcode);
+  const duplicates = duplicateLoadingSlipBarcodes(parsedBlocks);
+
+  if (missing.length) {
+    issues.push(`${missing.length} Ladeliste(n) erkannt, aber Barcode/Position konnte nicht eindeutig gelesen werden (${formatLoadingSlipIndexes(missing)}).`);
+  }
+
+  if (duplicates.length) {
+    issues.push(`Ladelisten-Barcode mehrfach erkannt: ${duplicates.slice(0, 3).join(", ")}.`);
+  }
+
+  if (attached !== blocks.length) {
+    issues.push(`${blocks.length} Ladeliste(n) erkannt, aber ${attached} Barcode-Position(en) erzeugt.`);
+  }
+
+  return {
+    expected: blocks.length,
+    attached,
+    issues
+  };
+}
+
+function duplicateLoadingSlipBarcodes(entries) {
+  const counts = new Map();
+  entries.forEach((entry) => {
+    const barcode = String(entry.barcode || "").trim();
+    if (!barcode) return;
+    counts.set(barcode, (counts.get(barcode) || 0) + 1);
+  });
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([barcode]) => barcode);
+}
+
+function formatLoadingSlipIndexes(entries) {
+  return entries
+    .slice(0, 5)
+    .map((entry) => `Ladeliste ${entry.index}`)
+    .join(", ");
+}
+
 function parseLoadingSlipBlock(lines) {
   if (!isLikelyLoadingSlip(lines)) return null;
 
@@ -1712,7 +1798,7 @@ function parseLoadingSlipBlock(lines) {
     targetQty: row.targetQty || "",
     actualQty: row.targetQty || "",
     unit: row.unit || "",
-    positionNote: rows.length > 1 ? `Ladeschein mit ${rows.length} Positionen` : "",
+    autoPositionNotes: setAutoPositionNote({}, "loadingSlip", rows.length > 1 ? `Ladeschein mit ${rows.length} Positionen` : ""),
     fromHandlingUnit: "",
     fromHandlingUnitEditable: false,
     fromBin: "",
@@ -1722,18 +1808,41 @@ function parseLoadingSlipBlock(lines) {
 
 function loadingSlipBlocksFrom(lines) {
   const sourceLines = Array.isArray(lines) ? lines : [];
-  const startIndexes = sourceLines
-    .map((line, index) => (isLoadingSlipStartLine(line) ? index : -1))
-    .filter((index) => index !== -1);
+  const blocks = [];
+  let current = null;
+  let currentHasRows = false;
+  let currentHasHeaderBarcode = false;
 
-  return startIndexes.map((startIndex, index) => {
-    const nextStart = startIndexes[index + 1] ?? sourceLines.length;
-    return sourceLines.slice(startIndex, nextStart);
+  sourceLines.forEach((line) => {
+    const isStart = isLoadingSlipStartLine(line);
+    const isHeaderBarcode = isLoadingSlipHeaderBarcodeLine(line);
+    const isRow = isBestellscheinRowStart(line) || /^\d{6,8}\b/.test(String(line || "").trim());
+    const startsNestedSlip = current && isHeaderBarcode && (currentHasRows || currentHasHeaderBarcode);
+
+    if (isStart || startsNestedSlip) {
+      if (current?.length) blocks.push(current);
+      current = [line];
+      currentHasRows = isRow;
+      currentHasHeaderBarcode = isHeaderBarcode;
+      return;
+    }
+
+    if (!current) return;
+    current.push(line);
+    if (isRow) currentHasRows = true;
+    if (isHeaderBarcode) currentHasHeaderBarcode = true;
   });
+
+  if (current?.length) blocks.push(current);
+  return blocks;
 }
 
 function isLoadingSlipStartLine(line) {
   return /lad[ce](?:schein|liste)|lade(?:schein|liste)/i.test(String(line || ""));
+}
+
+function isLoadingSlipHeaderBarcodeLine(line) {
+  return /\b(?:Nummer|Numm(?:e|c)r|Nr\.?)\s*[:.-]?\s*[A-Z]\s*\d[\d\s./-]{5,}\d\b/i.test(String(line || ""));
 }
 
 function linesBeforeLoadingSlip(lines) {
@@ -1837,6 +1946,11 @@ function validatePickingImport(text, parsed) {
   const pickingSource = pickingLines.join("\n");
   const bestellscheinExpectedRows = countBestellscheinCandidateRows(pickingLines);
   const warehouseExpectedRows = isWarehouseLikeText(pickingSource) ? countWarehouseCandidateRows(pickingLines) : 0;
+  const loadingSlipAudit = auditLoadingSlipImport(lines, parsed.lines);
+
+  loadingSlipAudit.issues.forEach((issue) => {
+    issues.push(`Ladelisten pruefen: ${issue}`);
+  });
 
   if (bestellscheinExpectedRows && parsed.lines.length < bestellscheinExpectedRows) {
     issues.push(`${bestellscheinExpectedRows} Bestellschein-Position(en) erkannt, aber nur ${parsed.lines.length} gelesen.`);
@@ -2250,13 +2364,13 @@ function hasIntermediateWarehouseColumn(tokens, firstNumber, binIndex) {
   return intermediateTokens.some((token) => /^\d{2,6}$/.test(String(token || "")));
 }
 
-function destinationToCustomerName(lines) {
+function destinationToCustomerGroupFallback(lines) {
   const destinations = lines
     .map((line) => line.toBin)
     .map(normalizeDestinationName)
-    .filter(Boolean);
+    .filter((value) => value && value !== "9021-0OUT");
 
-  return destinations.find((value) => value === "9021-0OUT") || destinations[0] || "";
+  return destinations[0] || "";
 }
 
 function annotateDestinationExceptions(lines) {
@@ -2270,17 +2384,9 @@ function annotateDestinationExceptions(lines) {
 
     return {
       ...line,
-      positionNote: appendPositionNote(line.positionNote, destination)
+      autoPositionNotes: setAutoPositionNote(line.autoPositionNotes, "destination", destination)
     };
   });
-}
-
-function appendPositionNote(note, addition) {
-  const current = String(note || "").trim();
-  const value = String(addition || "").trim();
-  if (!value) return current;
-  if (current.toUpperCase().includes(value.toUpperCase())) return current;
-  return current ? `${current}; ${value}` : value;
 }
 
 function normalizeDestinationName(value) {
@@ -2795,8 +2901,19 @@ function findCustomerFromHeader(lines) {
   const stopIndex = lines.findIndex((line) => /lagerauf/i.test(line));
   const headerLines = (stopIndex === -1 ? lines : lines.slice(0, stopIndex))
     .map((line) => line.trim())
-    .filter((line) => line && !/^(seite|datum|druck|pdf)/i.test(line));
+    .filter((line) => line && !isNonCustomerHeaderLine(line));
   return headerLines[0] || "";
+}
+
+function isNonCustomerHeaderLine(line) {
+  const value = String(line || "").trim();
+  if (!value) return true;
+  if (/^(seite|datum|druck|pdf|auftrag|auftragsnr|auftragsnummer|belegnr|kommission|lieferschein)\b/i.test(value)) return true;
+  if (/hummel\s+logistik|kommissionierliste|lagerauftrag|bestellschein/i.test(value)) return true;
+  if (/^\d{4,}[-\s]?\w*/.test(value)) return true;
+  if (/^9\d{3}\s*-\s*[A-Z0-9]+$/i.test(value)) return true;
+  if (/material|artikel|menge|lagerplatz|handling\s*unit/i.test(value)) return true;
+  return false;
 }
 
 function cleanCustomerName(value) {
@@ -2804,6 +2921,65 @@ function cleanCustomerName(value) {
     .replace(/\s*datum\s*:.*$/i, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function customerGroupKeyForImport(customerName, fallback = "") {
+  return normalizeCustomerGroupKey(customerName) || normalizeCustomerGroupKey(fallback);
+}
+
+function normalizeCustomerGroupKey(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/\b(?:KUNDE|LIEFERADRESSE|EMPFAENGER|EMPFANGER)\b\s*[:#-]?/g, " ")
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim();
+}
+
+function normalizeAutoPositionNotes(notes) {
+  const source = notes && typeof notes === "object" ? notes : {};
+  return {
+    destination: String(source.destination || "").trim(),
+    quantity: String(source.quantity || "").trim(),
+    storagePallet: String(source.storagePallet || "").trim(),
+    loadingSlip: String(source.loadingSlip || "").trim()
+  };
+}
+
+function setAutoPositionNote(notes, key, value) {
+  const next = normalizeAutoPositionNotes(notes);
+  if (Object.prototype.hasOwnProperty.call(next, key)) next[key] = String(value || "").trim();
+  return next;
+}
+
+function autoPositionNoteValues(line) {
+  const notes = normalizeAutoPositionNotes(line?.autoPositionNotes);
+  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function autoPositionNoteText(line) {
+  return combineUniqueNoteParts(autoPositionNoteValues(line));
+}
+
+function combinedPositionNote(line) {
+  return combineUniqueNoteParts([line?.positionNote, ...autoPositionNoteValues(line)]);
+}
+
+function combineUniqueNoteParts(parts) {
+  const seen = new Set();
+  return parts
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .filter((part) => {
+      const key = part.toUpperCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join("; ");
 }
 
 function findFirst(text, patterns) {
@@ -2821,6 +2997,7 @@ function createLine(overrides = {}) {
     fromHandlingUnit: "",
     fromHandlingUnitEditable: true,
     positionNote: "",
+    autoPositionNotes: {},
     binWarning: "",
     binWarningValue: "",
     fromBin: "",
@@ -2901,6 +3078,7 @@ function escapeHtmlAttribute(value) {
 function setHandlingUnitEditMode(input, canEdit) {
   input.readOnly = !canEdit;
   input.classList.toggle("is-editable-hu", canEdit);
+  setNumericInputMode(input);
 
   if (canEdit) {
     input.removeAttribute("readonly");
@@ -2910,6 +3088,16 @@ function setHandlingUnitEditMode(input, canEdit) {
 
   input.setAttribute("readonly", "");
   input.placeholder = "Handling Unit";
+}
+
+function setNumericInputMode(input) {
+  if (!input) return;
+  input.inputMode = "numeric";
+  input.pattern = "[0-9]*";
+}
+
+function normalizeDigits(value) {
+  return String(value || "").replace(/\D/g, "");
 }
 
 function render() {
@@ -2965,6 +3153,7 @@ function render() {
     const canEditHandlingUnit = isStorageLine || line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
     map.fromHandlingUnit.value = line.fromHandlingUnit || "";
     map.positionNote.value = line.positionNote || "";
+    renderAutoPositionNote(item, line);
     map.fromBin.value = line.fromBin || "";
     map.product.value = line.product || "";
     map.description.value = line.description;
@@ -2972,11 +3161,14 @@ function render() {
     map.actualQty.value = line.actualQty;
     map.unit.value = line.unit;
     map.product.readOnly = !isManualStorageLine;
+    setNumericInputMode(map.product);
     map.description.readOnly = !isManualStorageLine;
     setHandlingUnitEditMode(map.fromHandlingUnit, canEditHandlingUnit);
     const canEditBin = isStorageLine || state.awaitingRelease || Boolean(binWarningText);
     map.fromBin.readOnly = !canEditBin;
     map.fromBin.placeholder = isStorageLine ? "Stellplatz" : "Lagerplatz";
+    map.fromBin.setAttribute("autocapitalize", "characters");
+    map.fromBin.classList.add("uppercase-input");
     map.fromBin.classList.toggle("is-warning", Boolean(binWarningText));
     if (binWarningText) map.fromBin.title = binWarningText;
     map.fromHandlingUnit.placeholder = isStorageLine ? "HU eintragen" : map.fromHandlingUnit.placeholder;
@@ -3004,9 +3196,7 @@ function render() {
       setPicked(map.picked.getAttribute("aria-pressed") !== "true");
     });
     map.fromHandlingUnit.addEventListener("input", () => {
-      map.fromHandlingUnit.value = isStorageLine
-        ? map.fromHandlingUnit.value.toUpperCase().replace(/[^A-Z0-9,-]/g, "")
-        : map.fromHandlingUnit.value.replace(/[^0-9,]/g, "");
+      map.fromHandlingUnit.value = normalizeDigits(map.fromHandlingUnit.value);
       updateLine(line.id, { fromHandlingUnit: map.fromHandlingUnit.value, fromHandlingUnitEditable: canEditHandlingUnit }, false);
     });
     map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
@@ -3020,7 +3210,10 @@ function render() {
       }
       updateLine(line.id, patch, clearWarning);
     });
-    map.product.addEventListener("input", () => updateLine(line.id, { product: map.product.value }, false));
+    map.product.addEventListener("input", () => {
+      map.product.value = normalizeDigits(map.product.value);
+      updateLine(line.id, { product: map.product.value }, false);
+    });
     map.description.addEventListener("input", () => updateLine(line.id, { description: map.description.value }, false));
     map.targetQty.addEventListener("input", () => {
       const patch = { targetQty: map.targetQty.value };
@@ -3034,13 +3227,10 @@ function render() {
       const patch = { actualQty: map.actualQty.value };
       if (Number(line.stockQty || 0) > 0) {
         const quantityRemark = storageQuantityRemarkForLine({ ...line, actualQty: map.actualQty.value }, Number(line.stockQty || 0));
-        const nextNote = updateStorageQuantityRemark(map.positionNote.value, quantityRemark);
-        if (nextNote !== String(map.positionNote.value || "").trim()) {
-          map.positionNote.value = nextNote;
-          patch.positionNote = nextNote;
-        }
+        patch.autoPositionNotes = setAutoPositionNote(line.autoPositionNotes, "quantity", quantityRemark);
       }
       updateLine(line.id, patch, false);
+      renderAutoPositionNote(item, line);
     });
     map.unit.addEventListener("input", () => updateLine(line.id, { unit: map.unit.value }, false));
 
@@ -3177,9 +3367,13 @@ function storageLineErrorMessage(line) {
 function storageLineCompletionErrors(line) {
   if ((state.orderType || currentMode) !== "storage" || !line || line.lineType === "loading-slip" || isEmptyManualStorageLine(line)) return [];
   const errors = [];
-  if (!String(line.product || "").trim()) errors.push("Artikelnummer fehlt");
-  if (!String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
+  const product = String(line.product || "").trim();
+  const handlingUnit = String(line.fromHandlingUnit || "").trim();
+  if (!product) errors.push("Artikelnummer fehlt");
+  else if (!/^\d+$/.test(product)) errors.push("Artikelnummer darf nur Zahlen enthalten");
+  if (line.manual !== true && !String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
   if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
+  if (handlingUnit && !/^\d+$/.test(handlingUnit)) errors.push("HU darf nur Zahlen enthalten");
   if (!readPositiveQuantity(line.actualQty || line.targetQty)) errors.push("Menge fehlt");
   return errors;
 }
@@ -3210,13 +3404,15 @@ function parseStorageSlipText(text, _fileName = "", pageTexts = []) {
     actualQty: line.targetQty,
     unit: line.unit || "Stk",
     palletInfo: line.palletInfo,
-    positionNote: line.palletInfo || "",
+    positionNote: "",
+    autoPositionNotes: setAutoPositionNote({}, "storagePallet", line.palletInfo),
     picked: false
   }));
 
   return {
     orderNumber: "",
     customerName: "SSI",
+    customerGroupKey: customerGroupKeyForImport("SSI"),
     lines,
     warnings: pageRows.warnings
   };
@@ -3725,6 +3921,23 @@ function syncFields() {
   });
 }
 
+function renderAutoPositionNote(item, line) {
+  const label = item.querySelector(".position-note-input")?.closest("label");
+  if (!label) return;
+  const text = autoPositionNoteText(line);
+  let note = label.querySelector(".auto-position-note");
+  if (!text) {
+    if (note) note.remove();
+    return;
+  }
+  if (!note) {
+    note = document.createElement("span");
+    note.className = "auto-position-note";
+    label.appendChild(note);
+  }
+  note.textContent = text;
+}
+
 function renderLoadingSlipLine(item, map, line) {
   const barcodeWrap = document.createElement("div");
   barcodeWrap.className = "loading-slip-barcode";
@@ -3742,6 +3955,7 @@ function renderLoadingSlipLine(item, map, line) {
   map.unit.closest("label").remove();
   map.fromHandlingUnit.closest("label").remove();
   map.positionNote.value = line.positionNote || "";
+  renderAutoPositionNote(item, line);
   map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
 
   map.picked.setAttribute("aria-pressed", line.picked ? "true" : "false");
@@ -3760,6 +3974,54 @@ function renderLoadingSlipLine(item, map, line) {
 function syncStateFromFields() {
   ["orderNumber", "customerName", "orderDate", "orderTime", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
     if (elements[id]) state[id] = elements[id].value;
+  });
+  state.customerGroupKey = customerGroupKeyForImport(state.customerName, state.customerGroupKey);
+  syncLineFieldsFromDom();
+}
+
+function syncLineFieldsFromDom() {
+  if (!elements.pickList || !Array.isArray(state.lines) || !state.lines.length) return;
+  const lineById = new Map(state.lines.map((line) => [String(line.id || ""), line]));
+
+  elements.pickList.querySelectorAll(".pick-item[data-id]").forEach((item) => {
+    const line = lineById.get(String(item.dataset.id || ""));
+    if (!line) return;
+
+    const pickedButton = item.querySelector(".picked-button");
+    if (pickedButton) line.picked = pickedButton.getAttribute("aria-pressed") === "true";
+
+    const noteInput = item.querySelector(".position-note-input");
+    if (noteInput) line.positionNote = noteInput.value;
+
+    if (line.lineType === "loading-slip") return;
+
+    const huInput = item.querySelector(".from-hu-input");
+    const binInput = item.querySelector(".from-bin-input");
+    const productInput = item.querySelector(".product-input");
+    const descriptionInput = item.querySelector(".description-input");
+    const targetQtyInput = item.querySelector(".target-qty-input");
+    const actualQtyInput = item.querySelector(".actual-qty-input");
+    const unitInput = item.querySelector(".unit-input");
+
+    if (huInput) {
+      huInput.value = normalizeDigits(huInput.value);
+      line.fromHandlingUnit = huInput.value;
+    }
+    if (binInput) {
+      line.fromBin = binInput.value.toUpperCase();
+      if (shouldClearBinWarning(line, line.fromBin)) {
+        line.binWarning = "";
+        line.binWarningValue = "";
+      }
+    }
+    if (productInput) {
+      productInput.value = normalizeDigits(productInput.value);
+      line.product = productInput.value;
+    }
+    if (descriptionInput) line.description = descriptionInput.value;
+    if (targetQtyInput) line.targetQty = targetQtyInput.value;
+    if (actualQtyInput) line.actualQty = actualQtyInput.value;
+    if (unitInput) line.unit = unitInput.value || "Stk";
   });
 }
 
@@ -3803,7 +4065,7 @@ function updateCompletionFields() {
 
 function updateCounts() {
   const picked = state.lines.filter((line) => line.picked).length;
-  const changed = state.lines.filter((line) => String(line.actualQty).trim() !== String(line.targetQty).trim()).length;
+  const changed = state.lines.filter((line) => isQuantityChanged(line)).length;
   elements.pickedCount.textContent = picked;
   elements.openCount.textContent = Math.max(state.lines.length - picked, 0);
   elements.changedCount.textContent = changed;
@@ -3856,29 +4118,60 @@ async function flushSyncQueue() {
     const pending = await OfflineStore.getPending();
     if (!pending.length) return;
 
-    // Dedup: nur die neueste Mutation je URL behalten
-    const latestByUrl = new Map();
+    // Dedup: nur die neueste Mutation je Queue-Schluessel behalten.
+    const latestByKey = new Map();
     pending.forEach((item) => {
-      const existing = latestByUrl.get(item.url);
-      if (!existing || item.timestamp > existing.timestamp) latestByUrl.set(item.url, item);
+      const key = syncQueueEntryKey(item);
+      const existing = latestByKey.get(key);
+      if (!existing || item.timestamp > existing.timestamp) latestByKey.set(key, item);
     });
 
     let synced = 0;
-    for (const [, item] of latestByUrl) {
+    for (const [, item] of latestByKey) {
       try {
-        await apiJson(item.url, { method: item.method, body: item.body });
+        const result = await apiJson(item.url, { method: item.method, body: item.body });
+        await cacheSyncedQueueOrder(item, result);
+        const itemKey = syncQueueEntryKey(item);
+        await Promise.all(pending
+          .filter((entry) => syncQueueEntryKey(entry) === itemKey)
+          .map((entry) => OfflineStore.dequeue(entry.queueId)));
         synced++;
       } catch {
         // Einzelner Fehler blockiert nicht den Rest
       }
     }
 
-    await OfflineStore.clearQueue();
     if (synced > 0) {
       setServerStatus(`${synced} Offline-Änderung${synced !== 1 ? "en" : ""} synchronisiert.`, "ok");
     }
   } catch {
     // Queue-Flush ist nicht kritisch
+  }
+}
+
+function syncQueueEntryKey(item) {
+  return String(item?.dedupeKey || item?.url || "");
+}
+
+function orderMutationDedupeKey(method, endpoint, order) {
+  if (method === "PUT") return `PUT:${endpoint}`;
+  if (method === "POST" && order?.id) return `POST:${endpoint}:${order.id}`;
+  return "";
+}
+
+async function cacheSyncedQueueOrder(item, result) {
+  if (!window.OfflineStore || item?.method !== "POST" || item.url !== "/api/orders" || !result?.order) return;
+  let payload = {};
+  try {
+    payload = item.body ? JSON.parse(item.body) : {};
+  } catch {
+    return;
+  }
+  if (!payload.order?.id) return;
+  try {
+    await OfflineStore.saveOrder({ ...payload.order, ...result.order });
+  } catch {
+    // Cache-Aktualisierung ist best effort.
   }
 }
 
@@ -4207,7 +4500,7 @@ async function saveOrderNow(silent = false, { allowDraftRelease = false, touch =
         const payload = currentOrderPayload({ touch });
         const endpoint = state.id ? `/api/orders/${encodeURIComponent(state.id)}` : "/api/orders";
         const method = state.id ? "PUT" : "POST";
-        await OfflineStore.enqueue(method, endpoint, JSON.stringify({ order: payload, userName: currentUser.name }));
+        await OfflineStore.enqueue(method, endpoint, JSON.stringify({ order: payload, userName: currentUser.name }), orderMutationDedupeKey(method, endpoint, payload));
         if (state.id) await OfflineStore.saveOrder({ ...payload, id: state.id });
         if (!silent) setServerStatus("Offline gespeichert – wird synchronisiert, sobald der Server erreichbar ist.", "ok");
       } catch {
@@ -4395,6 +4688,7 @@ function currentOrderPayload({ touch = true } = {}) {
     id: state.id,
     orderNumber: state.orderNumber,
     customerName: state.customerName,
+    customerGroupKey: state.customerGroupKey || customerGroupKeyForImport(state.customerName),
     orderDate: state.orderDate,
     orderTime: state.orderTime,
     euroPallets: state.euroPallets,
@@ -4523,7 +4817,19 @@ function appendMissingLoadingSlipFromRawText() {
   if ((state.orderType || currentMode) !== "picking" || !Array.isArray(state.lines) || !state.lines.length) return false;
   if (!String(state.rawText || "").trim()) return false;
 
-  const loadingSlipLines = parseOrderText(state.rawText).lines.filter((line) => line.lineType === "loading-slip" && line.barcode);
+  const parsed = parseOrderText(state.rawText);
+  const rawLines = String(state.rawText || "")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const loadingSlipAudit = auditLoadingSlipImport(rawLines, parsed.lines);
+  if (loadingSlipAudit.issues.length) {
+    console.warn("Ladelisten konnten nicht automatisch aus dem Rohtext ergaenzt werden.", loadingSlipAudit.issues);
+    return false;
+  }
+
+  const loadingSlipLines = parsed.lines.filter((line) => line.lineType === "loading-slip" && line.barcode);
   if (!loadingSlipLines.length) return false;
 
   const beforeCount = state.lines.length;
@@ -4536,6 +4842,7 @@ function clearCurrentOrder() {
     id: "",
     orderNumber: "",
     customerName: "",
+    customerGroupKey: "",
     orderDate: new Date().toISOString().slice(0, 10),
     orderTime: "",
     euroPallets: "",
@@ -4616,7 +4923,7 @@ function exportCsv() {
       line.warehouseOrder,
       line.barcode || "",
       line.fromHandlingUnit,
-      line.positionNote,
+      combinedPositionNote(line),
       line.fromBin,
       line.product,
       line.description,
@@ -4634,6 +4941,7 @@ function exportCsv() {
 }
 
 function isQuantityChanged(line) {
+  if (line?.manual === true && !String(line?.targetQty || "").trim()) return false;
   return String(line?.actualQty || "").trim() !== String(line?.targetQty || "").trim();
 }
 

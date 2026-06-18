@@ -112,9 +112,25 @@
       return txGet("orders", id);
     },
 
+    loadOrders: function () {
+      return txGetAll("orders");
+    },
+
+    deleteOrder: function (id) {
+      return txDelete("orders", id);
+    },
+
+    deleteOrderSummary: function (id) {
+      return this.loadOrderSummaries().then(function (orders) {
+        return window.OfflineStore.saveOrderSummaries((orders || []).filter(function (order) {
+          return String(order && order.id || "") !== String(id || "");
+        }));
+      });
+    },
+
     // ── Sync queue ───────────────────────────────────────────────────────────
 
-    enqueue: function (method, url, body) {
+    enqueue: function (method, url, body, dedupeKey) {
       return openDb().then(function (db) {
         return new Promise(function (resolve, reject) {
           var tx = db.transaction("sync-queue", "readwrite");
@@ -122,6 +138,7 @@
             method: method,
             url: url,
             body: body,
+            dedupeKey: dedupeKey || "",
             timestamp: Date.now()
           });
           request.onsuccess = function () { resolve(request.result); };

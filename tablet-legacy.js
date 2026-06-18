@@ -17,6 +17,8 @@ var orderListTimer = null;
 var autoSaveTimer = null;
 var savingOrder = false;
 var changeRevision = 0;
+var listedOrdersById = {};
+var manualStorageCustomerEdited = false;
 
 document.addEventListener("DOMContentLoaded", function () {
   bindElements();
@@ -24,6 +26,10 @@ document.addEventListener("DOMContentLoaded", function () {
   loadUser();
   renderCompletionFields();
   initialize();
+});
+
+window.addEventListener("online", function () {
+  if (!serverOnline) initialize();
 });
 
 window.addEventListener("pagehide", persistCurrentOrderCache);
@@ -46,7 +52,14 @@ function bindElements() {
     "orderSelect",
     "sortModeSelect",
     "refreshButton",
+    "manualStorageCustomerRow",
+    "manualStorageCustomerInput",
+    "manualStorageWarehouseRow",
+    "manualStorageWarehouseSelect",
+    "manualStorageStartButton",
     "takeOverButton",
+    "leaveOrderButton",
+    "discardOrderButton",
     "saveButton",
     "exportPdfButton",
     "collapseDoneInput",
@@ -72,9 +85,13 @@ function bindEvents() {
   elements.storageModeButton.onclick = function () { setMode("storage"); };
   elements.userNameInput.onchange = function () {
     saveUser();
+    renderManualStorageStartButton();
     renderTakeOverButton();
   };
-  elements.userNameInput.onkeyup = renderTakeOverButton;
+  elements.userNameInput.onkeyup = function () {
+    renderManualStorageStartButton();
+    renderTakeOverButton();
+  };
   elements.orderSelect.onchange = function () {
     var nextOrderId = elements.orderSelect.value;
     if (currentOrderLocksSwitch(nextOrderId)) {
@@ -92,7 +109,24 @@ function bindEvents() {
     renderOrder();
   };
   elements.refreshButton.onclick = loadOrderList;
+  if (elements.manualStorageCustomerInput) {
+    elements.manualStorageCustomerInput.oninput = function () {
+      manualStorageCustomerEdited = true;
+      renderManualStorageStartButton();
+    };
+    elements.manualStorageCustomerInput.onchange = function () {
+      manualStorageCustomerEdited = true;
+      renderManualStorageStartButton();
+    };
+    elements.manualStorageCustomerInput.onkeyup = function () {
+      manualStorageCustomerEdited = true;
+      renderManualStorageStartButton();
+    };
+  }
+  if (elements.manualStorageStartButton) elements.manualStorageStartButton.onclick = startManualStorageOrder;
   elements.takeOverButton.onclick = takeOverCurrentOrder;
+  if (elements.leaveOrderButton) elements.leaveOrderButton.onclick = leaveCurrentOrder;
+  if (elements.discardOrderButton) elements.discardOrderButton.onclick = discardCurrentManualStorageOrder;
   elements.saveButton.onclick = function () { saveOrder(false); };
   elements.exportPdfButton.onclick = exportPdf;
   elements.addStorageLineButton.onclick = addManualStorageLine;
@@ -115,13 +149,319 @@ function initialize() {
   apiJson("/api/health", null, function () {
     serverOnline = true;
     setConnectionStatus(true);
-    loadOrderList();
+    flushSyncQueue(function () {
+      loadOrderList();
+    });
     if (!orderListTimer) orderListTimer = window.setInterval(function () { loadOrderList({ silent: true }); }, ORDER_LIST_REFRESH_MS);
   }, function (message) {
     serverOnline = false;
     setConnectionStatus(false);
-    setMessage("Server nicht verbunden: " + message, true);
+    loadOrderListFromCache(function (cached) {
+      setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden: " + message, !cached);
+    });
   });
+}
+
+function flushSyncQueue(done) {
+  if (!window.OfflineStore) {
+    if (done) done();
+    return;
+  }
+  OfflineStore.getPending().then(function (pending) {
+    if (!pending.length) {
+      if (done) done();
+      return;
+    }
+
+    var latestByKey = {};
+    pending.forEach(function (item) {
+      var key = syncQueueEntryKey(item);
+      var existing = latestByKey[key];
+      if (!existing || item.timestamp > existing.timestamp) latestByKey[key] = item;
+    });
+
+    var latestItems = Object.keys(latestByKey).map(function (key) { return latestByKey[key]; });
+    var synced = 0;
+    var chain = Promise.resolve();
+    latestItems.forEach(function (item) {
+      chain = chain.then(function () {
+        return new Promise(function (resolve) {
+          apiJson(item.url, { method: item.method, body: item.body }, function (result) {
+            handleSyncedQueueItem(item, result).then(function () {
+              var itemKey = syncQueueEntryKey(item);
+              var deletions = pending
+                .filter(function (entry) { return syncQueueEntryKey(entry) === itemKey; })
+                .map(function (entry) { return OfflineStore.dequeue(entry.queueId); });
+              Promise.all(deletions).then(function () {
+                synced += 1;
+                resolve();
+              }, function () {
+                resolve();
+              });
+            }, function () {
+              resolve();
+            });
+          }, function () {
+            resolve();
+          });
+        });
+      });
+    });
+
+    chain.then(function () {
+      if (synced > 0) setMessage(synced + " Offline-Aenderung" + (synced !== 1 ? "en" : "") + " synchronisiert.", false);
+      if (done) done();
+    }, function () {
+      if (done) done();
+    });
+  }, function () {
+    if (done) done();
+  });
+}
+
+function syncQueueEntryKey(item) {
+  return String(item && (item.dedupeKey || item.url) || "");
+}
+
+function handleSyncedQueueItem(item, result) {
+  if (!item || item.method !== "POST" || item.url !== "/api/orders" || !window.OfflineStore) return Promise.resolve();
+  var payload = {};
+  try {
+    payload = item.body ? JSON.parse(item.body) : {};
+  } catch (error) {
+    void error;
+    return Promise.resolve();
+  }
+  var localOrder = payload.order || {};
+  if (!localOrder.id) return Promise.resolve();
+  var syncedOrder = applyOrderSummaryToOrder(localOrder, result && result.order);
+  return saveOrderToOfflineStore(syncedOrder).then(function () {
+    if (currentOrder && String(currentOrder.id) === String(localOrder.id)) {
+      applyOrderSummaryToOrder(currentOrder, result && result.order);
+      persistCurrentOrderCache();
+      renderOrder();
+    }
+  });
+}
+
+function applyOrderSummaryToOrder(order, summary) {
+  if (!order || !summary) return order;
+  [
+    "id",
+    "orderNumber",
+    "customerName",
+    "customerGroupKey",
+    "orderDate",
+    "orderTime",
+    "createdBy",
+    "lastEditedBy",
+    "activeUser",
+    "activeUserAt",
+    "acceptedBy",
+    "acceptedAt",
+    "completedBy",
+    "completedAt",
+    "orderWarehouse",
+    "exportedAt",
+    "orderType",
+    "createdAt",
+    "updatedAt"
+  ].forEach(function (field) {
+    if (Object.prototype.hasOwnProperty.call(summary, field)) order[field] = summary[field];
+  });
+  return order;
+}
+
+function loadOrderListFromCache(done) {
+  if (!window.OfflineStore) {
+    if (done) done(false);
+    return;
+  }
+  var loadCachedOrders = OfflineStore.loadOrders ? OfflineStore.loadOrders() : OfflineStore.loadOrderSummaries();
+  loadCachedOrders.then(function (orders) {
+    var cached = (orders || []).filter(function (order) {
+      return (order.orderType || "picking") === currentMode
+        && isOpenOrder(order)
+        && isAcceptedByCurrentUser(order);
+    }).map(normalizeOrderListEntry);
+    if (!cached.length) {
+      if (done) done(false);
+      return;
+    }
+    renderCachedOrderList(cached);
+    if (done) done(true);
+  }, function () {
+    if (done) done(false);
+  });
+}
+
+function renderCachedOrderList(orders) {
+  clearSelect(elements.orderSelect);
+  addOption(elements.orderSelect, "", modeLabel() + " waehlen (Offline-Cache)");
+  rememberListedOrders(orders);
+  orders.forEach(function (order) {
+    var createdTime = formatOrderCreatedAt(order.createdAt || order.updatedAt);
+    var timeText = createdTime ? createdTime + " - " : "";
+    addOption(
+      elements.orderSelect,
+      order.id,
+      formatOrderOptionLabel(order, timeText) + " [Cache]"
+    );
+  });
+  elements.orderSelect.value = currentOrder && currentOrder.id ? currentOrder.id : "";
+}
+
+function ensureCurrentOrderInSelect() {
+  if (!currentOrder || !currentOrder.id || !elements.orderSelect) return;
+  var summary = orderSummaryFromOrder(currentOrder);
+  listedOrdersById[String(summary.id)] = summary;
+  var option = null;
+  for (var index = 0; index < elements.orderSelect.options.length; index += 1) {
+    if (String(elements.orderSelect.options[index].value) === String(summary.id)) {
+      option = elements.orderSelect.options[index];
+      break;
+    }
+  }
+  var createdTime = formatOrderCreatedAt(summary.createdAt || summary.updatedAt);
+  var timeText = createdTime ? createdTime + " - " : "";
+  var label = formatOrderOptionLabel(summary, timeText);
+  if (option) option.text = label;
+  else addOption(elements.orderSelect, summary.id, label);
+  elements.orderSelect.value = summary.id;
+}
+
+function normalizeOrderListEntry(order) {
+  return Array.isArray(order && order.lines) ? orderSummaryFromOrder(order) : order;
+}
+
+function rememberListedOrders(orders) {
+  listedOrdersById = {};
+  (orders || []).forEach(function (order) {
+    if (order && order.id) listedOrdersById[String(order.id)] = order;
+  });
+}
+
+function cacheOrderSummaries(orders) {
+  if (!window.OfflineStore) return;
+  OfflineStore.saveOrderSummaries(orders || []).catch(function () {});
+}
+
+function cacheAcceptedOpenOrders(orders) {
+  if (!window.OfflineStore || !serverOnline) return;
+  (orders || [])
+    .filter(function (order) {
+      return isOpenOrder(order) && isAcceptedByCurrentUser(order);
+    })
+    .forEach(function (order) {
+      apiJson("/api/orders/" + encodeURIComponent(order.id), null, function (fullOrder) {
+        saveOrderToOfflineStore(fullOrder);
+      }, function () {});
+    });
+}
+
+function cacheOrderDetailsFromAccept(result) {
+  if (!window.OfflineStore || !result) return Promise.resolve();
+  var details = Array.isArray(result.acceptedOrderDetails) ? result.acceptedOrderDetails : [];
+  if (!details.length && result.order) details = [result.order];
+  var chain = Promise.resolve();
+  details.forEach(function (order) {
+    chain = chain.then(function () { return saveOrderToOfflineStore(order); });
+  });
+  if (Array.isArray(result.acceptedOrders) && result.acceptedOrders.length) {
+    chain = chain.then(function () { return OfflineStore.loadOrderSummaries(); }).then(function (existing) {
+      var byId = {};
+      (existing || []).forEach(function (order) {
+        if (order && order.id) byId[order.id] = order;
+      });
+      result.acceptedOrders.forEach(function (order) {
+        if (order && order.id) byId[order.id] = order;
+      });
+      return OfflineStore.saveOrderSummaries(Object.keys(byId).map(function (id) { return byId[id]; }));
+    }).catch(function () {});
+  }
+  return chain.catch(function () {});
+}
+
+function saveOrderToOfflineStore(order) {
+  if (!window.OfflineStore || !order || !order.id) return Promise.resolve();
+  return OfflineStore.saveOrder(order)
+    .then(function () { return updateCachedOrderSummary(order); })
+    .catch(function () {});
+}
+
+function updateCachedOrderSummary(order) {
+  if (!window.OfflineStore || !order || !order.id) return Promise.resolve();
+  return OfflineStore.loadOrderSummaries().then(function (existing) {
+    var byId = {};
+    (existing || []).forEach(function (entry) {
+      if (entry && entry.id) byId[entry.id] = entry;
+    });
+    byId[order.id] = orderSummaryFromOrder(order);
+    return OfflineStore.saveOrderSummaries(Object.keys(byId).map(function (id) { return byId[id]; }));
+  });
+}
+
+function orderSummaryFromOrder(order) {
+  var lines = Array.isArray(order.lines) ? order.lines : [];
+  return {
+    id: order.id,
+    orderNumber: order.orderNumber || (order.manualStorageDraft ? "" : order.id),
+    customerName: order.customerName || "",
+    customerGroupKey: order.customerGroupKey || "",
+    orderDate: order.orderDate || "",
+    orderTime: order.orderTime || "",
+    total: lines.length,
+    picked: lines.filter(function (line) { return line && line.picked; }).length,
+    createdBy: order.createdBy || "",
+    lastEditedBy: order.lastEditedBy || "",
+    activeUser: order.activeUser || "",
+    activeUserAt: order.activeUserAt || "",
+    acceptedBy: order.acceptedBy || "",
+    acceptedAt: order.acceptedAt || "",
+    completedBy: order.completedBy || "",
+    completedAt: order.completedAt || "",
+    orderWarehouse: order.orderWarehouse || "",
+    exportedAt: order.exportedAt || "",
+    orderType: order.orderType || "picking",
+    createdAt: order.createdAt || "",
+    updatedAt: order.updatedAt || "",
+    manualStorageDraft: order.manualStorageDraft === true,
+    localDraft: order.localDraft === true
+  };
+}
+
+function isAcceptedByCurrentUser(order) {
+  return sameUserName(order && order.acceptedBy, currentUserName());
+}
+
+function normalizeAutoPositionNotes(notes) {
+  var source = notes && typeof notes === "object" ? notes : {};
+  return {
+    destination: String(source.destination || "").trim(),
+    quantity: String(source.quantity || "").trim(),
+    storagePallet: String(source.storagePallet || "").trim(),
+    loadingSlip: String(source.loadingSlip || "").trim()
+  };
+}
+
+function autoPositionNoteText(line) {
+  var notes = normalizeAutoPositionNotes(line && line.autoPositionNotes);
+  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip]
+    .filter(function (value, index, values) {
+      var text = String(value || "").trim();
+      if (!text) return false;
+      return values.findIndex(function (entry) { return String(entry || "").trim().toUpperCase() === text.toUpperCase(); }) === index;
+    })
+    .join("; ");
+}
+
+function decorateAutoPositionNoteLabel(label, line) {
+  var text = autoPositionNoteText(line);
+  if (!label || !text) return;
+  var note = document.createElement("span");
+  note.className = "auto-position-note";
+  note.textContent = text;
+  label.appendChild(note);
 }
 
 function loadUser() {
@@ -186,6 +526,19 @@ function isStorageOrder() {
   return (currentOrder && (currentOrder.orderType || "picking") === "storage") || (!currentOrder && currentMode === "storage");
 }
 
+function isManualStorageOrder(order) {
+  if (!order || (order.orderType || "picking") !== "storage") return false;
+  if (order.manualStorageDraft === true || order.localDraft === true || isLocalStorageOrderId(order.id)) return true;
+  var lines = (Array.isArray(order.lines) ? order.lines : []).filter(function (line) {
+    return line && line.lineType !== "loading-slip" && !isEmptyManualStorageLine(line);
+  });
+  return Boolean(lines.length && lines.every(function (line) { return line.manual === true; }));
+}
+
+function isLocalStorageOrderId(id) {
+  return String(id || "").indexOf("local-storage-") === 0;
+}
+
 function updateModeUi() {
   var isStorage = isStorageOrder();
   if (elements.tabletTitle) elements.tabletTitle.textContent = isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
@@ -204,20 +557,46 @@ function updateModeUi() {
       : "<span>Artikelnummer</span><span>Lagerplatz</span><span>Produktbeschreibung</span><span>Soll</span><span>Ist</span><span>Einheit</span>";
   }
   if (elements.exportPdfButton) elements.exportPdfButton.textContent = isStorage ? "Einlagerung abschliessen" : "PDF exportieren";
+  renderManualStorageStartButton();
 }
 
 function loadOrderList(options) {
   var silent = options && options.silent === true;
   if (!serverOnline) {
-    if (!silent) setMessage("Server nicht verbunden.", true);
+    loadOrderListFromCache(function (cached) {
+      if (!silent) setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden.", !cached);
+    });
     return;
   }
   apiJson("/api/orders", null, function (orders) {
-    var selected = elements.orderSelect.value;
+    var currentMissingOnServer = false;
+    var index;
+    if (currentOrder && currentOrder.id) {
+      currentMissingOnServer = true;
+      for (index = 0; index < orders.length; index += 1) {
+        if (orders[index].id === currentOrder.id) {
+          currentMissingOnServer = false;
+          break;
+        }
+      }
+    }
+    var statusMessage = "";
+    if (currentMissingOnServer && !dirty) {
+      clearCurrentOrderCache();
+      currentOrder = null;
+      dirty = false;
+      elements.collapseDoneInput.checked = true;
+      renderCompletionFields();
+      renderOrder();
+      statusMessage = "Der geoeffnete Auftrag ist auf dem Server nicht mehr vorhanden. Tablet wurde freigegeben.";
+    } else if (currentMissingOnServer) {
+      statusMessage = "Der geoeffnete Auftrag ist auf dem Server nicht mehr vorhanden. Nutze Auftrag verlassen, um das Tablet freizugeben.";
+    }
+    var selected = currentMissingOnServer ? "" : elements.orderSelect.value;
     clearSelect(elements.orderSelect);
     addOption(elements.orderSelect, "", currentMode === "storage" ? "Einlagerung waehlen" : "Auftrag waehlen");
     var count = 0;
-    for (var index = 0; index < orders.length; index += 1) {
+    for (index = 0; index < orders.length; index += 1) {
       var order = orders[index];
       if ((order.orderType || "picking") !== currentMode) continue;
       if (!isOpenOrder(order)) continue;
@@ -231,7 +610,11 @@ function loadOrderList(options) {
       count += 1;
     }
     elements.orderSelect.value = selected;
-    if (!silent) setMessage(count ? "Auftragsliste geladen: " + count + " Auftrag/Auftraege." : "Keine offenen " + modeLabel() + "en gefunden.", false);
+    rememberListedOrders(orders);
+    if (statusMessage) setMessage(statusMessage, currentMissingOnServer && dirty);
+    else if (!silent) setMessage(count ? "Auftragsliste geladen: " + count + " Auftrag/Auftraege." : "Keine offenen " + modeLabel() + "en gefunden.", false);
+    cacheOrderSummaries(orders);
+    cacheAcceptedOpenOrders(orders);
   }, function (message) {
     if (!silent) setMessage("Auftragsliste konnte nicht geladen werden: " + message, true);
   });
@@ -255,7 +638,8 @@ function formatOrderCreatedAt(value) {
 function formatOrderOptionLabel(order, timeText) {
   var status = orderStatusText(order);
   var warehouse = order.orderWarehouse ? " - " + order.orderWarehouse : "";
-  return timeText + (order.orderNumber || order.id) + " - " + (order.customerName || "") + warehouse + " [" + status + "] (" + order.picked + "/" + order.total + ")";
+  var number = order.orderNumber || (order.manualStorageDraft ? "Manuelle Einlagerung" : order.id);
+  return timeText + number + " - " + (order.customerName || "") + warehouse + " [" + status + "] (" + order.picked + "/" + order.total + ")";
 }
 
 function orderStatusText(order) {
@@ -269,11 +653,23 @@ function sameUserName(left, right) {
   return String(left || "").trim().toLowerCase() === String(right || "").trim().toLowerCase();
 }
 
+function currentOrderAcceptedByCurrentUser() {
+  if (!currentOrder || !currentOrder.id || currentOrder.exportedAt) return false;
+  var acceptedBy = String(currentOrder.acceptedBy || "").trim();
+  return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+}
+
+function canEditCurrentOrder() {
+  return currentOrderAcceptedByCurrentUser();
+}
+
 function currentOrderLocksSwitch(nextOrderId) {
   if (!currentOrder || !currentOrder.id || currentOrder.exportedAt) return false;
   if (String(nextOrderId || "") === String(currentOrder.id)) return false;
   var acceptedBy = String(currentOrder.acceptedBy || "").trim();
-  return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+  if (!acceptedBy || !sameUserName(acceptedBy, currentUserName())) return false;
+  var target = listedOrdersById[String(nextOrderId || "")];
+  return !target || !isAcceptedByCurrentUser(target);
 }
 
 function currentOrderLocksModeSwitch(nextMode) {
@@ -302,8 +698,40 @@ function loadOrder(id) {
     keepCurrentOrderSelected();
     return;
   }
+  if (dirty && currentOrderAcceptedByCurrentUser() && isAcceptedByCurrentUser(listedOrdersById[String(id)])) {
+    saveOrder(true, function () {
+      loadOrder(id);
+    });
+    return;
+  }
   if (dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Auftrag trotzdem wechseln?")) {
     elements.orderSelect.value = currentOrder ? currentOrder.id : "";
+    return;
+  }
+  if (!serverOnline) {
+    if (!window.OfflineStore) return setMessage("Offline-Cache ist nicht verfuegbar.", true);
+    OfflineStore.loadOrder(id).then(function (cached) {
+      if (!cached) {
+        setMessage("Offline: Dieser Auftrag ist nicht im lokalen Cache vorhanden.", true);
+        return;
+      }
+      currentOrder = cached;
+      currentMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
+      try {
+        localStorage.setItem(MODE_KEY, currentMode);
+      } catch (error) {
+        void error;
+      }
+      currentOrder.collapseDone = currentOrder.collapseDone !== false;
+      elements.collapseDoneInput.checked = currentOrder.collapseDone;
+      renderCompletionFields();
+      dirty = false;
+      renderOrder();
+      persistCurrentOrderCache();
+      setMessage("Offline: Auftrag aus Cache geladen. Aenderungen werden bei Verbindung synchronisiert.", false);
+    }, function (error) {
+      setMessage("Cache-Fehler: " + (error && error.message ? error.message : error), true);
+    });
     return;
   }
   apiJson("/api/orders/" + encodeURIComponent(id), null, function (order) {
@@ -325,6 +753,7 @@ function loadOrder(id) {
       return;
     }
     persistCurrentOrderCache();
+    saveOrderToOfflineStore(order);
     setMessage(currentOrder.acceptedBy && !sameUserName(currentOrder.acceptedBy, currentUserName())
       ? "Auftrag geladen. Bereits von " + currentOrder.acceptedBy + " uebernommen."
       : "Auftrag geladen.", false);
@@ -353,11 +782,33 @@ function renderOrder() {
   updateCounts();
 }
 
+function renderManualStorageStartButton() {
+  if (!elements.manualStorageStartButton) return;
+  var visible = currentMode === "storage" && !currentOrder;
+  if (elements.manualStorageCustomerRow) setHidden(elements.manualStorageCustomerRow, !visible);
+  if (elements.manualStorageWarehouseRow) setHidden(elements.manualStorageWarehouseRow, !visible);
+  clearAutofilledManualStorageCustomer(visible);
+  setHidden(elements.manualStorageStartButton, !visible);
+  var invalidCustomer = visible && !manualStorageCustomerIsValid();
+  elements.manualStorageStartButton.disabled = !visible || !currentUserName() || invalidCustomer || (!serverOnline && !window.OfflineStore);
+  elements.manualStorageStartButton.title = !currentUserName()
+    ? "Bitte erst Mitarbeiter eintragen."
+    : (invalidCustomer
+      ? "Bitte Kunde eintragen."
+      : (!serverOnline && !window.OfflineStore ? "Offline-Cache ist nicht verfuegbar." : ""));
+}
+
+function clearAutofilledManualStorageCustomer(visible) {
+  if (!visible || manualStorageCustomerEdited || !elements.manualStorageCustomerInput) return;
+  if (manualStorageCustomerName().toUpperCase() === "SSI") elements.manualStorageCustomerInput.value = "";
+}
+
 function renderStorageLineActions() {
   if (!elements.storageLineActions || !elements.addStorageLineButton) return;
   var isStorage = isStorageOrder();
+  renderManualStorageStartButton();
   setHidden(elements.storageLineActions, !isStorage || !currentOrder);
-  elements.addStorageLineButton.disabled = !isStorage || !currentOrder;
+  elements.addStorageLineButton.disabled = !isStorage || !currentOrder || !canEditCurrentOrder();
 }
 
 function addManualStorageLine() {
@@ -366,15 +817,27 @@ function addManualStorageLine() {
     setMessage("Bitte erst Mitarbeiter eintragen.", true);
     return;
   }
+  if (!canEditCurrentOrder()) {
+    setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
   currentOrder.lines = Array.isArray(currentOrder.lines) ? currentOrder.lines : [];
-  currentOrder.lines.push({
+  currentOrder.lines.push(createManualStorageLine(currentOrder.lines));
+  markDirty();
+  renderOrder();
+  saveOrder(false);
+}
+
+function createManualStorageLine(lines) {
+  return {
     id: createLineId(),
     orderType: "storage",
     manual: true,
-    warehouseOrder: nextManualStoragePosition(currentOrder.lines),
+    warehouseOrder: nextManualStoragePosition(lines),
     fromHandlingUnit: "",
     fromHandlingUnitEditable: true,
     positionNote: "",
+    autoPositionNotes: {},
     fromBin: "",
     product: "",
     description: "",
@@ -382,10 +845,188 @@ function addManualStorageLine() {
     actualQty: "",
     unit: "Stk",
     picked: false
-  });
-  markDirty();
+  };
+}
+
+function startManualStorageOrder() {
+  if (!currentUserName()) {
+    setMessage("Bitte erst Mitarbeiter eintragen.", true);
+    renderManualStorageStartButton();
+    return;
+  }
+  if (!manualStorageCustomerIsValid()) {
+    setMessage("Bitte Kunde eintragen.", true);
+    renderManualStorageStartButton();
+    return;
+  }
+  if (currentOrder) {
+    setMessage("Bitte den geoeffneten Auftrag erst abschliessen oder verlassen.", true);
+    return;
+  }
+  currentMode = "storage";
+  try {
+    localStorage.setItem(MODE_KEY, currentMode);
+  } catch (error) {
+    void error;
+  }
+  currentOrder = createManualStorageOrder();
+  dirty = true;
+  changeRevision += 1;
+  elements.collapseDoneInput.checked = true;
+  ensureCurrentOrderInSelect();
+  renderCompletionFields();
   renderOrder();
-  saveOrder(false);
+  persistCurrentOrderCache();
+  if (serverOnline) {
+    createManualStorageOrderOnServer();
+    return;
+  }
+  persistManualStorageOrderOffline("Offline: Manuelle Einlagerung lokal gestartet. Sie wird bei Verbindung angelegt.");
+}
+
+function createManualStorageOrder() {
+  var now = new Date();
+  var nowIso = now.toISOString();
+  var user = currentUserName();
+  var customerName = manualStorageCustomerName();
+  var warehouse = manualStorageWarehouse();
+  var lines = [];
+  lines.push(createManualStorageLine(lines));
+  return {
+    id: createLocalStorageOrderId(),
+    orderNumber: "",
+    customerName: customerName,
+    customerGroupKey: manualStorageCustomerGroupKey(customerName),
+    orderDate: formatLocalDate(now),
+    orderTime: formatLocalTime(now),
+    euroPallets: "",
+    storageSpaces: "",
+    orderNote: "",
+    rawText: "",
+    collapseDone: true,
+    orderType: "storage",
+    orderWarehouse: warehouse,
+    manualStorageDraft: true,
+    localDraft: true,
+    exportedAt: "",
+    exportedPdfFile: "",
+    exportedPdfPath: "",
+    createdBy: user,
+    lastEditedBy: user,
+    activeUser: user,
+    activeUserAt: nowIso,
+    acceptedBy: user,
+    acceptedAt: nowIso,
+    completedBy: "",
+    completedAt: "",
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    lines: lines
+  };
+}
+
+function manualStorageCustomerName() {
+  return String(elements.manualStorageCustomerInput && elements.manualStorageCustomerInput.value || "").trim();
+}
+
+function manualStorageCustomerIsValid() {
+  var customerName = manualStorageCustomerName();
+  return Boolean(customerName && (manualStorageCustomerEdited || customerName.toUpperCase() !== "SSI"));
+}
+
+function manualStorageCustomerGroupKey(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ");
+}
+
+function manualStorageWarehouse() {
+  var value = String(elements.manualStorageWarehouseSelect && elements.manualStorageWarehouseSelect.value || "SSI").trim().toUpperCase();
+  return value === "SI" ? "SI" : "SSI";
+}
+
+function createLocalStorageOrderId() {
+  if (window.crypto && window.crypto.randomUUID) return "local-storage-" + window.crypto.randomUUID();
+  return "local-storage-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+}
+
+function formatLocalDate(date) {
+  var month = String(date.getMonth() + 1);
+  var day = String(date.getDate());
+  if (month.length < 2) month = "0" + month;
+  if (day.length < 2) day = "0" + day;
+  return date.getFullYear() + "-" + month + "-" + day;
+}
+
+function formatLocalTime(date) {
+  var hours = String(date.getHours());
+  var minutes = String(date.getMinutes());
+  if (hours.length < 2) hours = "0" + hours;
+  if (minutes.length < 2) minutes = "0" + minutes;
+  return hours + ":" + minutes;
+}
+
+function createManualStorageOrderOnServer() {
+  if (!currentOrder) return;
+  apiJson("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ order: currentOrder, userName: currentUserName() })
+  }, function (result) {
+    applyOrderSummaryToOrder(currentOrder, result && result.order);
+    currentOrder.localDraft = false;
+    dirty = false;
+    clearCurrentOrderCache();
+    ensureCurrentOrderInSelect();
+    renderOrder();
+    saveOrderToOfflineStore(currentOrder);
+    loadOrderList({ silent: true });
+    setMessage("Manuelle Einlagerung gestartet.", false);
+  }, function (message) {
+    persistCurrentOrderCache();
+    if (!window.OfflineStore) {
+      setMessage("Manuelle Einlagerung konnte nicht angelegt werden: " + message, true);
+      return;
+    }
+    persistManualStorageOrderOffline("Server nicht erreichbar: Manuelle Einlagerung lokal gestartet und wird synchronisiert.");
+  });
+}
+
+function persistManualStorageOrderOffline(message) {
+  if (!window.OfflineStore || !currentOrder) {
+    setMessage("Offline-Cache ist nicht verfuegbar.", true);
+    return;
+  }
+  queueManualStorageOrderCreate(currentOrder)
+    .then(function () { return saveOrderToOfflineStore(currentOrder); })
+    .then(function () {
+      dirty = false;
+      clearCurrentOrderCache();
+      ensureCurrentOrderInSelect();
+      renderOrder();
+      setMessage(message, false);
+    }, function () {
+      dirty = true;
+      persistCurrentOrderCache();
+      setMessage("Offline: Manuelle Einlagerung konnte nicht lokal gespeichert werden.", true);
+    });
+}
+
+function queueManualStorageOrderCreate(order) {
+  return OfflineStore.enqueue(
+    "POST",
+    "/api/orders",
+    JSON.stringify({ order: order, userName: currentUserName() }),
+    manualStorageCreateDedupeKey(order.id)
+  );
+}
+
+function manualStorageCreateDedupeKey(orderId) {
+  return "POST:/api/orders:" + String(orderId || "");
+}
+
+function storageOrderPutDedupeKey(orderId) {
+  return "PUT:/api/orders/" + encodeURIComponent(orderId);
 }
 
 function nextManualStoragePosition(lines) {
@@ -429,15 +1070,18 @@ function renderLine(line) {
   if (line.lineType === "loading-slip") return renderLoadingSlipLine(line);
   var isStorage = isStorageOrder();
   var isManualStorageLine = isStorage && line.manual === true;
+  var canEditOrder = canEditCurrentOrder();
+  var missing = isMissingStorageLine(line);
 
   var card = document.createElement("article");
   var binWarningText = String(line.binWarning || "").trim();
-  card.className = "pick-item" + (line.picked ? " is-done" : "") + (line.picked && currentOrder.collapseDone ? " is-collapsed" : "") + (binWarningText ? " has-bin-warning" : "");
+  card.className = "pick-item" + (line.picked ? " is-done" : "") + (line.picked && currentOrder.collapseDone ? " is-collapsed" : "") + (binWarningText ? " has-bin-warning" : "") + (missing ? " is-missing" : "");
 
   var checkWrap = document.createElement("button");
   checkWrap.type = "button";
   checkWrap.className = "check-target";
   if (line.picked) checkWrap.className += " is-picked";
+  checkWrap.disabled = !canEditOrder || missing;
   checkWrap.setAttribute("aria-pressed", line.picked ? "true" : "false");
   checkWrap.setAttribute("aria-label", line.picked ? "Position wieder öffnen" : "Position abhaken");
   var checkmark = document.createElement("span");
@@ -456,55 +1100,58 @@ function renderLine(line) {
   top.className = "line-top";
 
   top.appendChild(makeInput(isStorage ? "Material" : "Produkt", line.product, function (value) {
-    line.product = String(value || "").trim();
+    line.product = normalizeDigits(value);
     markDirty();
-  }, !isManualStorageLine, "short-input"));
-  var canEditBin = isStorage || Boolean(binWarningText);
+  }, !canEditOrder || missing || !isManualStorageLine, "short-input", numericInputOptions()));
+  var canEditBin = canEditOrder && !missing && (isStorage || Boolean(binWarningText));
   var binInput = makeInput(isStorage ? "Stellplatz" : "Lagerplatz", line.fromBin, canEditBin ? function (value) {
-    line.fromBin = value.toUpperCase();
+    line.fromBin = normalizeUppercaseText(value);
     if (shouldClearBinWarning(line, line.fromBin)) {
       line.binWarning = "";
       line.binWarningValue = "";
       renderOrder();
     }
     markDirty();
-  } : null, !canEditBin, "short-input");
+  } : null, !canEditBin, "short-input", uppercaseInputOptions());
   if (binWarningText) decorateBinWarningLabel(binInput, binWarningText);
   top.appendChild(binInput);
   top.appendChild(makeInput(isStorage ? "Artikelbezeichnung" : "Produktbeschreibung", line.description, function (value) {
     line.description = value;
     markDirty();
-  }, !isManualStorageLine, ""));
+  }, !canEditOrder || missing || !isManualStorageLine, ""));
   top.appendChild(makeInput("Soll", line.targetQty, function (value) {
     line.targetQty = value;
     if (!line.actualQty) line.actualQty = value;
     markDirty();
     updateCounts();
-  }, !isManualStorageLine, "short-input"));
+  }, !canEditOrder || missing || !isManualStorageLine, "short-input"));
   top.appendChild(makeInput("Ist", line.actualQty, function (value) {
     line.actualQty = value;
     markDirty();
     updateCounts();
-  }, isStorage && !isManualStorageLine, "short-input"));
+  }, !canEditOrder || missing || (isStorage && !isManualStorageLine), "short-input"));
   top.appendChild(makeInput("Einheit", line.unit, function (value) {
     line.unit = value || "Stk";
     markDirty();
-  }, !isManualStorageLine, "short-input"));
+  }, !canEditOrder || missing || !isManualStorageLine, "short-input"));
   body.appendChild(top);
 
   var locationRow = document.createElement("div");
   locationRow.className = "location-row";
   var canEditHu = isStorage || line.fromHandlingUnitEditable === true || !String(line.fromHandlingUnit || "").trim();
   locationRow.appendChild(makeInput(isStorage ? "HU" : "Von HU", line.fromHandlingUnit, function (value) {
-    line.fromHandlingUnit = isStorage ? value.toUpperCase().replace(/[^A-Z0-9,-]/g, "") : value.replace(/[^0-9,]/g, "");
+    line.fromHandlingUnit = normalizeDigits(value);
     line.fromHandlingUnitEditable = canEditHu;
     markDirty();
-  }, !canEditHu, ""));
-  locationRow.appendChild(makeInput("Zusatzbemerkung", line.positionNote, function (value) {
+  }, !canEditOrder || missing || !canEditHu, "", numericInputOptions()));
+  var noteInput = makeInput("Zusatzbemerkung", line.positionNote, function (value) {
     line.positionNote = value;
     markDirty();
-  }, isStorage && !isManualStorageLine, ""));
-  if (isManualStorageLine) locationRow.appendChild(makeManualStorageDeleteButton(line));
+  }, !canEditOrder || missing || (isStorage && !isManualStorageLine), "");
+  decorateAutoPositionNoteLabel(noteInput, line);
+  locationRow.appendChild(noteInput);
+  if (isStorage && !isEmptyManualStorageLine(line)) locationRow.appendChild(makeStorageMissingButton(line));
+  if (isManualStorageLine && canEditOrder && !missing) locationRow.appendChild(makeManualStorageDeleteButton(line));
   body.appendChild(locationRow);
 
   card.appendChild(body);
@@ -512,6 +1159,7 @@ function renderLine(line) {
 }
 
 function renderLoadingSlipLine(line) {
+  var canEditOrder = canEditCurrentOrder();
   var card = document.createElement("article");
   card.className = "pick-item is-loading-slip" + (line.picked ? " is-done" : "") + (line.picked && currentOrder.collapseDone ? " is-collapsed" : "");
 
@@ -519,6 +1167,7 @@ function renderLoadingSlipLine(line) {
   checkWrap.type = "button";
   checkWrap.className = "check-target";
   if (line.picked) checkWrap.className += " is-picked";
+  checkWrap.disabled = !canEditOrder;
   checkWrap.setAttribute("aria-pressed", line.picked ? "true" : "false");
   checkWrap.setAttribute("aria-label", line.picked ? "Position wieder oeffnen" : "Position abhaken");
   var checkmark = document.createElement("span");
@@ -547,10 +1196,12 @@ function renderLoadingSlipLine(line) {
 
   var noteRow = document.createElement("div");
   noteRow.className = "location-row loading-slip-note-row";
-  noteRow.appendChild(makeInput("Zusatzbemerkung", line.positionNote, function (value) {
+  var noteInput = makeInput("Zusatzbemerkung", line.positionNote, function (value) {
     line.positionNote = value;
     markDirty();
-  }, false, ""));
+  }, !canEditOrder, "");
+  decorateAutoPositionNoteLabel(noteInput, line);
+  noteRow.appendChild(noteInput);
   body.appendChild(noteRow);
 
   card.appendChild(body);
@@ -558,6 +1209,11 @@ function renderLoadingSlipLine(line) {
 }
 
 function toggleLinePicked(line, card, button) {
+  if (!canEditCurrentOrder()) {
+    setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
+  if (isMissingStorageLine(line)) return;
   if (!line.picked && storageLineCompletionErrors(line).length) {
     setMessage(storageLineErrorMessage(line), true);
     return;
@@ -566,6 +1222,46 @@ function toggleLinePicked(line, card, button) {
   updateLinePickedState(line, card, button);
   markDirty();
   updateCounts();
+}
+
+function makeStorageMissingButton(line) {
+  var missing = isMissingStorageLine(line);
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "missing-line-toggle" + (missing ? " restore-missing" : " danger-button");
+  button.textContent = missing ? "Wiederherstellen" : "Fehlmenge";
+  button.disabled = !canEditCurrentOrder();
+  button.onclick = function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleStorageLineMissing(line);
+  };
+  return button;
+}
+
+function toggleStorageLineMissing(line) {
+  if (!currentOrder || !isStorageOrder() || !line || isEmptyManualStorageLine(line)) return;
+  if (!canEditCurrentOrder()) {
+    setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
+  if (isMissingStorageLine(line)) {
+    if (!window.confirm("Fehlmenge fuer diese Position wiederherstellen?")) return;
+    delete line.missing;
+    delete line.missingBy;
+    delete line.missingAt;
+    delete line.missingNote;
+  } else {
+    if (!window.confirm("Diese Position als Fehlmenge markieren? Sie wird nicht als Wareneingang gebucht.")) return;
+    line.missing = true;
+    line.missingBy = currentUserName() || "Tablet";
+    line.missingAt = new Date().toISOString();
+    line.missingNote = line.missingNote || "nicht geliefert";
+    line.picked = false;
+  }
+  markDirty();
+  renderOrder();
+  saveOrder(false);
 }
 
 function makeManualStorageDeleteButton(line) {
@@ -632,23 +1328,55 @@ function updateLinePickedState(line, card, button) {
   }
 }
 
-function makeInput(labelText, value, onChange, readOnly, className) {
+function makeInput(labelText, value, onChange, readOnly, className, inputOptions) {
+  var options = inputOptions || {};
   var label = document.createElement("label");
   label.appendChild(document.createTextNode(labelText));
   var input = document.createElement("input");
   input.type = "text";
   input.value = value || "";
   input.className = className || "";
+  if (options.inputMode) input.inputMode = options.inputMode;
+  if (options.pattern) input.pattern = options.pattern;
+  if (options.autocapitalize) input.setAttribute("autocapitalize", options.autocapitalize);
   if (readOnly) {
     input.readOnly = true;
     input.setAttribute("readonly", "");
     input.className = (input.className ? input.className + " " : "") + "readonly-input";
   }
-  input.onchange = input.onkeyup = function () {
-    if (!input.readOnly && onChange) onChange(input.value);
+  var handleChange = function () {
+    if (input.readOnly) return;
+    if (options.normalize) input.value = options.normalize(input.value);
+    if (onChange) onChange(input.value);
   };
+  input.oninput = handleChange;
+  input.onchange = handleChange;
+  input.onkeyup = handleChange;
   label.appendChild(input);
   return label;
+}
+
+function normalizeDigits(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function normalizeUppercaseText(value) {
+  return String(value || "").toUpperCase();
+}
+
+function numericInputOptions() {
+  return {
+    inputMode: "numeric",
+    pattern: "[0-9]*",
+    normalize: normalizeDigits
+  };
+}
+
+function uppercaseInputOptions() {
+  return {
+    autocapitalize: "characters",
+    normalize: normalizeUppercaseText
+  };
 }
 
 function decorateBinWarningLabel(label, message) {
@@ -669,9 +1397,28 @@ function renderTakeOverButton() {
   var hasOrder = Boolean(currentOrder && currentOrder.id && currentOrder.lines && currentOrder.lines.length);
   var acceptedBy = currentOrder ? String(currentOrder.acceptedBy || "").trim() : "";
   var user = currentUserName();
-  setHidden(elements.takeOverButton, !hasOrder || (acceptedBy && sameUserName(acceptedBy, user)));
+  var isMine = acceptedBy && sameUserName(acceptedBy, user);
+  var canEditOrder = hasOrder && Boolean(isMine);
+  var manualStorage = isManualStorageOrder(currentOrder);
+  setHidden(elements.takeOverButton, !hasOrder || isMine);
   elements.takeOverButton.disabled = !hasOrder || !user || !serverOnline;
   elements.takeOverButton.innerHTML = escapeHtml(acceptedBy ? "Von " + acceptedBy + " uebernommen" : "Bearbeitung uebernehmen");
+  if (elements.leaveOrderButton) {
+    setHidden(elements.leaveOrderButton, !hasOrder || !isMine || manualStorage);
+    elements.leaveOrderButton.disabled = !hasOrder;
+  }
+  renderDiscardOrderButton(hasOrder, isMine, manualStorage);
+  elements.saveButton.disabled = !canEditOrder;
+  elements.exportPdfButton.disabled = !canEditOrder;
+  renderManualStorageStartButton();
+  renderStorageLineActions();
+}
+
+function renderDiscardOrderButton(hasOrder, isMine, manualStorage) {
+  if (!elements.discardOrderButton) return;
+  var visible = Boolean(hasOrder && isMine && manualStorage);
+  setHidden(elements.discardOrderButton, !visible);
+  elements.discardOrderButton.disabled = !visible || (!serverOnline && !window.OfflineStore);
 }
 
 function acceptOrderOnServer(id, success, failure) {
@@ -688,18 +1435,207 @@ function acceptOrderOnServer(id, success, failure) {
 function takeOverCurrentOrder() {
   if (!currentOrder || !currentOrder.id) return setMessage("Kein Auftrag ausgewaehlt.", true);
   if (!currentUserName()) return setMessage("Bitte erst Mitarbeiter eintragen.", true);
+  var localOrderBeforeAccept = currentOrderAcceptedByCurrentUser() ? currentOrder : null;
+  var hadLocalChanges = dirty && Boolean(localOrderBeforeAccept);
   acceptOrderOnServer(currentOrder.id, function (accepted) {
-    if (accepted && accepted.order) currentOrder = accepted.order;
+    if (accepted && accepted.order) currentOrder = localOrderBeforeAccept ? mergeLocalOrderAfterAccept(accepted.order, localOrderBeforeAccept) : accepted.order;
     currentOrder.collapseDone = currentOrder.collapseDone !== false;
-    dirty = false;
     renderCompletionFields();
     renderOrder();
     persistCurrentOrderCache();
-    loadOrderList({ silent: true });
-    setMessage(acceptedOrderMessage(accepted), false);
+    var finishTakeOver = function () {
+      cacheOrderDetailsFromAccept(accepted).then(function () {
+        loadOrderList({ silent: true });
+        setMessage(acceptedOrderMessage(accepted), false);
+      }, function () {
+        loadOrderList({ silent: true });
+        setMessage(acceptedOrderMessage(accepted), false);
+      });
+    };
+    if (hadLocalChanges) {
+      saveOrder(true, finishTakeOver);
+    } else {
+      dirty = false;
+      finishTakeOver();
+    }
   }, function (message) {
     setMessage("Bearbeitung konnte nicht uebernommen werden: " + message, true);
   });
+}
+
+function releaseOrderOnServer(id, success, failure) {
+  if (!serverOnline) {
+    if (success) success({ ok: true, localOnly: true });
+    return;
+  }
+  apiJson("/api/orders/" + encodeURIComponent(id) + "/release", {
+    method: "POST",
+    body: JSON.stringify({ userName: currentUserName() })
+  }, success, failure);
+}
+
+function leaveCurrentOrder() {
+  if (!currentOrder || !currentOrder.id) {
+    resetToStart("Tablet freigegeben.");
+    return;
+  }
+  var label = lockedOrderLabel();
+  var warning = dirty
+    ? "Auftrag " + label + " verlassen? Ungespeicherte Aenderungen auf diesem Tablet werden verworfen."
+    : "Auftrag " + label + " verlassen und zur Auftragsauswahl zurueckkehren?";
+  if (!window.confirm(warning)) return;
+
+  var leavingOrderId = currentOrder.id;
+  releaseOrderOnServer(leavingOrderId, function () {
+    resetToStart("Auftrag verlassen. Bitte Auftrag waehlen.");
+    loadOrderList({ silent: true });
+  }, function (message) {
+    resetToStart("Auftrag lokal verlassen. Serverfreigabe konnte nicht bestaetigt werden.");
+    loadOrderList({ silent: true });
+    setMessage("Auftrag lokal verlassen. Servermeldung: " + message, true);
+  });
+}
+
+function discardCurrentManualStorageOrder() {
+  if (!currentOrder || !currentOrder.id || !isManualStorageOrder(currentOrder)) return setMessage("Kein manueller Einlagerauftrag geoeffnet.", true);
+  if (!canEditCurrentOrder()) return setMessage("Bearbeitung erst uebernehmen.", true);
+  var orderId = currentOrder.id;
+  var label = lockedOrderLabel() || "manuelle Einlagerung";
+  if (!window.confirm("Auftrag " + label + " wirklich verwerfen? Der Auftrag wird geloescht und nicht synchronisiert.")) return;
+
+  if (serverOnline && !isLocalStorageOrderId(orderId)) {
+    apiJson("/api/orders/" + encodeURIComponent(orderId), { method: "DELETE" }, function () {
+      removeOrderFromOfflineStore(orderId).then(function () {
+        resetToStart("Manuelle Einlagerung verworfen.");
+        loadOrderList({ silent: true });
+      });
+    }, function (message) {
+      setMessage("Auftrag konnte nicht verworfen werden: " + message, true);
+    });
+    return;
+  }
+
+  var cleanup = removeOrderFromOfflineStore(orderId);
+  if (!isLocalStorageOrderId(orderId) && window.OfflineStore) {
+    cleanup = cleanup.then(function () {
+      return OfflineStore.enqueue("DELETE", "/api/orders/" + encodeURIComponent(orderId), "", deleteOrderDedupeKey(orderId));
+    });
+  }
+  cleanup.then(function () {
+    resetToStart("Manuelle Einlagerung verworfen.");
+    loadOrderList({ silent: true });
+  }, function () {
+    setMessage("Auftrag konnte lokal nicht verworfen werden.", true);
+  });
+}
+
+function removeOrderFromOfflineStore(orderId) {
+  if (!window.OfflineStore || !orderId) return Promise.resolve();
+  return removeQueuedOrderMutations(orderId)
+    .then(function () {
+      return OfflineStore.deleteOrder ? OfflineStore.deleteOrder(orderId) : Promise.resolve();
+    })
+    .then(function () {
+      return OfflineStore.deleteOrderSummary ? OfflineStore.deleteOrderSummary(orderId) : OfflineStore.loadOrderSummaries().then(function (orders) {
+        return OfflineStore.saveOrderSummaries((orders || []).filter(function (order) {
+          return String(order && order.id || "") !== String(orderId);
+        }));
+      });
+    });
+}
+
+function removeQueuedOrderMutations(orderId) {
+  if (!window.OfflineStore || !OfflineStore.getPending) return Promise.resolve();
+  return OfflineStore.getPending().then(function (pending) {
+    var removals = (pending || [])
+      .filter(function (entry) { return queuedMutationMatchesOrder(entry, orderId); })
+      .map(function (entry) { return OfflineStore.dequeue(entry.queueId); });
+    return Promise.all(removals);
+  });
+}
+
+function queuedMutationMatchesOrder(entry, orderId) {
+  var id = String(orderId || "");
+  var encodedId = encodeURIComponent(id);
+  var key = syncQueueEntryKey(entry);
+  if (key === manualStorageCreateDedupeKey(id) || key === storageOrderPutDedupeKey(id) || key === deleteOrderDedupeKey(id)) return true;
+  if (String(entry && entry.url || "") === "/api/orders/" + encodedId) return true;
+  try {
+    var payload = entry && entry.body ? JSON.parse(entry.body) : {};
+    return String(payload && payload.order && payload.order.id || "") === id;
+  } catch (error) {
+    void error;
+    return false;
+  }
+}
+
+function deleteOrderDedupeKey(orderId) {
+  return "DELETE:/api/orders/" + encodeURIComponent(orderId);
+}
+
+function mergeLocalOrderAfterAccept(acceptedOrder, localOrder) {
+  if (!acceptedOrder || !localOrder) return acceptedOrder || localOrder;
+  var merged = {};
+  var key;
+  for (key in localOrder) {
+    if (Object.prototype.hasOwnProperty.call(localOrder, key)) merged[key] = localOrder[key];
+  }
+  for (key in acceptedOrder) {
+    if (Object.prototype.hasOwnProperty.call(acceptedOrder, key)) merged[key] = acceptedOrder[key];
+  }
+  ["euroPallets", "storageSpaces", "orderNote"].forEach(function (field) {
+    if (String(localOrder[field] || "").trim()) merged[field] = localOrder[field];
+  });
+
+  var serverLines = Array.isArray(acceptedOrder.lines) ? acceptedOrder.lines : [];
+  var localLines = Array.isArray(localOrder.lines) ? localOrder.lines : [];
+  if (!localLines.length) return merged;
+
+  var editableFields = [
+    "actualQty",
+    "autoPositionNotes",
+    "binWarning",
+    "binWarningValue",
+    "description",
+    "fromBin",
+    "fromHandlingUnit",
+    "manualStorageLine",
+    "missing",
+    "missingAt",
+    "missingBy",
+    "missingNote",
+    "palletInfo",
+    "picked",
+    "positionNote",
+    "product",
+    "targetQty",
+    "unit"
+  ];
+  var localById = {};
+  localLines.forEach(function (line) {
+    localById[line.id] = line;
+  });
+  var serverIds = {};
+  var mergedLines = serverLines.map(function (line) {
+    serverIds[line.id] = true;
+    var localLine = localById[line.id];
+    if (!localLine) return line;
+    var nextLine = {};
+    var lineKey;
+    for (lineKey in line) {
+      if (Object.prototype.hasOwnProperty.call(line, lineKey)) nextLine[lineKey] = line[lineKey];
+    }
+    editableFields.forEach(function (field) {
+      if (Object.prototype.hasOwnProperty.call(localLine, field)) nextLine[field] = localLine[field];
+    });
+    return nextLine;
+  });
+
+  localLines.forEach(function (line) {
+    if (!serverIds[line.id] && !isEmptyManualStorageLine(line)) mergedLines.push(line);
+  });
+  merged.lines = mergedLines.length ? mergedLines : localLines;
+  return merged;
 }
 
 function acceptedOrderMessage(result) {
@@ -712,16 +1648,17 @@ function acceptedOrderMessage(result) {
 
 function renderCompletionFields() {
   var hasOrder = Boolean(currentOrder);
-  elements.euroPalletsInput.disabled = !hasOrder;
-  elements.storageSpacesInput.disabled = !hasOrder;
-  elements.orderNoteInput.disabled = !hasOrder;
+  var canEditOrder = hasOrder && canEditCurrentOrder();
+  elements.euroPalletsInput.disabled = !canEditOrder;
+  elements.storageSpacesInput.disabled = !canEditOrder;
+  elements.orderNoteInput.disabled = !canEditOrder;
   elements.euroPalletsInput.value = currentOrder ? currentOrder.euroPallets || "" : "";
   elements.storageSpacesInput.value = currentOrder ? currentOrder.storageSpaces || "" : "";
   elements.orderNoteInput.value = currentOrder ? currentOrder.orderNote || "" : "";
 }
 
 function updateCompletionFieldsFromInputs() {
-  if (!currentOrder) return;
+  if (!currentOrder || !canEditCurrentOrder()) return;
   applyCompletionFieldsToOrder();
   markDirty();
 }
@@ -763,6 +1700,10 @@ function touchOrder() {
 function saveOrder(silent, onSuccess) {
   if (!currentOrder || !currentOrder.id) return;
   if (!currentUserName()) return setMessage("Bitte erst Mitarbeiter eintragen.", true);
+  if (!canEditCurrentOrder()) {
+    if (!silent) setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
   if (savingOrder) {
     window.setTimeout(function () {
       saveOrder(silent, onSuccess);
@@ -773,12 +1714,41 @@ function saveOrder(silent, onSuccess) {
   touchOrder();
   persistCurrentOrderCache();
   var revision = changeRevision;
+
+  if (!serverOnline) {
+    if (!window.OfflineStore) {
+      savingOrder = false;
+      if (!silent) setMessage("Server nicht verbunden.", true);
+      return;
+    }
+    var url = "/api/orders/" + encodeURIComponent(currentOrder.id);
+    OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder, userName: currentUserName() }), storageOrderPutDedupeKey(currentOrder.id))
+      .then(function () { return saveOrderToOfflineStore(currentOrder); })
+      .then(function () {
+        savingOrder = false;
+        if (changeRevision === revision) {
+          dirty = false;
+          clearCurrentOrderCache();
+        } else {
+          dirty = true;
+          persistCurrentOrderCache();
+          scheduleAutoSave();
+        }
+        if (!silent) setMessage("Offline gespeichert - wird synchronisiert, sobald der Server erreichbar ist.", false);
+        if (onSuccess) onSuccess();
+      }, function () {
+        savingOrder = false;
+        persistCurrentOrderCache();
+        if (!silent) setMessage("Offline: Lokales Speichern fehlgeschlagen.", true);
+      });
+    return;
+  }
+
   apiJson("/api/orders/" + encodeURIComponent(currentOrder.id), {
     method: "PUT",
     body: JSON.stringify({ order: currentOrder, userName: currentUserName() })
   }, function (result) {
-    currentOrder.acceptedBy = result && result.order && result.order.acceptedBy || currentOrder.acceptedBy || "";
-    currentOrder.acceptedAt = result && result.order && result.order.acceptedAt || currentOrder.acceptedAt || "";
+    applyOrderSummaryToOrder(currentOrder, result && result.order);
     savingOrder = false;
     if (changeRevision === revision) {
       dirty = false;
@@ -789,6 +1759,7 @@ function saveOrder(silent, onSuccess) {
       scheduleAutoSave();
     }
     setMessage(silent ? "Automatisch gespeichert." : "Auftrag gespeichert.", false);
+    saveOrderToOfflineStore(currentOrder);
     loadOrderList();
     if (onSuccess) onSuccess();
   }, function (message) {
@@ -801,6 +1772,7 @@ function saveOrder(silent, onSuccess) {
 function exportPdf() {
   if (!currentOrder || !currentOrder.id) return setMessage("Kein Auftrag ausgewaehlt.", true);
   if (!currentUserName()) return setMessage("Bitte erst Mitarbeiter eintragen.", true);
+  if (!canEditCurrentOrder()) return setMessage("Bearbeitung erst uebernehmen.", true);
   pruneEmptyManualStorageLines();
   var validationMessage = storageOrderExportMessage();
   if (validationMessage) {
@@ -844,7 +1816,8 @@ function scheduleAutoSave() {
   if (autoSaveTimer) window.clearTimeout(autoSaveTimer);
   autoSaveTimer = window.setTimeout(function () {
     autoSaveTimer = null;
-    if (!dirty || !serverOnline || !currentOrder || !currentOrder.id || !currentUserName()) return;
+    if (!dirty || !currentOrder || !currentOrder.id || !currentUserName()) return;
+    if (!serverOnline && !window.OfflineStore) return;
     saveOrder(true);
   }, AUTO_SAVE_MS);
 }
@@ -898,6 +1871,7 @@ function mergeServerLoadingSlipLines(order, serverOrder) {
     merged.positionNote = previous && String(previous.positionNote || "").trim()
       ? previous.positionNote
       : line.positionNote || "";
+    merged.autoPositionNotes = normalizeAutoPositionNotes(previous && previous.autoPositionNotes || line.autoPositionNotes);
     return merged;
   });
 
@@ -915,6 +1889,7 @@ function restoreCachedOrderFor(serverOrder) {
   if (payload.dirty !== true) return null;
   if (String(payload.orderId || payload.order.id) !== String(serverOrder.id)) return null;
   if (serverOrder.exportedAt) return null;
+  if (!sameUserName(serverOrder.acceptedBy, currentUserName())) return null;
   if (!payload.order.lines || !serverOrder.lines) return null;
   if (payload.order.lines.length !== serverOrder.lines.length) return null;
   var cachedAt = dateToMs(payload.cachedAt);
@@ -940,12 +1915,14 @@ function dateToMs(value) {
 }
 
 function updateCounts() {
-  var lines = currentOrder && currentOrder.lines ? currentOrder.lines : [];
+  var lines = (currentOrder && currentOrder.lines ? currentOrder.lines : []).filter(function (line) {
+    return !isEmptyManualStorageLine(line);
+  });
   var done = 0;
   var changed = 0;
   for (var index = 0; index < lines.length; index += 1) {
-    if (lines[index].picked) done += 1;
-    if (String(lines[index].actualQty || "").trim() !== String(lines[index].targetQty || "").trim()) changed += 1;
+    if (lines[index].picked || isMissingStorageLine(lines[index])) done += 1;
+    if (isMissingStorageLine(lines[index]) || storageLineQuantityChanged(lines[index])) changed += 1;
   }
   elements.doneCount.innerHTML = done;
   elements.openCount.innerHTML = Math.max(lines.length - done, 0);
@@ -957,7 +1934,7 @@ function allPicked() {
   if (!lines.length) return false;
   for (var index = 0; index < lines.length; index += 1) {
     if (isEmptyManualStorageLine(lines[index])) continue;
-    if (!lines[index].picked) return false;
+    if (!lines[index].picked && !isMissingStorageLine(lines[index])) return false;
   }
   return true;
 }
@@ -992,12 +1969,28 @@ function storageLineErrorMessage(line) {
 
 function storageLineCompletionErrors(line) {
   if (!isStorageOrder() || !line || line.lineType === "loading-slip" || isEmptyManualStorageLine(line)) return [];
+  if (isMissingStorageLine(line)) return [];
   var errors = [];
-  if (!String(line.product || "").trim()) errors.push("Artikelnummer fehlt");
-  if (!String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
+  var product = String(line.product || "").trim();
+  var handlingUnit = String(line.fromHandlingUnit || "").trim();
+  if (!product) errors.push("Artikelnummer fehlt");
+  else if (!/^\d+$/.test(product)) errors.push("Artikelnummer darf nur Zahlen enthalten");
+  if (line.manual !== true && !String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
   if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
+  if (handlingUnit && !/^\d+$/.test(handlingUnit)) errors.push("HU darf nur Zahlen enthalten");
+  if (requiresStorageHandlingUnit() && !handlingUnit) errors.push("HU fehlt");
   if (!readTabletQuantity(line.actualQty || line.targetQty)) errors.push("Menge fehlt");
   return errors;
+}
+
+function storageLineQuantityChanged(line) {
+  if (line && line.manual === true && !String(line.targetQty || "").trim()) return false;
+  return String(line && line.actualQty || "").trim() !== String(line && line.targetQty || "").trim();
+}
+
+function requiresStorageHandlingUnit() {
+  var warehouse = String(currentOrder && (currentOrder.orderWarehouse || currentOrder.warehouse) || "").trim().toUpperCase();
+  return warehouse === "SSI" || warehouse === "SI";
 }
 
 function shouldClearBinWarning(line, nextBin) {
@@ -1013,25 +2006,29 @@ function suspiciousPickingBinWarning(line) {
   if (!bin) return "";
   if (!isPlausiblePickingBin(bin)) return "Lagerplatz unklar: " + bin + ".";
 
-  var h1LetterInNumberSlot = bin.match(/^002-H1-SA[A-Z]([A-Z])[A-D]\d$/i);
-  if (h1LetterInNumberSlot) return "Lagerplatz unklar: " + bin + ".";
-
   return "";
 }
 
 function isPlausiblePickingBin(value) {
   var bin = normalizePickingBinText(value);
-  return /^(?:002|022)-H\d{1,2}-(?:S[A-Z0-9]{2,10}|R\d{1,3})$/i.test(bin);
+  if (/^(?:002|022)-H\d{1,2}-R\d{1,3}$/i.test(bin)) return true;
+  if (/^002-H1-A[A-L]1$/i.test(bin)) return true;
+  if (/^002-H1-SA[A-T](?:[1-9]|1[0-2])[A-D][1-3]$/i.test(bin)) return true;
+  if (/^002-H3-S[O-Z](?:[1-9]|1[0-2])[A-D][1-3]$/i.test(bin)) return true;
+  if (/^002-H4-S[A-N](?:[1-9]|1[0-2])[A-D][1-4]$/i.test(bin)) return true;
+  return false;
 }
 
 function normalizePickingBinText(value) {
-  return String(value || "")
+  var bin = String(value || "")
     .trim()
     .toUpperCase()
     .replace(/\s+/g, "")
     .replace(/[‐‑‒–—]/g, "-")
     .replace(/^O/, "0")
     .replace(/^QD/, "00");
+  if (/^H1A[A-L]1$/i.test(bin)) return "002-H1-" + bin.slice(2);
+  return bin;
 }
 
 function readTabletQuantity(value) {
@@ -1045,6 +2042,10 @@ function storageLinePosition(line, index) {
 
 function isEmptyManualStorageLine(line) {
   return line && line.manual === true && !manualStorageLineHasContent(line);
+}
+
+function isMissingStorageLine(line) {
+  return line && line.missing === true;
 }
 
 function apiJson(url, options, success, failure) {
