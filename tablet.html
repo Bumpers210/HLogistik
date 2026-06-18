@@ -6,8 +6,9 @@
     <meta name="theme-color" content="#167a58">
     <title>Tablet Logistik</title>
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="tablet.css?v=20260615-2">
-    <script src="tablet-legacy.js?v=20260615-2"></script>
+    <link rel="stylesheet" href="tablet.css?v=20260618-8">
+    <script src="offline-store.js?v=20260618-8"></script>
+    <script src="tablet-legacy.js?v=20260618-8"></script>
   </head>
   <body>
     <header class="tablet-header">
@@ -42,7 +43,21 @@
           </select>
         </label>
         <button id="refreshButton" type="button">Aktualisieren</button>
+        <label id="manualStorageCustomerRow" hidden>
+          Kunde
+          <input id="manualStorageCustomerInput" type="text" autocomplete="off" autocapitalize="words" placeholder="Kunde">
+        </label>
+        <label id="manualStorageWarehouseRow" hidden>
+          Lager
+          <select id="manualStorageWarehouseSelect">
+            <option value="SSI">SSI</option>
+            <option value="SI">SI</option>
+          </select>
+        </label>
+        <button id="manualStorageStartButton" type="button" hidden>Manuelle Einlagerung starten</button>
         <button id="takeOverButton" type="button" hidden>Bearbeitung übernehmen</button>
+        <button id="leaveOrderButton" class="danger-action" type="button" hidden>Auftrag verlassen</button>
+        <button id="discardOrderButton" class="danger-action" type="button" hidden>Auftrag verwerfen</button>
         <button id="saveButton" type="button">Jetzt speichern</button>
         <button id="exportPdfButton" type="button">PDF exportieren</button>
         <label class="check-row">

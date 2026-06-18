@@ -11,11 +11,11 @@
     <title>Kommissionier-App</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260615-5">
+    <link rel="stylesheet" href="styles.css?v=20260618-8">
     <script src="pdf.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
-    <script src="offline-store.js" defer></script>
-    <script src="app.js?v=20260615-6" defer></script>
+    <script src="offline-store.js?v=20260618-8" defer></script>
+    <script src="app.js?v=20260618-8" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -227,8 +227,8 @@
         </button>
         <div class="line-body">
           <div class="line-top">
-            <input class="product-input short-input" aria-label="Produkt" placeholder="Produkt">
-            <input class="from-bin-input short-input" aria-label="Lagerplatz" placeholder="Lagerplatz">
+            <input class="product-input short-input" inputmode="numeric" pattern="[0-9]*" aria-label="Produkt" placeholder="Produkt">
+            <input class="from-bin-input short-input uppercase-input" autocapitalize="characters" aria-label="Lagerplatz" placeholder="Lagerplatz">
             <input class="description-input" aria-label="Produktbeschreibung" placeholder="Produktbeschreibung">
             <input class="target-qty-input" type="text" inputmode="decimal" aria-label="Soll" placeholder="Soll">
             <input class="actual-qty-input" type="text" inputmode="decimal" aria-label="Ist" placeholder="Ist">
@@ -237,7 +237,7 @@
           <div class="location-row">
             <label>
               <span class="hu-label">Von HU</span>
-              <input class="from-hu-input" type="text" inputmode="decimal" pattern="[0-9,]*" placeholder="Handling Unit">
+              <input class="from-hu-input" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="Handling Unit">
             </label>
             <label>
               Zusatzbemerkung

@@ -8,7 +8,7 @@ import { createId, normalizeWarehouse } from "./helpers.mjs";
 export function readOrders() {
   return getDb()
     .prepare(
-      `SELECT id, auftragsnummer, kundenname, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
+      `SELECT id, auftragsnummer, kundenname, kunden_gruppe, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
               auftrags_notiz, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
               uebernommen_von, uebernommen_am,
@@ -23,7 +23,7 @@ export function readOrders() {
 export function findOrder(id) {
   const row = getDb()
     .prepare(
-      `SELECT id, auftragsnummer, kundenname, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
+      `SELECT id, auftragsnummer, kundenname, kunden_gruppe, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
               auftrags_notiz, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
               uebernommen_von, uebernommen_am,
@@ -39,16 +39,17 @@ export function upsertOrder(order) {
   getDb()
     .prepare(
       `INSERT INTO auftraege
-         (id, auftragsnummer, kundenname, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
+         (id, auftragsnummer, kundenname, kunden_gruppe, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
          auftrags_notiz, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
           zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
           uebernommen_von, uebernommen_am,
           abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
           exportiert_pdf_pfad, positionen, erstellt_am, aktualisiert_am)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET
          auftragsnummer = excluded.auftragsnummer,
          kundenname = excluded.kundenname,
+         kunden_gruppe = excluded.kunden_gruppe,
          auftragsdatum = excluded.auftragsdatum,
          auftragszeit = excluded.auftragszeit,
          euro_paletten = excluded.euro_paletten,
@@ -77,6 +78,7 @@ export function upsertOrder(order) {
       order.id,
       order.orderNumber,
       order.customerName,
+      order.customerGroupKey,
       order.orderDate,
       order.orderTime,
       order.euroPallets,
@@ -162,10 +164,13 @@ export async function migrateOrdersFromJson(ordersFile) {
 // ── Normalization ─────────────────────────────────────────────────────────────
 
 export function normalizeOrder(order) {
+  const customerName = String(order.customerName || "");
+  const explicitGroupKey = normalizeCustomerGroupKey(order.customerGroupKey || order.customerKey);
   return {
     id: order.id || "",
     orderNumber: String(order.orderNumber || ""),
-    customerName: String(order.customerName || ""),
+    customerName,
+    customerGroupKey: explicitGroupKey || normalizeCustomerGroupKey(customerName),
     orderDate: String(order.orderDate || new Date().toISOString().slice(0, 10)),
     orderTime: String(order.orderTime || ""),
     euroPallets: String(order.euroPallets || ""),
@@ -197,6 +202,7 @@ export function orderSummary(order) {
     id: order.id,
     orderNumber: order.orderNumber || order.id,
     customerName: order.customerName || "",
+    customerGroupKey: order.customerGroupKey || normalizeCustomerGroupKey(order.customerName),
     orderDate: order.orderDate || "",
     orderTime: order.orderTime || "",
     total: order.lines.length,
@@ -230,6 +236,7 @@ function orderFromRow(row) {
     id: String(row.id || ""),
     orderNumber: String(row.auftragsnummer || ""),
     customerName: String(row.kundenname || ""),
+    customerGroupKey: String(row.kunden_gruppe || "") || normalizeCustomerGroupKey(row.kundenname),
     orderDate: String(row.auftragsdatum || ""),
     orderTime: String(row.auftragszeit || ""),
     euroPallets: String(row.euro_paletten || ""),
@@ -259,6 +266,16 @@ function orderFromRow(row) {
 function normalizeOrderWarehouse(value) {
   const text = String(value || "").trim().toUpperCase();
   return text === "SSI" || text === "SI" ? normalizeWarehouse(text) : "";
+}
+
+export function normalizeCustomerGroupKey(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/\b(?:KUNDE|LIEFERADRESSE|EMPFAENGER|EMPFANGER)\b\s*[:#-]?/g, " ")
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim();
 }
 
 function userLookupKey(value) {

@@ -62,6 +62,7 @@ import {
   markOrderExported,
   migrateOrdersFromJson,
   normalizeOrder,
+  normalizeCustomerGroupKey,
   orderSummary,
 } from "./server/orders.mjs";
 import { exportPdf } from "./server/export.mjs";
@@ -87,6 +88,7 @@ const publicStaticFiles = new Set([
   "/artikel.html",
   "/lager.html",
   "/auswertungen.html",
+  "/recover-order.html",
   "/tablet.html",
   "/app.js",
   "/artikel.js",
@@ -397,7 +399,8 @@ async function route(request, response) {
   if (pathname === "/api/orders" && request.method === "POST") {
     const body = await readBody(request, maxBodyBytes);
     const order = normalizeOrder(body.order || body);
-    assignStorageOrderBasics(order);
+    const existing = order.id ? findOrder(order.id) : null;
+    assignStorageOrderBasics(order, existing || {});
     if (!order.lines.length) {
       sendJson(response, 400, { ok: false, error: "Leere Auftraege ohne Positionen werden nicht gespeichert" });
       return;
@@ -413,7 +416,7 @@ async function route(request, response) {
       return;
     }
     order.id = order.id || createId();
-    order.createdAt = order.createdAt || new Date().toISOString();
+    order.createdAt = existing?.createdAt || order.createdAt || new Date().toISOString();
     order.updatedAt = new Date().toISOString();
     upsertOrder(order);
     sendJson(response, 200, { ok: true, order: orderSummary(order) });
@@ -443,15 +446,38 @@ async function route(request, response) {
       ok: true,
       order: result.order,
       acceptedOrders: result.acceptedOrders.map(orderSummary),
+      acceptedOrderDetails: result.acceptedOrders,
       acceptedCount: result.acceptedOrders.length,
       customerName: result.customerName || ""
     });
     return;
   }
 
+  const releaseOrderMatch = pathname.match(/^\/api\/orders\/([^/]+)\/release$/);
+  if (releaseOrderMatch && request.method === "POST") {
+    requireGroup(request, ["tablet"]);
+    const body = await readBody(request, maxBodyBytes);
+    const order = findOrder(releaseOrderMatch[1]);
+    if (!order) {
+      sendJson(response, 200, { ok: true, released: false, missing: true });
+      return;
+    }
+    const userName = requestExplicitOrderUserName(body);
+    if (!userName) return sendJson(response, 400, { ok: false, error: "Mitarbeiter fehlt" });
+    const releaseBlocked = releaseTabletOrderBlocker(order, userName);
+    if (releaseBlocked) return sendAcceptedOrderBlock(response, releaseBlocked);
+    const released = releaseTabletOrder(order, userName);
+    sendJson(response, 200, { ok: true, released, order: orderSummary(order) });
+    return;
+  }
+
   if (orderMatch && request.method === "PUT") {
     const body = await readBody(request, maxBodyBytes);
-    const existing = findOrder(orderMatch[1]) || {};
+    const existing = findOrder(orderMatch[1]);
+    if (!existing) {
+      sendJson(response, 404, { ok: false, error: "Auftrag wurde geloescht oder ist nicht mehr vorhanden" });
+      return;
+    }
     const incoming = normalizeOrder({ ...(body.order || body), id: orderMatch[1] });
     if (isStaleClosedOrderWrite(incoming, existing)) {
       sendJson(response, 200, { ok: true, ignored: true, order: orderSummary(existing) });
@@ -507,9 +533,10 @@ async function route(request, response) {
     const order = normalizeOrder({ ...(savedOrder || {}), ...(body.order || {}) });
     order.id = exportMatch[1];
     const orderType = order.orderType || "picking";
-    const stockWarehouse = orderType === "storage" ? "SSI" : pickingOrderWarehouse(order, warehouse);
+    let stockWarehouse = orderType === "storage" ? storageOrderWarehouse(order) : pickingOrderWarehouse(order, warehouse);
     if (orderType === "storage") {
       assignStorageOrderBasics(order, savedOrder);
+      stockWarehouse = storageOrderWarehouse(order);
       normalizeStorageOrderBinsForExport(order);
     }
     preserveAcceptedOrderStatus(order, savedOrder || {});
@@ -576,6 +603,13 @@ async function sendExportFile(response, requestPath) {
 // ── Security helpers ──────────────────────────────────────────────────────────
 
 function validateOrderLines(order, { forExport = false } = {}) {
+  if ((order.orderType || "picking") === "storage" && isManualStorageOrder(order) && !String(order.customerName || "").trim()) {
+    return "Kunde fehlt";
+  }
+
+  const numericValidation = validateStorageNumericFields(order);
+  if (numericValidation) return numericValidation;
+
   const conflicts = duplicateHandlingUnitConflicts(order.lines);
   if (conflicts.length) {
     return `LE/HU muss einmalig sein: ${conflicts
@@ -591,23 +625,43 @@ function validateOrderLines(order, { forExport = false } = {}) {
   return "";
 }
 
+function validateStorageNumericFields(order) {
+  if ((order.orderType || "picking") !== "storage") return "";
+  const lines = storageOrderLines(order);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const position = line.warehouseOrder || index + 1;
+    const materialnummer = String(line.product || "").trim();
+    const handlingUnit = String(line.fromHandlingUnit || "").trim();
+    if (materialnummer && !/^\d+$/.test(materialnummer)) return `Pos. ${position}: Artikelnummer darf nur Zahlen enthalten`;
+    if (handlingUnit && !/^\d+$/.test(handlingUnit)) return `Pos. ${position}: HU darf nur Zahlen enthalten`;
+  }
+  return "";
+}
+
 function validateStorageOrderForExport(order) {
   const lines = storageOrderLines(order);
   if (!lines.length) return "Einlagerung hat keine Positionen.";
 
   const errors = [];
+  const requiresHu = storageOrderRequiresHandlingUnit(order);
   lines.forEach((line, index) => {
     const position = line.warehouseOrder || index + 1;
     const materialnummer = String(line.product || "").trim();
     const description = String(line.description || "").trim();
     const lagerplatz = String(line.fromBin || "").trim();
+    const handlingUnit = String(line.fromHandlingUnit || "").trim();
     const mengeStueck = readInteger(storageLineQuantity(line));
+    const missing = isMissingStorageLine(line);
+
+    if (!materialnummer) errors.push(`Pos. ${position}: Artikelnummer fehlt`);
+    if (line.manual !== true && !description) errors.push(`Pos. ${position}: Artikelbezeichnung fehlt`);
+    if (!Number.isInteger(mengeStueck) || mengeStueck <= 0) errors.push(`Pos. ${position}: Menge fehlt oder ist ungueltig`);
+    if (missing) return;
 
     if (!line.picked) errors.push(`Pos. ${position}: nicht erledigt`);
-    if (!materialnummer) errors.push(`Pos. ${position}: Artikelnummer fehlt`);
-    if (!description) errors.push(`Pos. ${position}: Artikelbezeichnung fehlt`);
     if (!lagerplatz) errors.push(`Pos. ${position}: Stellplatz fehlt`);
-    if (!Number.isInteger(mengeStueck) || mengeStueck <= 0) errors.push(`Pos. ${position}: Menge fehlt oder ist ungueltig`);
+    if (requiresHu && !handlingUnit) errors.push(`Pos. ${position}: HU fehlt`);
   });
 
   if (!errors.length) return "";
@@ -617,6 +671,30 @@ function validateStorageOrderForExport(order) {
 function storageOrderLines(order) {
   return (Array.isArray(order?.lines) ? order.lines : [])
     .filter((line) => line?.lineType !== "loading-slip" && !isEmptyManualStorageLine(line));
+}
+
+function isManualStorageOrder(order) {
+  const lines = storageOrderLines(order);
+  return Boolean(lines.length && lines.every((line) => line?.manual === true));
+}
+
+function bookableStorageOrderLines(order) {
+  return storageOrderLines(order).filter((line) => !isMissingStorageLine(line));
+}
+
+function isMissingStorageLine(line) {
+  return line?.missing === true;
+}
+
+function storageOrderRequiresHandlingUnit(order) {
+  const warehouse = storageOrderWarehouse(order, "");
+  return warehouse === "SSI" || warehouse === "SI";
+}
+
+function storageOrderWarehouse(order, fallbackWarehouse = "SSI") {
+  const value = String(order?.orderWarehouse || order?.warehouse || "").trim().toUpperCase();
+  if (value === "SSI" || value === "SI") return normalizeWarehouse(value);
+  return normalizeWarehouse(fallbackWarehouse);
 }
 
 function isEmptyManualStorageLine(line) {
@@ -640,7 +718,7 @@ function storageLineQuantity(line) {
 function normalizeStorageOrderBinsForExport(order) {
   const errors = [];
   order.lines = (Array.isArray(order.lines) ? order.lines : []).map((line, index) => {
-    if (line?.lineType === "loading-slip" || isEmptyManualStorageLine(line)) return line;
+    if (line?.lineType === "loading-slip" || isEmptyManualStorageLine(line) || isMissingStorageLine(line)) return line;
     const rawBin = String(line?.fromBin || "").trim();
     if (!rawBin) return line;
     const normalizedBin = normalizeSsiStorageBin(rawBin);
@@ -664,7 +742,7 @@ async function ensureStorageOrderArticles(order, warehouse = "SSI") {
   const updated = [];
   const now = new Date().toISOString();
 
-  for (const line of storageOrderLines(order)) {
+  for (const line of bookableStorageOrderLines(order)) {
     const materialnummer = String(line.product || "").trim();
     if (!materialnummer) continue;
     const values = storageArticleValues(line);
@@ -704,7 +782,7 @@ async function ensureStorageOrderArticles(order, warehouse = "SSI") {
 
 function storageArticleValues(line) {
   const quantity = readInteger(storageLineQuantity(line));
-  const text = `${line.palletInfo || ""} ${line.positionNote || ""}`.toUpperCase();
+  const text = `${line.palletInfo || ""} ${line.positionNote || ""} ${autoPositionNoteText(line)}`.toUpperCase();
   const gebindeArt = /\bKAR\.?\b|\bKARTON/.test(text)
     ? "KRT"
     : /\bC\s*1\b/.test(text)
@@ -713,7 +791,7 @@ function storageArticleValues(line) {
         ? "C2"
         : "STK";
   return {
-    materialbezeichnung: String(line.description || "").trim(),
+    materialbezeichnung: String(line.description || line.product || "").trim(),
     gebindeArt,
     mengeProKarton: gebindeArt === "KRT" ? quantity : 0,
     mengeProPalette: gebindeArt === "KRT" ? 0 : quantity,
@@ -739,9 +817,17 @@ function articleChanged(left, right) {
   return JSON.stringify(left) !== JSON.stringify(right);
 }
 
+function autoPositionNoteText(line) {
+  const notes = line?.autoPositionNotes && typeof line.autoPositionNotes === "object" ? line.autoPositionNotes : {};
+  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
 function bookStorageOrderReceipts(order, warehouse = "SSI") {
   const orderNumber = order.orderNumber || order.id || "";
-  const receipts = storageOrderLines(order).map((line, index) => ({
+  const receipts = bookableStorageOrderLines(order).map((line, index) => ({
     materialnummer: String(line.product || "").trim(),
     lagerplatz: String(line.fromBin || "").trim(),
     leNummer: String(line.fromHandlingUnit || "").trim(),
@@ -750,6 +836,7 @@ function bookStorageOrderReceipts(order, warehouse = "SSI") {
     referenz: `Einlagerung ${orderNumber}`.trim(),
     position: line.warehouseOrder || index + 1
   }));
+  if (!receipts.length) return { booked: 0, movements: [], locations: [] };
   const result = bookStorageReceipts(receipts, warehouse);
   return {
     booked: result.movements.length,
@@ -761,8 +848,10 @@ function bookStorageOrderReceipts(order, warehouse = "SSI") {
 function assignStorageOrderBasics(order, existing = {}) {
   if ((order.orderType || "picking") !== "storage") return;
   order.orderNumber = String(order.orderNumber || existing.orderNumber || nextStorageOrderNumber()).trim();
-  order.customerName = "SSI";
-  order.orderWarehouse = "SSI";
+  const manualStorage = isManualStorageOrder(order) || isManualStorageOrder(existing);
+  order.customerName = String(order.customerName || existing.customerName || (manualStorage ? "" : "SSI")).trim();
+  order.customerGroupKey = normalizeCustomerGroupKey(order.customerGroupKey || existing.customerGroupKey || order.customerName);
+  order.orderWarehouse = storageOrderWarehouse(order.orderWarehouse ? order : existing);
 }
 
 function nextStorageOrderNumber() {
@@ -777,6 +866,7 @@ function duplicateHandlingUnitConflicts(lines) {
   const byHandlingUnit = new Map();
 
   (Array.isArray(lines) ? lines : []).forEach((line, index) => {
+    if (isMissingStorageLine(line)) return;
     const rawValue = String(line?.fromHandlingUnit || "").trim();
     const key = normalizeHandlingUnitLookup(rawValue);
     if (!key) return;
@@ -900,7 +990,7 @@ function acceptTabletOrderGroup(order, userName) {
   return {
     order: acceptedOrders.find((entry) => entry.id === order.id) || order,
     acceptedOrders,
-    customerName: acceptanceCustomerName(order)
+    customerName: acceptanceCustomerLabel(order)
   };
 }
 
@@ -983,6 +1073,36 @@ function applyOrderAcceptance(order, userName, timestamp = new Date().toISOStrin
   order.createdBy = order.createdBy || user;
 }
 
+function releaseTabletOrderBlocker(order, userName) {
+  const user = String(userName || "").trim();
+  if (!user) return { status: 400, message: "Mitarbeiter fehlt" };
+  if (order?.exportedAt) return null;
+
+  const acceptedBy = String(order?.acceptedBy || "").trim();
+  if (acceptedBy && !sameUser(acceptedBy, user)) {
+    return {
+      status: 409,
+      message: `Auftrag ${orderLabel(order)} ist von ${acceptedBy} uebernommen und kann nicht von ${user} verlassen werden.`,
+      order
+    };
+  }
+  return null;
+}
+
+function releaseTabletOrder(order, userName) {
+  if (!order || order.exportedAt) return false;
+  const wasAccepted = Boolean(String(order.acceptedBy || "").trim());
+  const now = new Date().toISOString();
+  order.acceptedBy = "";
+  order.acceptedAt = "";
+  order.activeUser = "";
+  order.activeUserAt = "";
+  order.lastEditedBy = String(userName || "").trim() || order.lastEditedBy;
+  order.updatedAt = now;
+  upsertOrder(order);
+  return wasAccepted;
+}
+
 function sendAcceptedOrderBlock(response, blocked) {
   sendJson(response, blocked.status || 409, {
     ok: false,
@@ -1004,7 +1124,11 @@ function isSsiOrder(order) {
 }
 
 function acceptanceCustomerName(order) {
-  return String(order?.customerName || "").trim();
+  return String(order?.customerGroupKey || "").trim() || normalizeCustomerGroupKey(order?.customerName);
+}
+
+function acceptanceCustomerLabel(order) {
+  return String(order?.customerName || "").trim() || acceptanceCustomerName(order);
 }
 
 function orderLabel(order) {

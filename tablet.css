@@ -43,6 +43,13 @@ button {
   font-weight: 700;
 }
 
+button:disabled {
+  background: #d8e0db;
+  background: var(--line);
+  color: #65726c;
+  color: var(--muted);
+}
+
 .tablet-header {
   display: table;
   width: 100%;
@@ -133,6 +140,11 @@ button {
   color: var(--ink);
 }
 
+.uppercase-input,
+input[autocapitalize="characters"] {
+  text-transform: uppercase;
+}
+
 .tablet-completion {
   margin-top: 10px;
   padding: 10px;
@@ -160,6 +172,32 @@ button {
 .tablet-controls button {
   width: 49%;
   margin: 4px 0;
+}
+
+.tablet-controls #manualStorageStartButton {
+  width: 100%;
+}
+
+.tablet-controls #manualStorageCustomerRow,
+.tablet-controls #manualStorageWarehouseRow {
+  width: 100%;
+  margin: 6px 0 8px;
+  padding-left: 8px;
+  padding-right: 2px;
+}
+
+.tablet-controls #manualStorageCustomerInput,
+.tablet-controls #manualStorageWarehouseSelect {
+  min-width: 0;
+}
+
+.tablet-controls .danger-action {
+  background: #9f2f1d;
+}
+
+.tablet-controls .danger-action:disabled {
+  background: #d8e0db;
+  color: #65726c;
 }
 
 .tablet-mode-switch {
@@ -482,18 +520,51 @@ button {
   line-height: 1.2;
 }
 
+.auto-position-note {
+  display: block;
+  margin-top: 3px;
+  color: #65726c;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.pick-item.is-missing {
+  background: #fff0e8;
+  border-color: #d87856;
+  box-shadow: inset 4px 0 0 #b8451c;
+}
+
+.pick-item.is-missing .readonly-input {
+  background: #fff8f4;
+  color: #7b1f0f;
+  font-weight: 800;
+}
+
 .location-row {
   margin-top: 5px;
 }
 
-.location-row .manual-line-delete {
+.location-row .manual-line-delete,
+.location-row .missing-line-toggle {
   display: table-cell;
   width: 150px;
   min-height: 34px;
   vertical-align: bottom;
+}
+
+.location-row .manual-line-delete,
+.location-row .missing-line-toggle.danger-button {
   background: #8a2f12;
   background: var(--danger);
   color: #fff;
+}
+
+.location-row .missing-line-toggle.restore-missing {
+  background: #e5ece8;
+  background: var(--soft);
+  color: #14221c;
 }
 
 .location-row label:first-child {
@@ -584,6 +655,14 @@ button {
   .tablet-controls button {
     width: 130px;
     margin-right: 6px;
+  }
+
+  .tablet-controls #manualStorageCustomerRow,
+  .tablet-controls #manualStorageWarehouseRow {
+    display: block;
+    width: calc(100% - 10px);
+    margin-left: 10px;
+    padding-right: 8px;
   }
 }
 
