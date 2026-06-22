@@ -410,7 +410,7 @@ export function bookStorageIssues(issues, warehouse = "SSI") {
   try {
     issues.forEach((issue, index) => {
       try {
-        const normalized = normalizeStorageIssue(issue);
+        const normalized = normalizeStorageIssue(issue, normalizedWarehouse);
         const article = findArticleByCode(articles, normalized.materialnummer);
         if (!article) throw httpError(400, "Artikelnummer oder Barcode ist nicht im Artikelstamm vorhanden");
         results.push(applyStorageIssue(normalized, article, new Date().toISOString(), normalizedWarehouse));
@@ -565,12 +565,19 @@ function storageReceiptContext(receipt) {
   return parts.join(", ");
 }
 
-function normalizeStorageIssue(issue) {
+function normalizeStorageIssue(issue, warehouse = "SSI") {
+  const rawLagerplatz = String(issue.lagerplatz ?? issue.storageBin ?? "").trim();
+  const normalizedLagerplatz = normalizeWarehouse(warehouse) === "SSI"
+    ? normalizeSsiStorageBin(rawLagerplatz)
+    : rawLagerplatz.toUpperCase();
+  if (rawLagerplatz && !normalizedLagerplatz) {
+    throw httpError(400, `Stellplatz "${rawLagerplatz}" ist fuer SSI nicht bekannt`);
+  }
   const normalized = {
     materialnummer: String(
       issue.materialnummer ?? issue.artikelnummer ?? issue.barcode ?? issue.articleNumber ?? ""
     ).trim(),
-    lagerplatz: String(issue.lagerplatz ?? issue.storageBin ?? "").trim().toUpperCase(),
+    lagerplatz: normalizedLagerplatz || "",
     leNummer: String(issue.leNummer ?? issue.le_nummer ?? issue.LE ?? issue.hu ?? issue.handlingUnit ?? "").trim(),
     mengeStueck: readInteger(issue.mengeStueck ?? issue.menge_stueck ?? issue.stueckzahl ?? issue.quantity),
     referenz: String(issue.referenz ?? issue.bemerkung ?? issue.reference ?? issue.note ?? "").trim(),

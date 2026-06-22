@@ -1,7 +1,13 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { getArticleDb, getDb } from "./db.mjs";
-import { createArticleId, readInteger, readBoolean, normalizeSearch, csvCell } from "./helpers.mjs";
+import { createArticleId, readInteger, readBoolean, normalizeSearch, csvCell, httpError } from "./helpers.mjs";
+import {
+  ARTICLE_GEBINDE_TYPES,
+  normalizeGebindeArt,
+  requiresPackageQuantity,
+  supportsPackageQuantity,
+} from "./rules/article-rules.mjs";
 
 // ── Read / write ──────────────────────────────────────────────────────────────
 
@@ -264,13 +270,13 @@ export function normalizeArticle(article) {
 }
 
 export function validateArticle(article) {
-  if (!article.materialnummer) throw new Error("Materialnummer fehlt");
-  if (!article.materialbezeichnung) throw new Error("Materialbezeichnung fehlt");
-  if (!["C1", "C2", "A1", "KRT", "STK"].includes(article.gebindeArt)) throw new Error("Gebindeart ist ungültig");
+  if (!article.materialnummer) throw httpError(400, "Materialnummer fehlt");
+  if (!article.materialbezeichnung) throw httpError(400, "Materialbezeichnung fehlt");
+  if (!ARTICLE_GEBINDE_TYPES.includes(article.gebindeArt)) throw httpError(400, "Gebindeart ist ungültig");
   if (requiresPackageQuantity(article.gebindeArt) && (!Number.isInteger(article.mengeProKarton) || article.mengeProKarton <= 0))
-    throw new Error(`Menge pro ${article.gebindeArt} muss größer 0 sein`);
+    throw httpError(400, `Menge pro ${article.gebindeArt} muss größer 0 sein`);
   if (!Number.isInteger(article.mengeProPalette) || article.mengeProPalette < 0)
-    throw new Error("Menge pro Palette darf nicht negativ sein");
+    throw httpError(400, "Menge pro Palette darf nicht negativ sein");
 }
 
 export function articleSummary(article) {
@@ -315,16 +321,4 @@ export function sortArticles(articles) {
   );
 }
 
-function normalizeGebindeArt(value) {
-  const text = String(value || "STK").trim().toUpperCase();
-  return ["C1", "C2", "A1", "KRT", "STK"].includes(text) ? text : "STK";
-}
-
-function requiresPackageQuantity(gebindeArt) {
-  return String(gebindeArt || "").trim().toUpperCase() === "KRT";
-}
-
-function supportsPackageQuantity(gebindeArt) {
-  return ["KRT", "A1"].includes(String(gebindeArt || "").trim().toUpperCase());
-}
 

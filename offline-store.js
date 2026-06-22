@@ -1,6 +1,6 @@
 (function () {
   const DB_NAME = "hlogistik-offline";
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   let _db = null;
 
   function openDb() {
@@ -17,6 +17,9 @@
         }
         if (!db.objectStoreNames.contains("sync-queue")) {
           db.createObjectStore("sync-queue", { keyPath: "queueId", autoIncrement: true });
+        }
+        if (!db.objectStoreNames.contains("order-groups")) {
+          db.createObjectStore("order-groups", { keyPath: "groupId" });
         }
       };
       request.onsuccess = function () {
@@ -126,6 +129,25 @@
           return String(order && order.id || "") !== String(id || "");
         }));
       });
+    },
+
+    // ── Accepted tablet order groups ─────────────────────────────────────────
+
+    saveOrderGroup: function (group) {
+      if (!group || !group.groupId) return Promise.resolve();
+      return txPut("order-groups", group);
+    },
+
+    loadOrderGroup: function (groupId) {
+      return txGet("order-groups", groupId);
+    },
+
+    loadOrderGroups: function () {
+      return txGetAll("order-groups");
+    },
+
+    deleteOrderGroup: function (groupId) {
+      return txDelete("order-groups", groupId);
     },
 
     // ── Sync queue ───────────────────────────────────────────────────────────

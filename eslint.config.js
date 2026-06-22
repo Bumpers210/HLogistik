@@ -12,6 +12,7 @@ export default [
         ...globals.node,
         ...globals.serviceworker,
         OfflineStore: "readonly",
+        HLogistikUi: "readonly",
       },
     },
     rules: {
@@ -22,6 +23,6 @@ export default [
     },
   },
   {
-    ignores: ["pdf.min.js", "pdf.worker.min.js", "xlsx.full.min.js", "node_modules/**"],
+    ignores: ["pdf.min.js", "pdf.worker.min.js", "xlsx.full.min.js", "node_modules/**", "Backups/**", "data/**", "tmp/**", "Exporte/**"],
   },
 ];

@@ -1,10 +1,10 @@
 const STORAGE_KEY = "kommissionier-app-state-v1";
 const USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
-const WAREHOUSE_KEY = "hlogistik-warehouse-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
+const CLIENT_ASSET_VERSION = "20260622-2";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 5;
 const OCR_PRECISE_RENDER_SCALE = 6.25;
@@ -21,6 +21,12 @@ const ACTIVITY_HEARTBEAT_MS = 60 * 1000;
 const ORDER_NOTICE_DURATION_MS = 12000;
 const CONNECTION_CHECK_MS = 30 * 1000;
 const CONNECTION_CHECK_TIMEOUT_MS = 5000;
+const SSI_STORAGE_HU_PREFIX = "34006381000";
+const SSI_STORAGE_HU_SUFFIX_LENGTH = 7;
+const SSI_STORAGE_HU_LENGTH = SSI_STORAGE_HU_PREFIX.length + SSI_STORAGE_HU_SUFFIX_LENGTH;
+const MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT = 1;
+const MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN = 1;
+const MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX = 100;
 
 const state = {
   id: "",
@@ -130,10 +136,11 @@ function bindElements() {
     "refreshOrdersButton",
     "deleteOrderButton",
     "serverStatus",
-    "clearDoneButton",
     "pickList",
     "pickHeader",
     "storageLineActions",
+    "manualStorageMaterialInput",
+    "manualStoragePositionCountInput",
     "addStorageLineButton",
     "emptyState",
     "pickedCount",
@@ -174,7 +181,7 @@ function bindEvents() {
   elements.discardDraftButton.addEventListener("click", discardCurrentDraft);
   elements.takeOverOrderButton.addEventListener("click", takeOverCurrentOrder);
   elements.refreshOrdersButton.addEventListener("click", loadOrderList);
-  elements.deleteOrderButton.addEventListener("click", deleteCurrentOrder);
+  elements.deleteOrderButton.addEventListener("click", () => deleteCurrentOrder());
   elements.orderSelect.addEventListener("change", () => loadOrder(elements.orderSelect.value));
   elements.switchUserButton.addEventListener("click", () => showLogin(true));
   elements.openNotifiedOrderButton.addEventListener("click", () => {
@@ -185,9 +192,11 @@ function bindEvents() {
   elements.dismissOrderNoticeButton.addEventListener("click", hideOrderNotice);
   window.addEventListener("online", initializeServer);
   window.addEventListener("offline", () => setConnectionStatus(false));
+  window.addEventListener("focus", () => initializeServer({ showChecking: false }));
   window.addEventListener("pagehide", persistCurrentOrderCache);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") persistCurrentOrderCache();
+    else initializeServer({ showChecking: false });
   });
   elements.loginForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -201,16 +210,19 @@ function bindEvents() {
       if (serverOnline) await loadOrderList();
     });
   }
-  elements.clearDoneButton.addEventListener("click", () => {
-    state.collapseDone = !state.collapseDone;
-    updateCollapseButtonText();
-    saveAndRender();
-  });
-
   ["orderNumber", "customerName", "orderDate", "orderTime", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
     elements[id].addEventListener("input", () => {
       state[id] = elements[id].value;
       markOrderTouched();
+      if (id === "customerName") {
+        applyCustomerOrderNumberRule();
+      }
+      if (id === "customerName" && (state.orderType || currentMode) === "storage") {
+        state.customerGroupKey = customerGroupKeyForImport(state.customerName);
+        state.lines = normalizeStorageHandlingUnits(state.lines, storageOrderUsesSsiCustomer());
+        saveAndRender();
+        return;
+      }
       saveState();
       renderDiscardButton();
       updateCounts();
@@ -225,9 +237,15 @@ function configurePdfJs() {
 
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
-  navigator.serviceWorker.register("/service-worker.js").catch(() => {
-    // Offline caching is optional; the app still works online without it.
-  });
+  navigator.serviceWorker
+    .register(`/service-worker.js?v=${CLIENT_ASSET_VERSION}`, { updateViaCache: "none" })
+    .then((registration) => {
+      if (registration.waiting) registration.waiting.postMessage({ type: "SKIP_WAITING" });
+      registration.update().catch(() => {});
+    })
+    .catch(() => {
+      // Offline caching is optional; the app still works online without it.
+    });
 }
 
 function loadCurrentMode() {
@@ -264,21 +282,19 @@ function loadCurrentUser() {
 }
 
 function currentWarehouse() {
-  return normalizeWarehouse(localStorage.getItem(WAREHOUSE_KEY));
+  return HLogistikUi.currentWarehouse();
 }
 
 function saveCurrentWarehouse() {
-  if (!elements.warehouseSelect) return;
-  localStorage.setItem(WAREHOUSE_KEY, normalizeWarehouse(elements.warehouseSelect.value));
+  HLogistikUi.saveCurrentWarehouse(elements.warehouseSelect);
 }
 
 function applyWarehouseSelection() {
-  if (!elements.warehouseSelect) return;
-  elements.warehouseSelect.value = currentWarehouse();
+  HLogistikUi.applyWarehouseSelection(elements.warehouseSelect);
 }
 
 function normalizeWarehouse(value) {
-  return String(value || "SSI").trim().toUpperCase() === "SI" ? "SI" : "SSI";
+  return HLogistikUi.normalizeWarehouse(value);
 }
 
 function normalizeOptionalWarehouse(value) {
@@ -292,6 +308,14 @@ function sameUserName(left, right) {
 
 function currentOrderWarehouse() {
   return normalizeOptionalWarehouse(state.orderWarehouse) || currentWarehouse();
+}
+
+function currentStorageRequiresHandlingUnit() {
+  return storageOrderUsesSsiCustomer();
+}
+
+function storageOrderUsesSsiCustomer(customerName = state.customerName) {
+  return normalizeCustomerGroupKey(customerName) === "SSI";
 }
 
 function applyLoadedOrderWarehouse(source) {
@@ -340,24 +364,15 @@ function requireCurrentUser() {
 }
 
 function updateCurrentUserUi() {
-  if (!elements.currentUserName) return;
-  const group = userGroupLabel(currentUser.group);
-  elements.currentUserName.textContent = currentUser.name ? `${currentUser.name}${group ? ` - ${group}` : ""}` : "Nicht angemeldet";
+  HLogistikUi.applyCurrentUserName(elements.currentUserName, currentUser.name, currentUser.group);
 }
 
 function normalizeUserGroup(value) {
-  return value === "lager" || value === "buero" || value === "tablet" ? value : "";
-}
-
-function userGroupLabel(group) {
-  if (group === "lager") return "Lager";
-  if (group === "buero") return "Büro";
-  if (group === "tablet") return "Tablet";
-  return "";
+  return HLogistikUi.normalizeUserGroup(value);
 }
 
 function storageNavLabel(group) {
-  return group === "buero" ? "Buchung" : "Einlagern";
+  return HLogistikUi.storageNavLabel(group);
 }
 
 function applyUserAccess() {
@@ -1216,6 +1231,8 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
   applyWarehouseHint(warehouseHint);
   const binResult = await applyStorageBinsFromArticleStock(nextLines);
   state.lines = binResult.lines;
+  applyDefaultDestinationCustomer(state.lines);
+  applyCustomerOrderNumberRule();
   topControlsCollapsed = false;
   saveStateWithoutServer();
   render();
@@ -1436,13 +1453,14 @@ async function importStorageText(text, fileName = "", parsed = parseStorageSlipT
   localStorage.setItem(MODE_KEY, currentMode);
   clearCurrentOrder();
   state.orderType = "storage";
+  state.orderWarehouse = currentWarehouse();
   state.rawText = text;
   state.orderDate = new Date().toISOString().slice(0, 10);
   state.orderTime = currentTimeValue();
   state.orderNumber = parsed.orderNumber || await nextStorageOrderNumber();
   state.customerName = "SSI";
   state.customerGroupKey = parsed.customerGroupKey || customerGroupKeyForImport(state.customerName);
-  state.lines = parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })];
+  state.lines = normalizeStorageHandlingUnits(parsed.lines.length ? parsed.lines : [createLine({ description: text.slice(0, 140) })], isSsiStorageOrderContext());
   topControlsCollapsed = state.lines.length > 0;
   markOrderTouched();
   saveAndRender();
@@ -1578,8 +1596,10 @@ function parseOrderText(text) {
   const stackedRows = tableRows.length ? [] : annotateDestinationExceptions(collectStackedWarehouseRows(pickingLines));
   const splitRows = tableRows.length || stackedRows.length ? [] : annotateDestinationExceptions(collectSplitWarehouseRows(pickingLines));
   const warehouseRows = tableRows.length ? tableRows : stackedRows.length ? stackedRows : splitRows;
-  const customerName = cleanCustomerName(explicitCustomerName || findCustomerFromHeader(pickingLines));
-  const customerGroupKey = customerGroupKeyForImport(customerName, destinationToCustomerGroupFallback(warehouseRows));
+  const headerCustomerName = cleanCustomerName(explicitCustomerName || findCustomerFromHeader(pickingLines));
+  const destinationCustomerName = destinationToCustomerNameFallback(warehouseRows);
+  const customerName = warehouseRows.length ? destinationCustomerName || headerCustomerName : headerCustomerName;
+  const customerGroupKey = customerGroupKeyForImport(customerName, destinationCustomerName || destinationToCustomerGroupFallback(warehouseRows));
 
   if (warehouseRows.length) {
     return {
@@ -1983,6 +2003,7 @@ function duplicateHandlingUnitConflicts(lines) {
 
   (Array.isArray(lines) ? lines : []).forEach((line, index) => {
     const rawValue = String(line?.fromHandlingUnit || "").trim();
+    if (isIncompleteSsiStorageHandlingUnit(rawValue)) return;
     const key = normalizeHandlingUnitLookup(rawValue);
     if (!key) return;
 
@@ -2279,7 +2300,8 @@ function parseWarehouseLine(line) {
   const handlingUnitInfo = parseHandlingUnitTokens(tokens, cursor);
   const fromHandlingUnit = handlingUnitInfo.value;
   cursor = handlingUnitInfo.next;
-  const fromBin = tokens[cursor] && /-/.test(tokens[cursor]) ? tokens[cursor++] : "";
+  const fromBin = extractBin(tokens[cursor] || "");
+  if (fromBin) cursor += 1;
   const productInfo = parseProductTokens(tokens, cursor);
   const product = productInfo.value;
   cursor = productInfo.next;
@@ -2365,18 +2387,51 @@ function hasIntermediateWarehouseColumn(tokens, firstNumber, binIndex) {
 }
 
 function destinationToCustomerGroupFallback(lines) {
-  const destinations = lines
-    .map((line) => line.toBin)
-    .map(normalizeDestinationName)
-    .filter((value) => value && value !== "9021-0OUT");
+  return firstDestinationName(lines);
+}
 
-  return destinations[0] || "";
+function firstDestinationName(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .map((line) => line?.toBin)
+    .map(normalizeDestinationName)
+    .find(Boolean) || "";
+}
+
+function destinationToCustomerNameFallback(lines) {
+  return firstDestinationName(lines);
+}
+
+function defaultDestinationCustomerName(lines) {
+  return firstDestinationName(lines);
+}
+
+function applyDefaultDestinationCustomer(lines) {
+  const customerName = defaultDestinationCustomerName(lines);
+  if (!customerName) return false;
+  state.customerName = customerName;
+  state.customerGroupKey = customerGroupKeyForImport(customerName);
+  applyCustomerOrderNumberRule();
+  return true;
+}
+
+function applyCustomerOrderNumberRule() {
+  if (!requiresSsiOrderNumber(state.customerName)) return false;
+  state.orderNumber = "SSI";
+  if (elements.orderNumber) elements.orderNumber.value = state.orderNumber;
+  return true;
+}
+
+function orderNumberForCustomer(orderNumber, customerName) {
+  return requiresSsiOrderNumber(customerName) ? "SSI" : String(orderNumber || "");
+}
+
+function requiresSsiOrderNumber(customerName) {
+  return normalizeDestinationName(customerName) === "9021-0OUT";
 }
 
 function annotateDestinationExceptions(lines) {
-  const defaultDestination = "9021-0OUT";
-  const hasDefaultDestination = lines.some((line) => normalizeDestinationName(line.toBin) === defaultDestination);
-  if (!hasDefaultDestination) return lines;
+  const defaultDestination = firstDestinationName(lines);
+  if (!defaultDestination) return lines;
 
   return lines.map((line) => {
     const destination = normalizeDestinationName(line.toBin);
@@ -2390,12 +2445,14 @@ function annotateDestinationExceptions(lines) {
 }
 
 function normalizeDestinationName(value) {
-  return String(value || "")
+  const normalized = String(value || "")
     .trim()
     .toUpperCase()
     .replace(/\s*-\s*/g, "-")
     .replace(/\s+/g, " ")
-    .replace(/^9021-00UT$/, "9021-0OUT");
+    .replace(/^(?:8021|9021|99021)-0?0?UT\b/, "9021-0OUT");
+  if (/^9021-0OUT\b/.test(normalized)) return "9021-0OUT";
+  return normalized;
 }
 
 function collectWarehouseRows(lines) {
@@ -2420,7 +2477,8 @@ function collectWarehouseRows(lines) {
   if (current) rowTexts.push(current);
 
   rowTexts.forEach((rowText) => {
-    const candidates = [rowText, ...splitPossibleMergedWarehouseRows(rowText)];
+    const splitRows = splitPossibleMergedWarehouseRows(rowText);
+    const candidates = splitRows.length ? splitRows : [rowText];
 
     candidates.forEach((candidate) => {
       const parsed = parseWarehouseLine(candidate);
@@ -2591,16 +2649,16 @@ function warehouseHeaderKey(line) {
 
 function isWarehouseRowStart(line) {
   const normalizedLine = normalizeOcrWarehouseLine(line);
-  const match = normalizedLine.match(/^[^\d]{0,12}(\d{6,})\b/);
+  const match = normalizedLine.match(/^[^\d]{0,12}(\d{6,9})\b/);
   if (!match) return false;
 
   const rest = normalizedLine.slice(match[0].length);
-  return /\b\d{10,}\b/.test(rest) || /\b\d{3}-[A-Z0-9]+-[A-Z0-9]+\b/i.test(rest);
+  return Boolean(extractHandlingUnit(rest) || extractBin(rest) || findProductQuantityMatch(rest));
 }
 
 function splitPossibleMergedWarehouseRows(text) {
   return normalizeOcrWarehouseLine(text)
-    .split(/\s+(?=[^\d]{0,12}\d{6,}\s+\d{10,})/)
+    .split(/\s+(?=[^\d]{0,12}\d{6,9}\s+(?:[0-9OoQD]{10,}|[0OQD]{0,2}\d{1,3}-[A-Z0-9]{1,4}-[A-Z0-9C]{2,8}|\d{4,8}\D{0,12}\d))/i)
     .filter((part) => part !== text);
 }
 
@@ -2665,7 +2723,8 @@ function parseWarehouseHeader(line) {
   const handlingUnitInfo = parseHandlingUnitTokens(tokens, cursor);
   const fromHandlingUnit = handlingUnitInfo.value;
   cursor = handlingUnitInfo.next;
-  const fromBin = tokens[cursor] && /-/.test(tokens[cursor]) ? tokens[cursor++] : "";
+  const fromBin = extractBin(tokens[cursor] || "");
+  if (fromBin) cursor += 1;
   const productInfo = parseProductTokens(tokens, cursor);
 
   if (!fromHandlingUnit || !fromBin || !productInfo.value) return null;
@@ -2832,9 +2891,16 @@ function extractDestinationBin(text) {
   const source = String(text || "");
   const matches = [...source.matchAll(/9\d{3,4}\s*-\s*[A-Z0-9]+(?:[\s-]+[A-Z0-9]+){0,2}/gi)];
   const match = matches.at(-1);
-  if (match) return normalizeDestinationName(match[0]);
+  if (match) return normalizeDestinationName(trimDestinationFooterNoise(match[0], source.slice(match.index + match[0].length)));
   const fallback = source.match(/((?:9\d{3,4}|\d{4})[ -][A-Z0-9]+(?:[ -][A-Z0-9]+)*)\s*$/i);
   return fallback ? normalizeDestinationName(fallback[1]) : "";
+}
+
+function trimDestinationFooterNoise(destination, followingText = "") {
+  const value = String(destination || "").trim();
+  if (!/\s+\d{1,2}$/.test(value)) return value;
+  if (/^\s*[,.;:¢]/.test(String(followingText || ""))) return value.replace(/\s+\d{1,2}$/, "");
+  return value;
 }
 
 function cleanProductDescription(value, toBin = "") {
@@ -2960,10 +3026,6 @@ function autoPositionNoteValues(line) {
     .filter(Boolean);
 }
 
-function autoPositionNoteText(line) {
-  return combineUniqueNoteParts(autoPositionNoteValues(line));
-}
-
 function combinedPositionNote(line) {
   return combineUniqueNoteParts([line?.positionNote, ...autoPositionNoteValues(line)]);
 }
@@ -3075,14 +3137,21 @@ function escapeHtmlAttribute(value) {
   return escapeSvgText(value).replace(/"/g, "&quot;");
 }
 
-function setHandlingUnitEditMode(input, canEdit) {
+function setHandlingUnitEditMode(input, canEdit, options = {}) {
   input.readOnly = !canEdit;
   input.classList.toggle("is-editable-hu", canEdit);
-  setNumericInputMode(input);
+  input.inputMode = options.useSsiStorageHuPrefix ? "numeric" : "text";
+  if (options.useSsiStorageHuPrefix) {
+    input.pattern = "[0-9]*";
+    input.maxLength = SSI_STORAGE_HU_LENGTH;
+  } else {
+    input.removeAttribute("pattern");
+    input.removeAttribute("maxlength");
+  }
 
   if (canEdit) {
     input.removeAttribute("readonly");
-    input.placeholder = "HU eintragen";
+    input.placeholder = options.useSsiStorageHuPrefix ? `${SSI_STORAGE_HU_PREFIX} + 7 Stellen` : "HU eintragen";
     return;
   }
 
@@ -3098,6 +3167,63 @@ function setNumericInputMode(input) {
 
 function normalizeDigits(value) {
   return String(value || "").replace(/\D/g, "");
+}
+
+function isSsiStorageOrderContext(orderType = state.orderType || currentMode, customerName = state.customerName) {
+  return orderType === "storage" && storageOrderUsesSsiCustomer(customerName);
+}
+
+function normalizeSsiStorageHandlingUnit(value) {
+  const digits = normalizeDigits(value);
+  if (!digits) return SSI_STORAGE_HU_PREFIX;
+  if (digits.startsWith(SSI_STORAGE_HU_PREFIX)) {
+    return digits.slice(0, SSI_STORAGE_HU_LENGTH);
+  }
+  const suffix = digits.length <= SSI_STORAGE_HU_SUFFIX_LENGTH
+    ? digits
+    : digits.slice(-SSI_STORAGE_HU_SUFFIX_LENGTH);
+  return SSI_STORAGE_HU_PREFIX + suffix;
+}
+
+function isCompleteSsiStorageHandlingUnit(value) {
+  const digits = normalizeDigits(value);
+  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length === SSI_STORAGE_HU_LENGTH;
+}
+
+function isIncompleteSsiStorageHandlingUnit(value) {
+  const digits = normalizeDigits(value);
+  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length < SSI_STORAGE_HU_LENGTH;
+}
+
+function isMissingOrIncompleteHandlingUnit(value) {
+  const text = String(value || "").trim();
+  return !text || isIncompleteSsiStorageHandlingUnit(text);
+}
+
+function storageHandlingUnitDisplayValue(value, useSsiStorageHuPrefix) {
+  return useSsiStorageHuPrefix ? normalizeSsiStorageHandlingUnit(value) : value || "";
+}
+
+function normalizeStorageHandlingUnits(lines, useSsiStorageHuPrefix) {
+  return (Array.isArray(lines) ? lines : []).map((line) => {
+    if (!line || line.lineType === "loading-slip") return line;
+    if (!useSsiStorageHuPrefix) {
+      const fromHandlingUnit = stripSsiStorageHandlingUnitPrefix(line.fromHandlingUnit);
+      return fromHandlingUnit === line.fromHandlingUnit ? line : { ...line, fromHandlingUnit };
+    }
+    return {
+      ...line,
+      fromHandlingUnit: normalizeSsiStorageHandlingUnit(line.fromHandlingUnit),
+      fromHandlingUnitEditable: true
+    };
+  });
+}
+
+function stripSsiStorageHandlingUnitPrefix(value) {
+  const text = String(value || "").trim();
+  const digits = normalizeDigits(text);
+  if (!digits.startsWith(SSI_STORAGE_HU_PREFIX)) return text;
+  return digits.slice(SSI_STORAGE_HU_PREFIX.length);
 }
 
 function render() {
@@ -3119,10 +3245,11 @@ function render() {
   getPickingLines(importOrder).forEach((line) => {
     const isStorageLine = state.orderType === "storage";
     const isManualStorageLine = isStorageLine && line.manual === true;
+    const useSsiStorageHuPrefix = isStorageLine && isSsiStorageOrderContext();
     const item = elements.lineTemplate.content.firstElementChild.cloneNode(true);
     item.dataset.id = line.id;
     item.classList.toggle("is-done", line.picked);
-    item.classList.toggle("is-collapsed", state.collapseDone && line.picked);
+    item.classList.toggle("is-collapsed", line.picked);
     item.classList.toggle("is-loading-slip", line.lineType === "loading-slip");
     item.classList.toggle("is-manual-storage", isManualStorageLine);
     const binWarningText = String(line.binWarning || "").trim();
@@ -3149,11 +3276,9 @@ function render() {
     }
 
     map.picked.setAttribute("aria-pressed", line.picked ? "true" : "false");
-    const isMissingHandlingUnit = !String(line.fromHandlingUnit || "").trim();
-    const canEditHandlingUnit = isStorageLine || line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
-    map.fromHandlingUnit.value = line.fromHandlingUnit || "";
-    map.positionNote.value = line.positionNote || "";
-    renderAutoPositionNote(item, line);
+    const canEditHandlingUnit = isStorageLine || line.fromHandlingUnitEditable === true || isMissingOrIncompleteHandlingUnit(line.fromHandlingUnit);
+    map.fromHandlingUnit.value = storageHandlingUnitDisplayValue(line.fromHandlingUnit, useSsiStorageHuPrefix);
+    map.positionNote.value = combinedPositionNote(line);
     map.fromBin.value = line.fromBin || "";
     map.product.value = line.product || "";
     map.description.value = line.description;
@@ -3163,7 +3288,7 @@ function render() {
     map.product.readOnly = !isManualStorageLine;
     setNumericInputMode(map.product);
     map.description.readOnly = !isManualStorageLine;
-    setHandlingUnitEditMode(map.fromHandlingUnit, canEditHandlingUnit);
+    setHandlingUnitEditMode(map.fromHandlingUnit, canEditHandlingUnit, { useSsiStorageHuPrefix });
     const canEditBin = isStorageLine || state.awaitingRelease || Boolean(binWarningText);
     map.fromBin.readOnly = !canEditBin;
     map.fromBin.placeholder = isStorageLine ? "Stellplatz" : "Lagerplatz";
@@ -3171,10 +3296,16 @@ function render() {
     map.fromBin.classList.add("uppercase-input");
     map.fromBin.classList.toggle("is-warning", Boolean(binWarningText));
     if (binWarningText) map.fromBin.title = binWarningText;
-    map.fromHandlingUnit.placeholder = isStorageLine ? "HU eintragen" : map.fromHandlingUnit.placeholder;
-    map.targetQty.readOnly = !isManualStorageLine;
-    map.actualQty.readOnly = isStorageLine && !isManualStorageLine;
-    map.actualQty.classList.toggle("readonly-input", isStorageLine && !isManualStorageLine);
+    map.fromHandlingUnit.placeholder = isStorageLine
+      ? (useSsiStorageHuPrefix ? `${SSI_STORAGE_HU_PREFIX} + 7 Stellen` : "HU eintragen")
+      : map.fromHandlingUnit.placeholder;
+    if (isManualStorageLine) {
+      map.targetQty.closest("label")?.remove();
+    } else {
+      map.targetQty.readOnly = true;
+    }
+    map.actualQty.readOnly = false;
+    map.actualQty.classList.remove("readonly-input");
     map.unit.readOnly = !isManualStorageLine;
 
     const setPicked = (picked) => {
@@ -3185,9 +3316,7 @@ function render() {
       map.picked.setAttribute("aria-pressed", picked ? "true" : "false");
       updateLine(line.id, { picked }, false);
       item.classList.toggle("is-done", picked);
-      // Do not collapse the row immediately on touch; Safari can stall when the tapped row disappears.
-      item.classList.remove("is-collapsed");
-      updateCollapseButtonText();
+      item.classList.toggle("is-collapsed", picked);
     };
 
     map.picked.addEventListener("click", (event) => {
@@ -3196,7 +3325,7 @@ function render() {
       setPicked(map.picked.getAttribute("aria-pressed") !== "true");
     });
     map.fromHandlingUnit.addEventListener("input", () => {
-      map.fromHandlingUnit.value = normalizeDigits(map.fromHandlingUnit.value);
+      if (useSsiStorageHuPrefix) map.fromHandlingUnit.value = normalizeSsiStorageHandlingUnit(map.fromHandlingUnit.value);
       updateLine(line.id, { fromHandlingUnit: map.fromHandlingUnit.value, fromHandlingUnitEditable: canEditHandlingUnit }, false);
     });
     map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
@@ -3215,14 +3344,9 @@ function render() {
       updateLine(line.id, { product: map.product.value }, false);
     });
     map.description.addEventListener("input", () => updateLine(line.id, { description: map.description.value }, false));
-    map.targetQty.addEventListener("input", () => {
-      const patch = { targetQty: map.targetQty.value };
-      if (isManualStorageLine && !String(map.actualQty.value || "").trim()) {
-        map.actualQty.value = map.targetQty.value;
-        patch.actualQty = map.targetQty.value;
-      }
-      updateLine(line.id, patch, false);
-    });
+    if (!isManualStorageLine) {
+      map.targetQty.addEventListener("input", () => updateLine(line.id, { targetQty: map.targetQty.value }, false));
+    }
     map.actualQty.addEventListener("input", () => {
       const patch = { actualQty: map.actualQty.value };
       if (Number(line.stockQty || 0) > 0) {
@@ -3230,7 +3354,7 @@ function render() {
         patch.autoPositionNotes = setAutoPositionNote(line.autoPositionNotes, "quantity", quantityRemark);
       }
       updateLine(line.id, patch, false);
-      renderAutoPositionNote(item, line);
+      map.positionNote.value = combinedPositionNote(line);
     });
     map.unit.addEventListener("input", () => updateLine(line.id, { unit: map.unit.value }, false));
 
@@ -3242,7 +3366,6 @@ function render() {
 
   renderStorageLineActions();
   updateCounts();
-  updateCollapseButtonText();
 }
 
 function renderStorageLineActions() {
@@ -3250,6 +3373,12 @@ function renderStorageLineActions() {
   const isStorage = currentMode === "storage" || state.orderType === "storage";
   elements.storageLineActions.hidden = !isStorage;
   elements.addStorageLineButton.disabled = !isStorage;
+  if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.disabled = !isStorage;
+  if (elements.manualStoragePositionCountInput) {
+    elements.manualStoragePositionCountInput.disabled = !isStorage;
+    elements.manualStoragePositionCountInput.min = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN);
+    elements.manualStoragePositionCountInput.max = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX);
+  }
 }
 
 function renderBinWarning(item, message) {
@@ -3263,27 +3392,50 @@ function renderBinWarning(item, message) {
 
 async function addManualStorageLine() {
   if (!requireCurrentUser()) return;
+  const countResult = readManualStoragePositionCreateCount();
+  if (!countResult.ok) {
+    setServerStatus(countResult.error, "error");
+    elements.manualStoragePositionCountInput?.focus();
+    return;
+  }
+  const material = normalizeDigits(elements.manualStorageMaterialInput?.value || "");
+  const preset = await manualStorageLinePreset(material);
 
   currentMode = "storage";
   localStorage.setItem(MODE_KEY, currentMode);
   state.orderType = "storage";
+  state.orderWarehouse = currentOrderWarehouse();
   state.orderDate = state.orderDate || new Date().toISOString().slice(0, 10);
   state.orderTime = state.orderTime || currentTimeValue();
   state.orderNumber = state.orderNumber || await nextStorageOrderNumber();
   state.customerName = "SSI";
   state.createdBy = state.createdBy || currentUser.name;
   state.awaitingRelease = state.awaitingRelease || !state.id;
-  state.lines.push(createLine({
-    orderType: "storage",
-    manual: true,
-    warehouseOrder: nextManualStoragePosition(),
-    fromHandlingUnitEditable: true,
-    unit: "Stk"
-  }));
+  for (let index = 0; index < countResult.value; index += 1) {
+    state.lines.push(createManualStorageLine(preset));
+  }
+  if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.value = "";
+  if (elements.manualStoragePositionCountInput) elements.manualStoragePositionCountInput.value = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT);
   topControlsCollapsed = false;
   markOrderTouched();
   saveAndRender();
-  setServerStatus("Manuelle Einlagerposition hinzugefuegt.", "ok");
+  setServerStatus(`${countResult.value} manuelle Einlagerposition${countResult.value === 1 ? "" : "en"} angelegt.`, "ok");
+}
+
+function createManualStorageLine(preset = {}) {
+  return createLine({
+    orderType: "storage",
+    manual: true,
+    warehouseOrder: nextManualStoragePosition(),
+    fromHandlingUnit: isSsiStorageOrderContext() ? SSI_STORAGE_HU_PREFIX : "",
+    fromHandlingUnitEditable: true,
+    product: preset.product || "",
+    description: preset.description || "",
+    fromBin: preset.fromBin || "",
+    targetQty: "",
+    actualQty: "",
+    unit: preset.unit || "Stk"
+  });
 }
 
 function nextManualStoragePosition() {
@@ -3293,6 +3445,41 @@ function nextManualStoragePosition() {
     .map((value) => Number(value.replace(/\D/g, "")))
     .filter((value) => Number.isInteger(value) && value > 0);
   return `M${(existing.length ? Math.max(...existing) : 0) + 1}`;
+}
+
+function readManualStoragePositionCreateCount() {
+  const raw = String(elements.manualStoragePositionCountInput?.value || MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT).trim();
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN) {
+    return {
+      ok: false,
+      value: MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT,
+      error: "Anzahl Positionen muss eine positive ganze Zahl sein."
+    };
+  }
+  if (value > MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX) {
+    return {
+      ok: false,
+      value: MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX,
+      error: `Anzahl Positionen darf maximal ${MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX} betragen.`
+    };
+  }
+  return { ok: true, value, error: "" };
+}
+
+async function manualStorageLinePreset(material) {
+  const product = normalizeDigits(material);
+  if (!product) return {};
+  const preset = { product };
+  try {
+    const article = await apiJson(`/api/articles/lookup/${encodeURIComponent(product)}?warehouse=${encodeURIComponent(currentOrderWarehouse())}`);
+    preset.product = String(article.materialnummer || product).trim();
+    preset.description = String(article.materialbezeichnung || "").trim();
+    preset.fromBin = String(article.lagerplatz || "").trim();
+  } catch {
+    // Artikelstamm-Lookup ist Komfort; unbekannte Artikel bleiben manuell erfassbar.
+  }
+  return preset;
 }
 
 function renderManualStorageDeleteButton(item, line) {
@@ -3323,12 +3510,14 @@ function removeManualStorageLine(id) {
 }
 
 function manualStorageLineHasContent(line) {
+  const handlingUnit = isSsiStorageOrderContext()
+    ? (isCompleteSsiStorageHandlingUnit(line.fromHandlingUnit) ? line.fromHandlingUnit : "")
+    : line.fromHandlingUnit;
   return [
     line.product,
     line.description,
-    line.targetQty,
     line.actualQty,
-    line.fromHandlingUnit,
+    handlingUnit,
     line.fromBin,
     line.positionNote
   ].some((value) => String(value ?? "").trim());
@@ -3373,7 +3562,15 @@ function storageLineCompletionErrors(line) {
   else if (!/^\d+$/.test(product)) errors.push("Artikelnummer darf nur Zahlen enthalten");
   if (line.manual !== true && !String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
   if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
-  if (handlingUnit && !/^\d+$/.test(handlingUnit)) errors.push("HU darf nur Zahlen enthalten");
+  if (currentStorageRequiresHandlingUnit()) {
+    if (isSsiStorageOrderContext()) {
+      if (!isCompleteSsiStorageHandlingUnit(handlingUnit)) {
+        errors.push(`HU muss mit ${SSI_STORAGE_HU_PREFIX} beginnen und danach ${SSI_STORAGE_HU_SUFFIX_LENGTH} Ziffern enthalten`);
+      }
+    } else if (!handlingUnit) {
+      errors.push("HU fehlt");
+    }
+  }
   if (!readPositiveQuantity(line.actualQty || line.targetQty)) errors.push("Menge fehlt");
   return errors;
 }
@@ -3799,10 +3996,20 @@ function renderModeControls() {
     : "Auftrag auswählen, Positionen prüfen und digital abhaken.";
   elements.pickingModeButton.classList.toggle("is-active", !isStorage);
   elements.storageModeButton.classList.toggle("is-active", isStorage);
-  elements.pickHeader.querySelector(".pick-column-grid").innerHTML = isStorage
-    ? "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Soll</span><span>Ist</span><span>Einheit</span>"
+  const grid = elements.pickHeader.querySelector(".pick-column-grid");
+  const manualStorageHeader = isManualStorageHeader();
+  grid.classList.toggle("is-manual-storage-grid", manualStorageHeader);
+  grid.innerHTML = isStorage
+    ? (manualStorageHeader
+      ? "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Ist</span><span>Einheit</span>"
+      : "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Soll</span><span>Ist</span><span>Einheit</span>")
     : "<span>Produkt</span><span>Lagerplatz</span><span>Produktbeschreibung</span><span>Soll</span><span>Ist</span><span>Einheit</span>";
-  elements.clearDoneButton.textContent = isStorage ? "Erledigte einklappen" : elements.clearDoneButton.textContent;
+}
+
+function isManualStorageHeader() {
+  if ((state.orderType || currentMode) !== "storage") return false;
+  const lines = Array.isArray(state.lines) ? state.lines.filter((line) => line?.lineType !== "loading-slip") : [];
+  return !lines.length || lines.every((line) => line?.manual === true || isEmptyManualStorageLine(line));
 }
 
 function renderTakeOverButton() {
@@ -3840,11 +4047,18 @@ function hasCurrentOrderData() {
 function renderDiscardButton() {
   if (elements.discardDraftButton) {
     const hasData = hasCurrentOrderData();
-    elements.discardDraftButton.textContent = state.awaitingRelease ? "Entwurf verwerfen" : "Maske verwerfen";
+    const deletesSavedOrder = Boolean(state.id);
+    elements.discardDraftButton.textContent = state.awaitingRelease
+      ? "Entwurf verwerfen"
+      : deletesSavedOrder
+        ? "Auftrag abbrechen"
+        : "Maske verwerfen";
     elements.discardDraftButton.hidden = !hasData;
     elements.discardDraftButton.disabled = !hasData;
+    elements.discardDraftButton.classList.toggle("danger-button", deletesSavedOrder);
+    elements.discardDraftButton.classList.toggle("secondary-button", !deletesSavedOrder);
     elements.discardDraftButton.title = state.id
-      ? "Aktuelle Maske leeren, gespeicherten Auftrag aber behalten"
+      ? "Auftrag abbrechen und aus der Auftragsliste loeschen"
       : "Aktuelle Maske und lokalen Entwurf leeren";
   }
 }
@@ -3852,11 +4066,11 @@ function renderDiscardButton() {
 function renderDeleteOrderButton() {
   if (!elements.deleteOrderButton) return;
   const hasSavedOrder = Boolean(state.id);
-  const canDelete = ["buero", "lager", "tablet"].includes(currentUser.group);
+  const canDelete = ["buero", "lager", "tablet", "verwaltung"].includes(currentUser.group);
   const isStorage = (state.orderType || currentMode) === "storage";
   elements.deleteOrderButton.textContent = isStorage ? "Einlager-Auftrag löschen" : "Auftrag löschen";
   elements.deleteOrderButton.hidden = !hasSavedOrder || !canDelete;
-  elements.deleteOrderButton.disabled = !hasSavedOrder || !serverOnline || !canDelete || Boolean(state.exportedAt);
+  elements.deleteOrderButton.disabled = !hasSavedOrder || !canDelete || Boolean(state.exportedAt);
   elements.deleteOrderButton.title = state.exportedAt
     ? "Abgeschlossene Aufträge können nicht gelöscht werden"
     : isStorage
@@ -3878,14 +4092,6 @@ function renderTopControls() {
 function setTopControlsCollapsed(collapsed) {
   topControlsCollapsed = collapsed;
   render();
-}
-
-function updateCollapseButtonText() {
-  if (currentMode === "storage" || state.orderType === "storage") {
-    elements.clearDoneButton.textContent = state.collapseDone ? "Details bei erledigten anzeigen" : "Details bei erledigten ausblenden";
-    return;
-  }
-  elements.clearDoneButton.textContent = state.collapseDone ? "HU bei erledigten anzeigen" : "HU bei erledigten ausblenden";
 }
 
 function getPickingLines(importOrder) {
@@ -3921,23 +4127,6 @@ function syncFields() {
   });
 }
 
-function renderAutoPositionNote(item, line) {
-  const label = item.querySelector(".position-note-input")?.closest("label");
-  if (!label) return;
-  const text = autoPositionNoteText(line);
-  let note = label.querySelector(".auto-position-note");
-  if (!text) {
-    if (note) note.remove();
-    return;
-  }
-  if (!note) {
-    note = document.createElement("span");
-    note.className = "auto-position-note";
-    label.appendChild(note);
-  }
-  note.textContent = text;
-}
-
 function renderLoadingSlipLine(item, map, line) {
   const barcodeWrap = document.createElement("div");
   barcodeWrap.className = "loading-slip-barcode";
@@ -3954,8 +4143,7 @@ function renderLoadingSlipLine(item, map, line) {
   map.actualQty.closest("label").remove();
   map.unit.closest("label").remove();
   map.fromHandlingUnit.closest("label").remove();
-  map.positionNote.value = line.positionNote || "";
-  renderAutoPositionNote(item, line);
+  map.positionNote.value = combinedPositionNote(line);
   map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
 
   map.picked.setAttribute("aria-pressed", line.picked ? "true" : "false");
@@ -3966,8 +4154,7 @@ function renderLoadingSlipLine(item, map, line) {
     map.picked.setAttribute("aria-pressed", picked ? "true" : "false");
     updateLine(line.id, { picked }, false);
     item.classList.toggle("is-done", picked);
-    item.classList.remove("is-collapsed");
-    updateCollapseButtonText();
+    item.classList.toggle("is-collapsed", picked);
   });
 }
 
@@ -4004,8 +4191,9 @@ function syncLineFieldsFromDom() {
     const unitInput = item.querySelector(".unit-input");
 
     if (huInput) {
-      huInput.value = normalizeDigits(huInput.value);
-      line.fromHandlingUnit = huInput.value;
+      line.fromHandlingUnit = isSsiStorageOrderContext()
+        ? normalizeSsiStorageHandlingUnit(huInput.value)
+        : huInput.value;
     }
     if (binInput) {
       line.fromBin = binInput.value.toUpperCase();
@@ -4196,11 +4384,7 @@ function startConnectionMonitor() {
 }
 
 function setConnectionStatus(isOnline) {
-  if (!elements.connectionBadge || !elements.connectionText) return;
-  elements.connectionBadge.classList.toggle("is-online", isOnline === true);
-  elements.connectionBadge.classList.toggle("is-offline", isOnline === false);
-  elements.connectionBadge.classList.toggle("is-checking", isOnline === null);
-  elements.connectionText.textContent = isOnline === true ? "Online" : isOnline === false ? "Offline" : "Prüfe Verbindung";
+  HLogistikUi.setConnectionStatus(elements.connectionBadge, elements.connectionText, isOnline);
 }
 
 function startOrderListRefresh() {
@@ -4609,24 +4793,42 @@ async function discardCurrentDraft() {
   }
 
   const isSavedOrder = Boolean(state.id);
-  const question = isSavedOrder
-    ? "Aktuelle Maske leeren? Der gespeicherte Auftrag bleibt in der Auftragsliste erhalten."
-    : "Aktuellen Entwurf verwerfen und Maske leeren?";
+  if (isSavedOrder) {
+    const isStorage = (state.orderType || currentMode) === "storage";
+    const typeLabel = isStorage ? "Einlager-Auftrag" : "Auftrag";
+    const label = orderNoticeLabel({
+      id: state.id,
+      orderNumber: state.orderNumber,
+      customerName: state.customerName
+    });
+    await deleteCurrentOrder({
+      confirmMessage: `${typeLabel} "${label}" abbrechen? Der angelegte Auftrag wird geloescht.`,
+      successMessage: `${typeLabel} abgebrochen und geloescht.`,
+      failurePrefix: "Abbrechen fehlgeschlagen"
+    });
+    return;
+  }
+
+  const question = "Aktuellen Entwurf verwerfen und Maske leeren?";
   if (!confirm(question)) return;
 
   await releaseCurrentOrderActivity();
   resetCurrentOrderView();
-  setServerStatus(
-    isSavedOrder
-      ? `Maske geleert. Der gespeicherte ${modeLabel(currentMode)}-Auftrag bleibt erhalten.`
-      : `Entwurf verworfen. Die ${modeLabel(currentMode)}-Seite wurde geleert.`,
-    "ok"
-  );
+  setServerStatus(`Entwurf verworfen. Die ${modeLabel(currentMode)}-Seite wurde geleert.`, "ok");
   if (serverOnline) await loadOrderList();
 }
 
-async function deleteCurrentOrder() {
+async function deleteCurrentOrder(options = {}) {
+  const {
+    confirmMessage = "",
+    successMessage = "",
+    failurePrefix = "Loeschen fehlgeschlagen"
+  } = options || {};
+
   if (!serverOnline) {
+    setServerStatus("Pruefe Serververbindung vor dem Loeschen ...", "ok");
+    await initializeServer({ showChecking: false });
+    if (serverOnline) return deleteCurrentOrder(options);
     setServerStatus(`Server nicht verbunden. ${modeLabel(state.orderType || currentMode)} kann nicht gelöscht werden.`, "error");
     return;
   }
@@ -4648,20 +4850,47 @@ async function deleteCurrentOrder() {
     orderNumber: state.orderNumber,
     customerName: state.customerName
   });
-  if (!confirm(`${typeLabel} "${label}" wirklich aus der Liste löschen?`)) return;
+  const deleteQuestion = confirmMessage || `${typeLabel} "${label}" wirklich aus der Liste löschen?`;
+  if (!confirm(deleteQuestion)) return;
 
   window.clearTimeout(saveTimer);
   saveTimer = null;
 
   try {
     await apiJson(`/api/orders/${encodeURIComponent(state.id)}`, { method: "DELETE" });
+    await removeDeletedOrderFromLocalCaches(state.id);
     knownOrderIds.delete(state.id);
     localStorage.setItem(KNOWN_ORDERS_KEY, JSON.stringify([...knownOrderIds]));
     resetCurrentOrderView();
-    setServerStatus(`${typeLabel} gelöscht.`, "ok");
+    setServerStatus(successMessage || `${typeLabel} gelöscht.`, "ok");
     await loadOrderList();
   } catch (error) {
+    if (failurePrefix !== "Loeschen fehlgeschlagen") {
+      setServerStatus(`${failurePrefix}: ${error.message}`, "error");
+      return;
+    }
     setServerStatus(`Löschen fehlgeschlagen: ${error.message}`, "error");
+  }
+}
+
+async function removeDeletedOrderFromLocalCaches(orderId) {
+  if (!orderId) return;
+
+  try {
+    const recovery = JSON.parse(localStorage.getItem(`${STORAGE_KEY}-recovery`) || "null");
+    if (String(recovery?.id || recovery?.cacheId || "") === String(orderId)) {
+      localStorage.removeItem(`${STORAGE_KEY}-recovery`);
+    }
+  } catch {
+    localStorage.removeItem(`${STORAGE_KEY}-recovery`);
+  }
+
+  if (!window.OfflineStore) return;
+  try {
+    if (OfflineStore.deleteOrder) await OfflineStore.deleteOrder(orderId);
+    if (OfflineStore.deleteOrderSummary) await OfflineStore.deleteOrderSummary(orderId);
+  } catch {
+    // The server deletion already succeeded; local cache cleanup is best effort.
   }
 }
 
@@ -4683,19 +4912,27 @@ async function releaseCurrentOrderActivity() {
 
 function currentOrderPayload({ touch = true } = {}) {
   if (touch) markOrderTouched();
+  const orderType = state.orderType || currentMode;
+  const orderWarehouse = normalizeOptionalWarehouse(state.orderWarehouse) || currentWarehouse();
+  const lines = normalizeStorageHandlingUnits(state.lines, isSsiStorageOrderContext(orderType, state.customerName));
+  const destinationCustomerName = orderType === "picking" ? defaultDestinationCustomerName(lines) : "";
+  const customerName = destinationCustomerName || state.customerName;
+  const customerGroupKey = destinationCustomerName
+    ? customerGroupKeyForImport(destinationCustomerName)
+    : state.customerGroupKey || customerGroupKeyForImport(customerName);
 
   return {
     id: state.id,
-    orderNumber: state.orderNumber,
-    customerName: state.customerName,
-    customerGroupKey: state.customerGroupKey || customerGroupKeyForImport(state.customerName),
+    orderNumber: orderNumberForCustomer(state.orderNumber, customerName),
+    customerName,
+    customerGroupKey,
     orderDate: state.orderDate,
     orderTime: state.orderTime,
     euroPallets: state.euroPallets,
     storageSpaces: state.storageSpaces,
     orderNote: state.orderNote,
     rawText: state.rawText,
-    collapseDone: state.collapseDone,
+    collapseDone: true,
     createdBy: state.createdBy,
     lastEditedBy: state.lastEditedBy,
     activeUser: state.activeUser,
@@ -4707,9 +4944,9 @@ function currentOrderPayload({ touch = true } = {}) {
     exportedAt: state.exportedAt || "",
     exportedPdfFile: state.exportedPdfFile || "",
     exportedPdfPath: state.exportedPdfPath || "",
-    orderType: state.orderType || currentMode,
-    orderWarehouse: normalizeOptionalWarehouse(state.orderWarehouse) || currentWarehouse(),
-    lines: state.lines
+    orderType,
+    orderWarehouse,
+    lines
   };
 }
 
@@ -4719,21 +4956,7 @@ function saveStateWithoutServer() {
 }
 
 async function apiJson(url, options = {}) {
-  const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
-  const warehouse = currentWarehouse();
-  const { headers: extraHeaders, ...rest } = options;
-  const response = await fetch(`${API_BASE}${url}`, {
-    headers: {
-      "Content-Type": "application/json",
-      "X-User-Group": userGroup,
-      "X-Warehouse": warehouse,
-      ...extraHeaders,
-    },
-    ...rest,
-  });
-  const data = await response.json();
-  if (!response.ok || data.ok === false) throw new Error(data.error || "Serverfehler");
-  return data;
+  return HLogistikUi.apiJson(url, options);
 }
 
 function setServerStatus(message, type = "") {
@@ -4955,6 +5178,16 @@ async function exportPdf() {
 
   if ((state.orderType || currentMode) === "storage") {
     pruneEmptyManualStorageLines();
+  }
+
+  const completionMessage = orderExportCompletionMessage(state);
+  if (completionMessage) {
+    showExportMessage(completionMessage);
+    setServerStatus(completionMessage, "error");
+    return;
+  }
+
+  if ((state.orderType || currentMode) === "storage") {
     const validationMessage = storageOrderExportMessage();
     if (validationMessage) {
       showExportMessage(validationMessage);
@@ -4995,6 +5228,28 @@ async function exportPdf() {
   } catch (error) {
     showExportMessage(`Server-PDF fehlgeschlagen: ${error.message}`);
   }
+}
+
+function orderExportCompletionMessage(order = state) {
+  const lines = exportableOrderLines(order);
+  if (!lines.length) return "Export gesperrt: Auftrag hat keine Positionen.";
+  const openLines = lines.filter((line) => !line?.picked);
+  if (!openLines.length) return "";
+  return `Export gesperrt: Erst alle Positionen abhaken (${openLines.length} offen${openPositionListText(openLines)}).`;
+}
+
+function exportableOrderLines(order) {
+  return (Array.isArray(order?.lines) ? order.lines : [])
+    .filter((line) => !isEmptyManualStorageLine(line));
+}
+
+function openPositionListText(lines) {
+  const positions = lines
+    .slice(0, 5)
+    .map((line, index) => String(line?.warehouseOrder || line?.position || index + 1).trim())
+    .filter(Boolean);
+  if (!positions.length) return "";
+  return `: Pos. ${positions.join(", ")}${lines.length > positions.length ? ", ..." : ""}`;
 }
 
 function stockIssueSummary(stockIssue, stockWarehouse = "") {

@@ -1,7 +1,16 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { getDb } from "./db.mjs";
-import { createId, normalizeWarehouse } from "./helpers.mjs";
+import { createId } from "./helpers.mjs";
+import { normalizeOptionalWarehouse } from "./rules/warehouse-rules.mjs";
+import {
+  firstDestinationName,
+  normalizeCustomerGroupKey,
+  normalizeDestinationName,
+  orderNumberForCustomer,
+} from "./rules/order-rules.mjs";
+
+export { normalizeCustomerGroupKey } from "./rules/order-rules.mjs";
 
 // ── SQLite CRUD ───────────────────────────────────────────────────────────────
 
@@ -164,13 +173,18 @@ export async function migrateOrdersFromJson(ordersFile) {
 // ── Normalization ─────────────────────────────────────────────────────────────
 
 export function normalizeOrder(order) {
-  const customerName = String(order.customerName || "");
+  const orderType = String(order.orderType || "picking");
+  const orderWarehouse = normalizeOrderWarehouse(order.orderWarehouse || order.pickingWarehouse || order.detectedWarehouse);
+  const lines = normalizeOrderLines(Array.isArray(order.lines) ? order.lines : []);
+  const destinationCustomerName = orderType === "picking" ? firstDestinationName(lines) : "";
+  const customerName = destinationCustomerName || String(order.customerName || "");
+  const orderNumber = orderNumberForCustomer(order.orderNumber, customerName);
   const explicitGroupKey = normalizeCustomerGroupKey(order.customerGroupKey || order.customerKey);
   return {
     id: order.id || "",
-    orderNumber: String(order.orderNumber || ""),
+    orderNumber,
     customerName,
-    customerGroupKey: explicitGroupKey || normalizeCustomerGroupKey(customerName),
+    customerGroupKey: destinationCustomerName ? normalizeCustomerGroupKey(destinationCustomerName) : explicitGroupKey || normalizeCustomerGroupKey(customerName),
     orderDate: String(order.orderDate || new Date().toISOString().slice(0, 10)),
     orderTime: String(order.orderTime || ""),
     euroPallets: String(order.euroPallets || ""),
@@ -178,9 +192,9 @@ export function normalizeOrder(order) {
     orderNote: String(order.orderNote || ""),
     rawText: String(order.rawText || ""),
     collapseDone: Boolean(order.collapseDone),
-    lines: Array.isArray(order.lines) ? order.lines : [],
-    orderType: String(order.orderType || "picking"),
-    orderWarehouse: normalizeOrderWarehouse(order.orderWarehouse || order.pickingWarehouse || order.detectedWarehouse),
+    lines,
+    orderType,
+    orderWarehouse,
     exportedAt: String(order.exportedAt || ""),
     exportedPdfFile: String(order.exportedPdfFile || ""),
     exportedPdfPath: String(order.exportedPdfPath || ""),
@@ -264,18 +278,15 @@ function orderFromRow(row) {
 }
 
 function normalizeOrderWarehouse(value) {
-  const text = String(value || "").trim().toUpperCase();
-  return text === "SSI" || text === "SI" ? normalizeWarehouse(text) : "";
+  return normalizeOptionalWarehouse(value);
 }
 
-export function normalizeCustomerGroupKey(value) {
-  return String(value || "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toUpperCase()
-    .replace(/\b(?:KUNDE|LIEFERADRESSE|EMPFAENGER|EMPFANGER)\b\s*[:#-]?/g, " ")
-    .replace(/[^A-Z0-9]+/g, " ")
-    .trim();
+function normalizeOrderLines(lines) {
+  return lines.map((line) => {
+    const normalizedToBin = normalizeDestinationName(line?.toBin);
+    if (!normalizedToBin || normalizedToBin === line?.toBin) return line;
+    return { ...line, toBin: normalizedToBin };
+  });
 }
 
 function userLookupKey(value) {

@@ -1,5 +1,5 @@
 // Bump CACHE_VERSION whenever static files change (keep in sync with "version" in manifest.webmanifest).
-const CACHE_VERSION = "1.5.96";
+const CACHE_VERSION = "1.5.118";
 const CACHE_NAME = `hlogistik-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -8,12 +8,15 @@ const APP_SHELL = [
   "/tablet.html",
   "/artikel.html",
   "/lager.html",
+  "/auswertungen.html",
+  "/shared-ui.js",
   "/app.js",
   "/tablet.js",
   "/tablet-legacy.js",
   "/artikel.js",
   "/xlsx.full.min.js",
   "/lager.js",
+  "/auswertungen.js",
   "/offline-store.js",
   "/styles.css",
   "/tablet.css",
@@ -22,6 +25,15 @@ const APP_SHELL = [
   "/pdf.min.js",
   "/pdf.worker.min.js"
 ];
+
+const NAVIGATION_FALLBACKS = new Set([
+  "/",
+  "/index.html",
+  "/tablet.html",
+  "/lager.html",
+  "/artikel.html",
+  "/auswertungen.html"
+]);
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -39,6 +51,10 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
+});
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   const url = new URL(request.url);
@@ -47,11 +63,13 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/exports/")) return;
 
   if (request.mode === "navigate") {
-    if (url.pathname === "/tablet.html") {
-      event.respondWith(fetch(request).catch(() => caches.match("/tablet.html")));
-      return;
-    }
-    event.respondWith(fetch(request).catch(() => caches.match("/index.html")));
+    const fallbackPath = navigationFallbackPath(url.pathname);
+    event.respondWith(
+      fetch(request).catch(() =>
+        caches.match(fallbackPath, { ignoreSearch: true })
+          .then((response) => response || caches.match("/index.html"))
+      )
+    );
     return;
   }
 
@@ -65,3 +83,10 @@ self.addEventListener("fetch", (event) => {
       .catch(() => caches.match(request, { ignoreSearch: true }))
   );
 });
+
+function navigationFallbackPath(pathname) {
+  const normalized = pathname === "/" ? "/index.html" : pathname;
+  return NAVIGATION_FALLBACKS.has(pathname) || NAVIGATION_FALLBACKS.has(normalized)
+    ? normalized
+    : "/index.html";
+}

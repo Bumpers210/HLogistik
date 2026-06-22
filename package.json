@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
+    "test:qa": "node scripts/qa-api-matrix.mjs",
     "lint": "eslint .",
     "format": "prettier --write ."
   },

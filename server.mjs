@@ -62,10 +62,19 @@ import {
   markOrderExported,
   migrateOrdersFromJson,
   normalizeOrder,
-  normalizeCustomerGroupKey,
   orderSummary,
 } from "./server/orders.mjs";
 import { exportPdf } from "./server/export.mjs";
+import { isPublicStaticFile, staticCacheHeaders } from "./server/config/static-files.mjs";
+import { ROLE_PERMISSIONS, hasGroupPermission } from "./server/rules/permission-rules.mjs";
+import { WAREHOUSES } from "./server/rules/warehouse-rules.mjs";
+import { validateOrderCompletionForExport } from "./server/rules/export-rules.mjs";
+import {
+  MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX,
+  isReusableOrderNumber,
+  normalizeCustomerGroupKey,
+  orderFingerprint,
+} from "./server/rules/order-rules.mjs";
 
 // ── Paths & config ────────────────────────────────────────────────────────────
 
@@ -77,52 +86,28 @@ const tempDir = path.join(root, "tmp");
 const legacyOrdersFile = path.join(dataDir, "orders.json");
 const legacyArticlesFile = path.join(dataDir, "articles.json");
 const databaseFile = path.join(dataDir, "logistik.sqlite");
+const articleDatabaseFiles = [
+  path.join(dataDir, "artikel-ssi.sqlite"),
+  path.join(dataDir, "artikel-si.sqlite"),
+];
 const port = Number(globalThis.process?.env?.PORT || 4174);
 const localHostname = readLocalHostname();
 const maxBodyBytes = 2 * 1024 * 1024;
-const articleDeletePassword = String(globalThis.process?.env?.ARTICLE_DELETE_PASSWORD || "HLogistik2026!");
-
-const publicStaticFiles = new Set([
-  "/",
-  "/index.html",
-  "/artikel.html",
-  "/lager.html",
-  "/auswertungen.html",
-  "/recover-order.html",
-  "/tablet.html",
-  "/app.js",
-  "/artikel.js",
-  "/xlsx.full.min.js",
-  "/lager.js",
-  "/auswertungen.js",
-  "/tablet.js",
-  "/tablet-legacy.js",
-  "/styles.css",
-  "/tablet.css",
-  "/manifest.webmanifest",
-  "/service-worker.js",
-  "/app-icon.svg",
-  "/offline-store.js",
-  "/pdf.min.js",
-  "/pdf.worker.min.js",
-  "/kommissionier-app-screenshot.png",
-  "/muster-kommissionierauftrag.pdf",
-]);
+const configuredArticleDeletePassword = String(globalThis.process?.env?.ARTICLE_DELETE_PASSWORD || "");
+const articleDeletePassword = configuredArticleDeletePassword || "HLogistik2026!";
+const SSI_STORAGE_HU_PREFIX = "34006381000";
+const SSI_STORAGE_HU_SUFFIX_LENGTH = 7;
+const SSI_STORAGE_HU_LENGTH = SSI_STORAGE_HU_PREFIX.length + SSI_STORAGE_HU_SUFFIX_LENGTH;
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
-await mkdir(dataDir, { recursive: true });
-await mkdir(defaultExportDir, { recursive: true });
-await mkdir(exportDir, { recursive: true });
-await mkdir(tempDir, { recursive: true });
-
-configureDb(databaseFile);
-initializeDatabase();
-configureArticleDatabases(dataDir);
-initializeArticleDatabases();
-await migrateMainArticlesToWarehouse("SSI");
-await migrateLegacyArticles(legacyArticlesFile, "SSI");
-await migrateOrdersFromJson(legacyOrdersFile);
+try {
+  await initializeApplication();
+} catch (error) {
+  reportStartupFailure(error);
+  if (globalThis.process?.exit) globalThis.process.exit(1);
+  throw error;
+}
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
 
@@ -147,6 +132,58 @@ server.listen(port, "0.0.0.0", () => {
   }
 });
 
+async function initializeApplication() {
+  await mkdir(dataDir, { recursive: true });
+  await mkdir(defaultExportDir, { recursive: true });
+  await mkdir(exportDir, { recursive: true });
+  await mkdir(tempDir, { recursive: true });
+
+  warnIfArticleDeletePasswordUsesFallback();
+
+  configureDb(databaseFile);
+  initializeDatabase();
+  configureArticleDatabases(dataDir);
+  initializeArticleDatabases();
+  await migrateMainArticlesToWarehouse("SSI");
+  await migrateLegacyArticles(legacyArticlesFile, "SSI");
+  await migrateOrdersFromJson(legacyOrdersFile);
+}
+
+function warnIfArticleDeletePasswordUsesFallback() {
+  if (configuredArticleDeletePassword) return;
+  console.warn(
+    "WARNUNG: ARTICLE_DELETE_PASSWORD ist nicht gesetzt. HLogistik nutzt den eingebauten Fallback nur fuer LAN-/Testbetrieb. " +
+    "Fuer produktive Nutzung bitte ARTICLE_DELETE_PASSWORD in der Server-Umgebung setzen."
+  );
+}
+
+function reportStartupFailure(error) {
+  console.error("");
+  console.error("HLogistik konnte nicht gestartet werden.");
+  console.error(`Grund: ${error?.message || error}`);
+
+  if (isSqliteCorruptionError(error)) {
+    console.error("SQLite-Diagnose: Mindestens eine Datenbankdatei ist nicht lesbar oder keine gueltige SQLite-Datei.");
+    console.error("Betroffene Dateien pruefen:");
+    for (const filePath of [databaseFile, ...articleDatabaseFiles]) {
+      console.error(`- ${filePath}${existsSync(filePath) ? "" : " (fehlt, wuerde normalerweise neu angelegt)"}`);
+    }
+    console.error("Es wurde keine automatische Reparatur ausgefuehrt, damit produktive Daten nicht verschoben oder ueberschrieben werden.");
+    console.error("Wiederherstellung: Server stoppen, data/*.sqlite* sichern, letzte intakte Sicherung aus data/sqlite-backup-* oder Backups einspielen, danach neu starten.");
+    return;
+  }
+
+  console.error("Bitte Konfiguration, Dateirechte, Datenbankdateien und Exportpfad pruefen.");
+}
+
+function isSqliteCorruptionError(error) {
+  const message = String(error?.message || "");
+  return error?.code === "ERR_SQLITE_ERROR" && (
+    error?.errcode === 26 ||
+    /file is not a database|database disk image is malformed|not a database/i.test(message)
+  );
+}
+
 // ── Routing ───────────────────────────────────────────────────────────────────
 
 async function route(request, response) {
@@ -157,7 +194,7 @@ async function route(request, response) {
 
   // Health
   if (pathname === "/api/health") {
-    sendJson(response, 200, { ok: true, host: hostname(), localHostname: localHostname || null, port, exportDir, warehouse, warehouses: ["SSI", "SI"], localAddresses: localAddresses() });
+    sendJson(response, 200, { ok: true, host: hostname(), localHostname: localHostname || null, port, exportDir, warehouse, warehouses: WAREHOUSES, localAddresses: localAddresses() });
     return;
   }
 
@@ -215,7 +252,7 @@ async function route(request, response) {
 
   // Storage receipts
   if (pathname === "/api/storage/receipts" && request.method === "POST") {
-    requireGroup(request, ["buero", "tablet", "verwaltung"]);
+    requireGroup(request, ROLE_PERMISSIONS.storageMutation);
     const body = await readBody(request, maxBodyBytes);
     if (Array.isArray(body.receipts)) {
       sendJson(response, 200, { ok: true, ...bookStorageReceipts(body.receipts, warehouse) });
@@ -227,7 +264,7 @@ async function route(request, response) {
 
   // Storage issues
   if (pathname === "/api/storage/issues" && request.method === "POST") {
-    requireGroup(request, ["buero", "tablet", "verwaltung"]);
+    requireGroup(request, ROLE_PERMISSIONS.storageMutation);
     const body = await readBody(request, maxBodyBytes);
     if (Array.isArray(body.issues)) {
       sendJson(response, 200, { ok: true, ...bookStorageIssues(body.issues, warehouse) });
@@ -248,7 +285,7 @@ async function route(request, response) {
 
   // Articles — create
   if (pathname === "/api/articles" && request.method === "POST") {
-    requireGroup(request, ["buero", "verwaltung"]);
+    requireGroup(request, ROLE_PERMISSIONS.articleMutation);
     const body = await readBody(request, maxBodyBytes);
     const articles = await readArticles(warehouse);
     const article = normalizeArticle(body.article || body);
@@ -268,7 +305,7 @@ async function route(request, response) {
 
   // Articles — import
   if (pathname === "/api/articles/import" && request.method === "POST") {
-    requireGroup(request, ["buero", "verwaltung"]);
+    requireGroup(request, ROLE_PERMISSIONS.articleMutation);
     const body = await readBody(request, maxBodyBytes);
     const incoming = Array.isArray(body.articles) ? body.articles : [];
     sendJson(response, 200, { ok: true, ...(await importArticles(incoming, warehouse, { skipExisting: Boolean(body.skipExisting) })) });
@@ -284,7 +321,7 @@ async function route(request, response) {
 
   // Articles reset: delete article master, stock, movement and error-log data; keep orders.
   if (pathname === "/api/articles/reset" && request.method === "POST") {
-    requireGroup(request, ["buero", "verwaltung"]);
+    requireGroup(request, ROLE_PERMISSIONS.articleMutation);
     const body = await readBody(request, maxBodyBytes);
     requireArticleDeletePassword(body.password);
     sendJson(response, 200, { ok: true, ...resetArticleMasterData() });
@@ -323,7 +360,7 @@ async function route(request, response) {
   }
 
   if (articleMatch && request.method === "PUT") {
-    requireGroup(request, ["buero", "verwaltung"]);
+    requireGroup(request, ROLE_PERMISSIONS.articleMutation);
     const body = await readBody(request, maxBodyBytes);
     const articles = await readArticles(warehouse);
     const index = articles.findIndex((a) => a.id === articleMatch[1]);
@@ -344,7 +381,7 @@ async function route(request, response) {
 
   const articlePermanentDeleteMatch = pathname.match(/^\/api\/articles\/([^/]+)\/permanent$/);
   if (articlePermanentDeleteMatch && request.method === "DELETE") {
-    requireGroup(request, ["buero", "verwaltung"]);
+    requireGroup(request, ROLE_PERMISSIONS.articleMutation);
     const body = await readBody(request, maxBodyBytes);
     requireArticleDeletePassword(body.password);
     const article = await findArticle(articlePermanentDeleteMatch[1], warehouse);
@@ -357,7 +394,7 @@ async function route(request, response) {
   }
 
   if (articleMatch && request.method === "DELETE") {
-    requireGroup(request, ["buero", "verwaltung"]);
+    requireGroup(request, ROLE_PERMISSIONS.articleMutation);
     const articles = await readArticles(warehouse);
     const index = articles.findIndex((a) => a.id === articleMatch[1]);
     if (index < 0) return sendJson(response, 404, { ok: false, error: "Artikel nicht gefunden" });
@@ -434,7 +471,7 @@ async function route(request, response) {
 
   const acceptOrderMatch = pathname.match(/^\/api\/orders\/([^/]+)\/accept$/);
   if (acceptOrderMatch && request.method === "POST") {
-    requireGroup(request, ["tablet"]);
+    requireGroup(request, ROLE_PERMISSIONS.tabletMutation);
     const body = await readBody(request, maxBodyBytes);
     const order = findOrder(acceptOrderMatch[1]);
     if (!order) return sendJson(response, 404, { ok: false, error: "Auftrag nicht gefunden" });
@@ -455,7 +492,7 @@ async function route(request, response) {
 
   const releaseOrderMatch = pathname.match(/^\/api\/orders\/([^/]+)\/release$/);
   if (releaseOrderMatch && request.method === "POST") {
-    requireGroup(request, ["tablet"]);
+    requireGroup(request, ROLE_PERMISSIONS.tabletMutation);
     const body = await readBody(request, maxBodyBytes);
     const order = findOrder(releaseOrderMatch[1]);
     if (!order) {
@@ -513,7 +550,7 @@ async function route(request, response) {
   }
 
   if (orderMatch && request.method === "DELETE") {
-    requireGroup(request, ["buero", "lager", "tablet", "verwaltung"]);
+    requireGroup(request, ROLE_PERMISSIONS.orderDelete);
     const existing = findOrder(orderMatch[1]);
     if (!existing) return sendJson(response, 404, { ok: false, error: "Auftrag nicht gefunden" });
     if (existing.exportedAt) {
@@ -580,13 +617,13 @@ async function route(request, response) {
 
 async function sendStatic(response, requestPath) {
   const normalizedPath = requestPath === "/" ? "/index.html" : requestPath;
-  if (!publicStaticFiles.has(normalizedPath)) {
+  if (!isPublicStaticFile(normalizedPath)) {
     sendText(response, 404, "Not found");
     return;
   }
   const filePath = safeResolve(root, normalizedPath);
   if (!filePath) return sendText(response, 403, "Forbidden");
-  await sendFile(response, filePath);
+  await sendFile(response, filePath, staticCacheHeaders(normalizedPath));
 }
 
 async function sendExportFile(response, requestPath) {
@@ -618,8 +655,13 @@ function validateOrderLines(order, { forExport = false } = {}) {
       .join("; ")}`;
   }
 
-  if (forExport && (order.orderType || "picking") === "storage") {
-    return validateStorageOrderForExport(order);
+  const manualStorageValidation = validateManualStoragePositionCount(order);
+  if (manualStorageValidation) return manualStorageValidation;
+
+  if (forExport) {
+    const completionValidation = validateOrderCompletionForExport(order, { isEmptyManualStorageLine, isMissingStorageLine });
+    if (completionValidation) return completionValidation;
+    if ((order.orderType || "picking") === "storage") return validateStorageOrderForExport(order);
   }
 
   return "";
@@ -645,6 +687,7 @@ function validateStorageOrderForExport(order) {
 
   const errors = [];
   const requiresHu = storageOrderRequiresHandlingUnit(order);
+  const requiresSsiHuPrefix = storageOrderUsesSsiHuPrefix(order);
   lines.forEach((line, index) => {
     const position = line.warehouseOrder || index + 1;
     const materialnummer = String(line.product || "").trim();
@@ -661,11 +704,26 @@ function validateStorageOrderForExport(order) {
 
     if (!line.picked) errors.push(`Pos. ${position}: nicht erledigt`);
     if (!lagerplatz) errors.push(`Pos. ${position}: Stellplatz fehlt`);
-    if (requiresHu && !handlingUnit) errors.push(`Pos. ${position}: HU fehlt`);
+    if (requiresHu) {
+      if (!handlingUnit) {
+        errors.push(`Pos. ${position}: HU fehlt`);
+      } else if (requiresSsiHuPrefix && !isCompleteSsiStorageHandlingUnit(handlingUnit)) {
+        errors.push(`Pos. ${position}: HU muss mit ${SSI_STORAGE_HU_PREFIX} beginnen und danach ${SSI_STORAGE_HU_SUFFIX_LENGTH} Ziffern enthalten`);
+      }
+    }
   });
 
   if (!errors.length) return "";
   return `Einlagerung unvollstaendig: ${errors.slice(0, 5).join("; ")}${errors.length > 5 ? "; weitere Fehler vorhanden" : ""}`;
+}
+
+function validateManualStoragePositionCount(order) {
+  if ((order.orderType || "picking") !== "storage") return "";
+  const count = storageOrderLines(order)
+    .filter((line) => line?.manual === true && !isEmptyManualStorageLine(line))
+    .length;
+  if (count <= MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX) return "";
+  return `Manuelle Einlagerung darf maximal ${MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX} Positionen enthalten.`;
 }
 
 function storageOrderLines(order) {
@@ -687,8 +745,15 @@ function isMissingStorageLine(line) {
 }
 
 function storageOrderRequiresHandlingUnit(order) {
-  const warehouse = storageOrderWarehouse(order, "");
-  return warehouse === "SSI" || warehouse === "SI";
+  return storageOrderUsesSsiCustomer(order);
+}
+
+function storageOrderUsesSsiHuPrefix(order) {
+  return (order?.orderType || "picking") === "storage" && storageOrderUsesSsiCustomer(order);
+}
+
+function storageOrderUsesSsiCustomer(order) {
+  return normalizeCustomerGroupKey(order?.customerName) === "SSI";
 }
 
 function storageOrderWarehouse(order, fallbackWarehouse = "SSI") {
@@ -699,12 +764,12 @@ function storageOrderWarehouse(order, fallbackWarehouse = "SSI") {
 
 function isEmptyManualStorageLine(line) {
   if (line?.manual !== true) return false;
+  const handlingUnit = isIncompleteSsiStorageHandlingUnit(line.fromHandlingUnit) ? "" : line.fromHandlingUnit;
   return [
     line.product,
     line.description,
-    line.targetQty,
     line.actualQty,
-    line.fromHandlingUnit,
+    handlingUnit,
     line.fromBin,
     line.positionNote
   ].every((value) => !String(value ?? "").trim());
@@ -852,6 +917,7 @@ function assignStorageOrderBasics(order, existing = {}) {
   order.customerName = String(order.customerName || existing.customerName || (manualStorage ? "" : "SSI")).trim();
   order.customerGroupKey = normalizeCustomerGroupKey(order.customerGroupKey || existing.customerGroupKey || order.customerName);
   order.orderWarehouse = storageOrderWarehouse(order.orderWarehouse ? order : existing);
+  applyStorageHandlingUnitDefaults(order);
 }
 
 function nextStorageOrderNumber() {
@@ -868,6 +934,7 @@ function duplicateHandlingUnitConflicts(lines) {
   (Array.isArray(lines) ? lines : []).forEach((line, index) => {
     if (isMissingStorageLine(line)) return;
     const rawValue = String(line?.fromHandlingUnit || "").trim();
+    if (isIncompleteSsiStorageHandlingUnit(rawValue)) return;
     const key = normalizeHandlingUnitLookup(rawValue);
     if (!key) return;
 
@@ -885,6 +952,54 @@ function normalizeHandlingUnitLookup(value) {
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
+}
+
+function normalizeDigits(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function normalizeSsiStorageHandlingUnit(value) {
+  const digits = normalizeDigits(value);
+  if (!digits) return SSI_STORAGE_HU_PREFIX;
+  if (digits.startsWith(SSI_STORAGE_HU_PREFIX)) return digits.slice(0, SSI_STORAGE_HU_LENGTH);
+  const suffix = digits.length <= SSI_STORAGE_HU_SUFFIX_LENGTH
+    ? digits
+    : digits.slice(-SSI_STORAGE_HU_SUFFIX_LENGTH);
+  return SSI_STORAGE_HU_PREFIX + suffix;
+}
+
+function isCompleteSsiStorageHandlingUnit(value) {
+  const digits = normalizeDigits(value);
+  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length === SSI_STORAGE_HU_LENGTH;
+}
+
+function isIncompleteSsiStorageHandlingUnit(value) {
+  const digits = normalizeDigits(value);
+  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length < SSI_STORAGE_HU_LENGTH;
+}
+
+function applyStorageHandlingUnitDefaults(order) {
+  if ((order?.orderType || "picking") !== "storage" || !Array.isArray(order.lines)) return;
+  const useSsiHuPrefix = storageOrderUsesSsiHuPrefix(order);
+  order.lines = order.lines.map((line) => {
+    if (!line || line.lineType === "loading-slip" || isMissingStorageLine(line)) return line;
+    if (!useSsiHuPrefix) {
+      const fromHandlingUnit = stripSsiStorageHandlingUnitPrefix(line.fromHandlingUnit);
+      return fromHandlingUnit === line.fromHandlingUnit ? line : { ...line, fromHandlingUnit };
+    }
+    return {
+      ...line,
+      fromHandlingUnit: normalizeSsiStorageHandlingUnit(line.fromHandlingUnit),
+      fromHandlingUnitEditable: true
+    };
+  });
+}
+
+function stripSsiStorageHandlingUnitPrefix(value) {
+  const text = String(value || "").trim();
+  const digits = normalizeDigits(text);
+  if (!digits.startsWith(SSI_STORAGE_HU_PREFIX)) return text;
+  return digits.slice(SSI_STORAGE_HU_PREFIX.length);
 }
 
 function formatHandlingUnitPositions(positions) {
@@ -909,10 +1024,6 @@ function findDuplicateOrder(order, excludeId = "") {
     const entryFingerprint = orderFingerprint(entry.rawText);
     return Boolean(fingerprint && entryFingerprint && entryFingerprint === fingerprint);
   }) || null;
-}
-
-function isReusableOrderNumber(orderNumber) {
-  return String(orderNumber || "").trim().toLowerCase().startsWith("ssi");
 }
 
 function isOpenOrder(order) {
@@ -1146,17 +1257,6 @@ function pickingOrderWarehouse(order, fallbackWarehouse = "SSI") {
   return value === "SSI" || value === "SI" ? normalizeWarehouse(value) : normalizeWarehouse(fallbackWarehouse);
 }
 
-function orderFingerprint(text) {
-  return String(text || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .replace(/[^a-z0-9 ]/g, "")
-    .trim()
-    .slice(0, 2000);
-}
-
 function enforceSameOriginMutation(request) {
   if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) return;
   const origin = request.headers.origin;
@@ -1175,8 +1275,8 @@ function enforceSameOriginMutation(request) {
 // This is a defense-in-depth measure for the LAN environment — it prevents accidental
 // access from the wrong role but is not a substitute for a full authentication system.
 function requireGroup(request, allowedGroups) {
-  const group = String(request.headers["x-user-group"] || "").trim().toLowerCase();
-  if (!allowedGroups.includes(group)) {
+  const group = request.headers["x-user-group"] || "";
+  if (!hasGroupPermission(group, allowedGroups)) {
     throw httpError(403, "Keine Berechtigung für diese Aktion");
   }
 }
@@ -1191,7 +1291,7 @@ function resetArticleMasterData() {
   const before = articleMasterCounts();
   const backupDir = backupArticleMasterData();
 
-  for (const warehouse of ["SSI", "SI"]) {
+  for (const warehouse of WAREHOUSES) {
     const db = getArticleDb(warehouse);
     db.exec("BEGIN");
     try {
