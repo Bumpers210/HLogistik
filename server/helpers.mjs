@@ -3,6 +3,9 @@ import { createReadStream } from "node:fs";
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
 
+export { normalizeWarehouse } from "./rules/warehouse-rules.mjs";
+export { normalizeSsiStorageBin } from "./rules/storage-bin-rules.mjs";
+
 // ── ID generators ─────────────────────────────────────────────────────────────
 
 export function createId() {
@@ -40,6 +43,7 @@ export function withLineContext(error, index, context = "") {
 export function sendJson(response, status, value) {
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
   });
   response.end(JSON.stringify(value));
@@ -48,6 +52,7 @@ export function sendJson(response, status, value) {
 export function sendText(response, status, value) {
   response.writeHead(status, {
     "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
   });
   response.end(value);
@@ -56,6 +61,7 @@ export function sendText(response, status, value) {
 export function sendCsv(response, status, fileName, value) {
   response.writeHead(status, {
     "Content-Type": "text/csv; charset=utf-8",
+    "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
     "Content-Disposition": `attachment; filename="${sanitizeFileName(fileName)}"`,
   });
@@ -76,13 +82,14 @@ const mimeTypes = new Map([
   [".json", "application/json; charset=utf-8"],
 ]);
 
-export async function sendFile(response, filePath) {
+export async function sendFile(response, filePath, headers = {}) {
   try {
     const info = await stat(filePath);
     if (!info.isFile()) throw new Error("not file");
     response.writeHead(200, {
       "Content-Type": mimeTypes.get(path.extname(filePath).toLowerCase()) || "application/octet-stream",
       "X-Content-Type-Options": "nosniff",
+      ...headers,
     });
     createReadStream(filePath).pipe(response);
   } catch {
@@ -136,78 +143,6 @@ export function readBoolean(value, fallback = false) {
   const text = String(value).trim().toLowerCase();
   if (["0", "false", "nein", "no", "inaktiv"].includes(text)) return false;
   return true;
-}
-
-export function normalizeWarehouse(value) {
-  const text = String(value || "SSI").trim().toUpperCase();
-  return text === "SI" ? "SI" : "SSI";
-}
-
-export function normalizeSsiStorageBin(value) {
-  const raw = String(value || "").trim().toUpperCase();
-  if (!raw) return "";
-  const text = raw.replace(/\s+/g, "").replace(/_/g, "-");
-
-  let match = text.match(/^022-H([1-7])-R(\d+)$/i);
-  if (match) return normalizeSsiBlockBin(match[1], match[2]);
-
-  match = text.match(/^002-H([1-7])-R(\d+)$/i);
-  if (match) return normalizeSsiBlockBin(match[1], match[2]);
-
-  match = text.match(/^002-H[1-7]-SH([1-7])R(\d+)$/i);
-  if (match) return normalizeSsiBlockBin(match[1], match[2]);
-
-  match = text.match(/^H([1-7])-?R(\d+)$/i);
-  if (match) return normalizeSsiBlockBin(match[1], match[2]);
-
-  match = text.match(/^002-H[1-7]-S([A-Z0-9]+)$/i);
-  if (match) return normalizeSsiShelfBin(match[1]) || text;
-
-  if (/^002-H[1-7]-S[A-Z0-9]+$/i.test(text)) return text;
-
-  match = text.match(/^(\d{1,2})([A-Z0-9]*)$/i);
-  if (match) {
-    const number = Number(match[1]);
-    if (number >= 1 && number <= 69) return `002-H7-S${text}`;
-  }
-
-  if (/^AN[A-Z0-9]*$/i.test(text)) return `002-H1-S${text}`;
-
-  match = text.match(/^([A-Z])([A-Z0-9]*)$/i);
-  if (match) {
-    const first = match[1];
-    if (first >= "A" && first <= "N") return `002-H4-S${text}`;
-    if (first >= "O" && first <= "Z") return `002-H3-S${text}`;
-  }
-
-  return null;
-}
-
-function normalizeSsiBlockBin(hall, blockNumber) {
-  const hallNumber = Number(hall);
-  const number = Number(blockNumber);
-  if (!Number.isInteger(hallNumber) || hallNumber < 1 || hallNumber > 7 || !Number.isInteger(number) || number <= 0) {
-    return null;
-  }
-  return `022-H${hallNumber}-R${number}`;
-}
-
-function normalizeSsiShelfBin(shelfCode) {
-  const text = String(shelfCode || "").trim().toUpperCase();
-  if (!text) return "";
-  const numeric = text.match(/^(\d{1,2})([A-Z0-9]*)$/i);
-  if (numeric) {
-    const number = Number(numeric[1]);
-    if (number >= 1 && number <= 69) return `002-H7-S${text}`;
-  }
-  if (/^AN[A-Z0-9]*$/i.test(text)) return `002-H1-S${text}`;
-  const alpha = text.match(/^([A-Z])([A-Z0-9]*)$/i);
-  if (alpha) {
-    const first = alpha[1];
-    if (first >= "A" && first <= "N") return `002-H4-S${text}`;
-    if (first >= "O" && first <= "Z") return `002-H3-S${text}`;
-  }
-  return null;
 }
 
 export function normalizeSearch(value) {

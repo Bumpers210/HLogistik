@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
-import { normalizeWarehouse } from "./helpers.mjs";
+import { WAREHOUSES, articleDatabaseFileName, normalizeWarehouse } from "./rules/warehouse-rules.mjs";
 
 let _db = null;
 const _articleDbs = new Map();
@@ -17,9 +17,9 @@ export function getDb() {
 }
 
 export function configureArticleDatabases(dataDir) {
-  for (const warehouse of ["SSI", "SI"]) {
+  for (const warehouse of WAREHOUSES) {
     if (_articleDbs.has(warehouse)) continue;
-    const fileName = warehouse === "SSI" ? "artikel-ssi.sqlite" : "artikel-si.sqlite";
+    const fileName = articleDatabaseFileName(warehouse);
     _articleDbs.set(warehouse, new DatabaseSync(path.join(dataDir, fileName)));
   }
 }
@@ -141,7 +141,7 @@ export function initializeDatabase() {
 }
 
 export function initializeArticleDatabases() {
-  for (const warehouse of ["SSI", "SI"]) {
+  for (const warehouse of WAREHOUSES) {
     initializeArticleDatabase(getArticleDb(warehouse));
   }
 }

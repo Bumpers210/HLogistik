@@ -1,8 +1,4 @@
-const API_BASE = "";
 const ARTICLE_SEARCH_DEBOUNCE_MS = 200;
-const USER_KEY = "kommissionier-app-user-v1";
-const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
-const WAREHOUSE_KEY = "hlogistik-warehouse-v1";
 const ARTICLE_SORT_KEY = "artikelstamm-sort-v1";
 const ARTICLE_SORT_COLUMNS = new Set([
   "materialnummer",
@@ -121,8 +117,7 @@ async function initialize() {
 }
 
 function enforceArticleAccess() {
-  const userName = localStorage.getItem(USER_KEY) || "";
-  const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
+  const { name: userName, group: userGroup } = HLogistikUi.currentUser();
   if (!userName || !userGroup) {
     window.location.replace("/");
     return false;
@@ -133,12 +128,9 @@ function enforceArticleAccess() {
   }
   if (elements.storageAppLink) {
     elements.storageAppLink.hidden = false;
-    elements.storageAppLink.textContent = userGroup === "buero" ? "Buchung" : "Einlagern";
+    elements.storageAppLink.textContent = HLogistikUi.storageNavLabel(userGroup);
   }
-  if (elements.currentUserName) {
-    const groupLabel = userGroup === "buero" ? "Büro" : userGroup === "tablet" ? "Tablet" : "";
-    elements.currentUserName.textContent = groupLabel ? `${userName} - ${groupLabel}` : userName;
-  }
+  HLogistikUi.applyCurrentUserName(elements.currentUserName, userName, userGroup);
   if (elements.resetArticleDataButton) {
     elements.resetArticleDataButton.hidden = !["buero", "verwaltung"].includes(userGroup);
   }
@@ -146,9 +138,7 @@ function enforceArticleAccess() {
 }
 
 function switchUser() {
-  localStorage.removeItem(USER_KEY);
-  localStorage.removeItem(USER_GROUP_KEY);
-  window.location.replace("/");
+  HLogistikUi.clearUserAndReturnHome();
 }
 
 async function loadArticles(query = null) {
@@ -172,26 +162,20 @@ async function loadArticles(query = null) {
 }
 
 function currentWarehouse() {
-  return normalizeWarehouse(localStorage.getItem(WAREHOUSE_KEY));
+  return HLogistikUi.currentWarehouse();
 }
 
 function saveCurrentWarehouse() {
-  if (!elements.warehouseSelect) return;
-  localStorage.setItem(WAREHOUSE_KEY, normalizeWarehouse(elements.warehouseSelect.value));
+  HLogistikUi.saveCurrentWarehouse(elements.warehouseSelect);
 }
 
 function applyWarehouseSelection() {
-  if (!elements.warehouseSelect) return;
-  elements.warehouseSelect.value = currentWarehouse();
+  HLogistikUi.applyWarehouseSelection(elements.warehouseSelect);
 }
 
 function updateExportLink() {
   if (!elements.exportLink) return;
   elements.exportLink.href = `/api/articles/export?warehouse=${encodeURIComponent(currentWarehouse())}`;
-}
-
-function normalizeWarehouse(value) {
-  return String(value || "SSI").trim().toUpperCase() === "SI" ? "SI" : "SSI";
 }
 
 function renderArticles() {
@@ -1655,42 +1639,17 @@ function supportsPackageQuantity(gebindeArt) {
 }
 
 async function apiJson(url, options = {}) {
-  const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
-  const warehouse = currentWarehouse();
-  const { headers: extraHeaders, ...rest } = options;
-  const response = await fetch(`${API_BASE}${url}`, {
-    headers: {
-      "Content-Type": "application/json",
-      "X-User-Group": userGroup,
-      "X-Warehouse": warehouse,
-      ...extraHeaders,
-    },
-    ...rest,
-  });
-  const contentType = response.headers.get("content-type") || "";
-  const data = contentType.includes("application/json") ? await response.json() : { error: (await response.text()).trim() };
-  if (!response.ok || data.ok === false) throw new Error(data.error || "Serverfehler");
-  return data;
+  return HLogistikUi.apiJson(url, options);
 }
 
 function setConnectionStatus(isOnline) {
-  elements.connectionBadge.classList.toggle("is-online", isOnline === true);
-  elements.connectionBadge.classList.toggle("is-offline", isOnline === false);
-  elements.connectionBadge.classList.toggle("is-checking", isOnline === null);
-  elements.connectionText.textContent = isOnline === true ? "Online" : isOnline === false ? "Offline" : "Prüfe Verbindung";
+  HLogistikUi.setConnectionStatus(elements.connectionBadge, elements.connectionText, isOnline);
 }
 
 function setStatus(message, type = "") {
-  elements.articleStatus.textContent = message;
-  elements.articleStatus.classList.toggle("is-ok", type === "ok");
-  elements.articleStatus.classList.toggle("is-error", type === "error");
+  HLogistikUi.setStatus(elements.articleStatus, message, type);
 }
 
 function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+  return HLogistikUi.escapeHtml(value);
 }

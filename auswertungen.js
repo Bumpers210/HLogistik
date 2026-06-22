@@ -1,8 +1,4 @@
-const API_BASE = "";
 const SEARCH_DEBOUNCE_MS = 200;
-const USER_KEY = "kommissionier-app-user-v1";
-const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
-const WAREHOUSE_KEY = "hlogistik-warehouse-v1";
 const DEFAULT_RANGE_DAYS = 90;
 
 const elements = {};
@@ -138,16 +134,12 @@ async function initialize() {
 }
 
 function enforceAccess() {
-  const userName = localStorage.getItem(USER_KEY) || "";
-  const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
+  const { name: userName, group: userGroup } = HLogistikUi.currentUser();
   if (!userName || !userGroup || userGroup === "lager") {
     window.location.replace("/");
     return false;
   }
-  if (elements.currentUserName) {
-    const groupLabel = userGroup === "buero" ? "Büro" : userGroup === "tablet" ? "Tablet" : "";
-    elements.currentUserName.textContent = groupLabel ? `${userName} - ${groupLabel}` : userName;
-  }
+  HLogistikUi.applyCurrentUserName(elements.currentUserName, userName, userGroup);
   return true;
 }
 
@@ -222,77 +214,39 @@ function filterItems(items, config) {
 // ── Benutzer / Lager ─────────────────────────────────────────────────────────
 
 function switchUser() {
-  localStorage.removeItem(USER_KEY);
-  localStorage.removeItem(USER_GROUP_KEY);
-  window.location.replace("/");
-}
-
-function normalizeWarehouse(value) {
-  return String(value || "").trim().toUpperCase() === "SI" ? "SI" : "SSI";
-}
-
-function currentWarehouse() {
-  return normalizeWarehouse(localStorage.getItem(WAREHOUSE_KEY));
+  HLogistikUi.clearUserAndReturnHome();
 }
 
 function saveCurrentWarehouse() {
-  if (!elements.warehouseSelect) return;
-  localStorage.setItem(WAREHOUSE_KEY, normalizeWarehouse(elements.warehouseSelect.value));
+  HLogistikUi.saveCurrentWarehouse(elements.warehouseSelect);
 }
 
 function applyWarehouseSelection() {
-  if (!elements.warehouseSelect) return;
-  elements.warehouseSelect.value = currentWarehouse();
+  HLogistikUi.applyWarehouseSelection(elements.warehouseSelect);
 }
 
 // ── HTTP ───────────────────────────────────────────────────────────────────
 
 async function apiJson(url, options = {}) {
-  const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
-  const warehouse = currentWarehouse();
-  const { headers: extraHeaders, ...rest } = options;
-  const response = await fetch(`${API_BASE}${url}`, {
-    headers: {
-      "Content-Type": "application/json",
-      "X-User-Group": userGroup,
-      "X-Warehouse": warehouse,
-      ...extraHeaders,
-    },
-    ...rest,
-  });
-  const contentType = response.headers.get("content-type") || "";
-  const data = contentType.includes("application/json") ? await response.json() : { error: (await response.text()).trim() };
-  if (!response.ok || data.ok === false) throw new Error(data.error || "Serverfehler");
-  return data;
+  return HLogistikUi.apiJson(url, options);
 }
 
 // ── UI-Helfer ────────────────────────────────────────────────────────────────
 
 function setConnectionStatus(isOnline) {
-  elements.connectionBadge.classList.toggle("is-online", isOnline === true);
-  elements.connectionBadge.classList.toggle("is-offline", isOnline === false);
-  elements.connectionBadge.classList.toggle("is-checking", isOnline === null);
-  elements.connectionText.textContent = isOnline === true ? "Online" : isOnline === false ? "Offline" : "Prüfe Verbindung";
+  HLogistikUi.setConnectionStatus(elements.connectionBadge, elements.connectionText, isOnline);
 }
 
 function setStatus(message, type = "") {
-  if (!elements.reportStatus) return;
-  elements.reportStatus.textContent = message;
-  elements.reportStatus.classList.toggle("is-ok", type === "ok");
-  elements.reportStatus.classList.toggle("is-error", type === "error");
+  HLogistikUi.setStatus(elements.reportStatus, message, type);
 }
 
 function formatNumber(value) {
-  return Number(value || 0).toLocaleString("de-DE");
+  return HLogistikUi.formatNumber(value);
 }
 
 function normalizeSearch(value) {
-  return String(value || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+  return HLogistikUi.normalizeSearch(value);
 }
 
 function toDateInputValue(date) {
@@ -303,17 +257,9 @@ function toDateInputValue(date) {
 }
 
 function formatDate(value) {
-  if (!value) return "—";
-  const date = new Date(value.length <= 10 ? `${value}T00:00:00` : value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
+  return HLogistikUi.formatDate(value);
 }
 
 function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+  return HLogistikUi.escapeHtml(value);
 }

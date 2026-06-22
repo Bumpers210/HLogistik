@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Auftrag wiederherstellen</title>
+    <style>
+      body { margin: 24px; color: #14221c; font: 16px Arial, Helvetica, sans-serif; background: #f5f7f4; }
+      main { max-width: 920px; padding: 20px; border: 1px solid #d8e0db; border-radius: 8px; background: #fff; }
+      button { min-height: 42px; padding: 8px 18px; border: 0; border-radius: 7px; background: #167a58; color: #fff; font-weight: 800; }
+      pre { max-height: 420px; overflow: auto; padding: 12px; background: #eef4f0; border-radius: 6px; white-space: pre-wrap; }
+      .error { color: #8a2f12; font-weight: 800; }
+      .ok { color: #006b4a; font-weight: 800; }
+    </style>
+    <script src="offline-store.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Auftrag wiederherstellen</h1>
+      <p id="summary">Lokale Sicherung wird gesucht...</p>
+      <button id="restoreButton" type="button" disabled>Lokale Sicherung auf Server speichern</button>
+      <pre id="log"></pre>
+    </main>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const orderId = params.get("orderId") || "";
+      const auto = params.get("auto") === "1";
+      const userName = params.get("userName") || localStorage.getItem("kommissionier-app-user-v1") || "Büro";
+      const summary = document.getElementById("summary");
+      const log = document.getElementById("log");
+      const button = document.getElementById("restoreButton");
+      let selectedOrder = null;
+
+      function write(message, type = "") {
+        const line = document.createElement("div");
+        if (type) line.className = type;
+        line.textContent = message;
+        log.appendChild(line);
+      }
+
+      function safeParse(value) {
+        try { return value ? JSON.parse(value) : null; } catch { return null; }
+      }
+
+      function orderTime(order) {
+        return Date.parse(order?.cachedAt || order?.activeUserAt || order?.updatedAt || order?.createdAt || "") || 0;
+      }
+
+      function orderStats(order) {
+        const lines = Array.isArray(order?.lines) ? order.lines : [];
+        return {
+          total: lines.length,
+          picked: lines.filter((line) => line.picked).length,
+          hu: lines.filter((line) => String(line.fromHandlingUnit || "").trim()).length,
+          bin: lines.filter((line) => String(line.fromBin || "").trim()).length
+        };
+      }
+
+      async function findLocalOrder() {
+        if (!orderId) throw new Error("orderId fehlt.");
+        const candidates = [];
+        const state = safeParse(localStorage.getItem("kommissionier-app-state-v1"));
+        const recovery = safeParse(localStorage.getItem("kommissionier-app-state-v1-recovery"));
+        if (state?.id === orderId) candidates.push(state);
+        if (recovery?.id === orderId) candidates.push(recovery);
+        if (window.OfflineStore?.loadOrder) {
+          const cached = await window.OfflineStore.loadOrder(orderId).catch(() => null);
+          if (cached?.id === orderId) candidates.push(cached);
+        }
+        candidates.sort((left, right) => orderTime(right) - orderTime(left));
+        return candidates[0] || null;
+      }
+
+      async function restoreOrder() {
+        if (!selectedOrder) return;
+        button.disabled = true;
+        write("Serverauftrag wird gelesen...");
+        const serverResponse = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, { cache: "no-store" });
+        const serverOrder = await serverResponse.json();
+        if (!serverResponse.ok || serverOrder.ok === false) throw new Error(serverOrder.error || "Serverauftrag konnte nicht geladen werden.");
+
+        const payload = {
+          ...serverOrder,
+          ...selectedOrder,
+          id: orderId,
+          rawText: serverOrder.rawText || selectedOrder.rawText || "",
+          exportedAt: serverOrder.exportedAt || "",
+          exportedPdfFile: serverOrder.exportedPdfFile || "",
+          exportedPdfPath: serverOrder.exportedPdfPath || ""
+        };
+        delete payload.cacheId;
+        delete payload.cachedAt;
+        delete payload.isLocalRecovery;
+
+        const stats = orderStats(payload);
+        write(`Lokaler Stand: ${stats.picked}/${stats.total} erledigt, ${stats.hu} HU, ${stats.bin} Stellplätze.`);
+        const response = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-User-Group": "buero",
+            "X-Warehouse": payload.orderWarehouse || "SSI"
+          },
+          body: JSON.stringify({ order: payload, userName })
+        });
+        const result = await response.json();
+        if (!response.ok || result.ok === false) throw new Error(result.error || "Speichern fehlgeschlagen.");
+        write("Server hat die lokale Sicherung angenommen.", "ok");
+
+        const checkResponse = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, { cache: "no-store" });
+        const checkOrder = await checkResponse.json();
+        const serverStats = orderStats(checkOrder);
+        write(`Serverstand nach Wiederherstellung: ${serverStats.picked}/${serverStats.total} erledigt, ${serverStats.hu} HU, ${serverStats.bin} Stellplätze.`, "ok");
+        summary.textContent = "Wiederherstellung abgeschlossen.";
+        summary.className = "ok";
+      }
+
+      async function init() {
+        try {
+          selectedOrder = await findLocalOrder();
+          if (!selectedOrder) {
+            summary.textContent = "Keine lokale Sicherung für diesen Auftrag gefunden.";
+            summary.className = "error";
+            return;
+          }
+          const stats = orderStats(selectedOrder);
+          summary.textContent = `Lokale Sicherung gefunden: ${stats.picked}/${stats.total} erledigt, ${stats.hu} HU, ${stats.bin} Stellplätze.`;
+          button.disabled = false;
+          button.addEventListener("click", () => restoreOrder().catch((error) => {
+            summary.textContent = error.message;
+            summary.className = "error";
+            write(error.message, "error");
+            button.disabled = false;
+          }));
+          if (auto) button.click();
+        } catch (error) {
+          summary.textContent = error.message;
+          summary.className = "error";
+          write(error.stack || error.message, "error");
+        }
+      }
+
+      init();
+    </script>
+  </body>
+</html>

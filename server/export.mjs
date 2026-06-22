@@ -144,13 +144,13 @@ function printableHtml(order, fileName) {
         <tr>
           <th style="width:5%;">OK</th>
           <th style="width:6%;">Pos.</th>
-          <th style="width:10%;">HU</th>
+          <th style="width:17%;">HU</th>
           <th style="width:12%;">Stellplatz</th>
-          <th style="width:10%;">Material</th>
+          <th style="width:7%;">Material</th>
           <th style="width:5%;">Soll</th>
           <th style="width:7%;">Ist</th>
           <th style="width:11%;">Einh.</th>
-          <th style="width:24%;">Artikelbezeichnung</th>
+          <th style="width:20%;">Artikelbezeichnung</th>
           <th style="width:10%;">Bemerkung</th>
         </tr>` : `
         <tr>

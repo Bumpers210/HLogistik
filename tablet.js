@@ -7,6 +7,12 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const CURRENT_ORDER_CACHE_KEY = "tablet-pick-current-order-v1";
 const ORDER_LIST_REFRESH_MS = 30000;
 const AUTO_SAVE_MS = 10000;
+const SSI_STORAGE_HU_PREFIX = "34006381000";
+const SSI_STORAGE_HU_SUFFIX_LENGTH = 7;
+const SSI_STORAGE_HU_LENGTH = SSI_STORAGE_HU_PREFIX.length + SSI_STORAGE_HU_SUFFIX_LENGTH;
+const MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT = 1;
+const MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN = 1;
+const MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX = 100;
 
 const elements = {};
 let currentOrder = null;
@@ -17,6 +23,7 @@ let orderListTimer = null;
 let saveTimer = null;
 let changeRevision = 0;
 let listedOrdersById = new Map();
+let acceptedOrderGroupsById = new Map();
 let manualStorageCustomerEdited = false;
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -48,6 +55,7 @@ function bindElements() {
     "storageModeButton",
     "userNameInput",
     "orderSelect",
+    "acceptedGroupInfo",
     "sortModeSelect",
     "refreshButton",
     "manualStorageCustomerRow",
@@ -60,14 +68,16 @@ function bindElements() {
     "discardOrderButton",
     "saveButton",
     "exportPdfButton",
-    "collapseDoneInput",
     "doneCount",
     "openCount",
     "changedCount",
     "message",
+    "tabletListPanel",
     "pickHeader",
     "lineList",
     "storageLineActions",
+    "manualStorageMaterialInput",
+    "manualStoragePositionCountInput",
     "addStorageLineButton",
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
@@ -124,12 +134,6 @@ function bindEvents() {
   elements.saveButton.addEventListener("click", () => saveOrder(false));
   elements.exportPdfButton.addEventListener("click", exportPdf);
   elements.addStorageLineButton.addEventListener("click", addManualStorageLine);
-  elements.collapseDoneInput.addEventListener("change", () => {
-    if (!currentOrder) return;
-    currentOrder.collapseDone = elements.collapseDoneInput.checked;
-    persistCurrentOrderCache();
-    renderOrder();
-  });
 }
 
 async function initialize() {
@@ -156,6 +160,11 @@ async function initialize() {
     const cached = await loadOrderListFromCache();
     setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden.", !cached);
   }
+}
+
+function markServerOffline() {
+  serverOnline = false;
+  setConnectionStatus(false);
 }
 
 async function flushSyncQueue() {
@@ -241,6 +250,11 @@ function applyOrderSummaryToOrder(order, summary) {
 async function loadOrderListFromCache() {
   if (!window.OfflineStore) return false;
   try {
+    const cachedGroups = OfflineStore.loadOrderGroups
+      ? await OfflineStore.loadOrderGroups().catch(() => [])
+      : [];
+    rememberAcceptedOrderGroups(cachedGroups);
+
     const cachedOrders = OfflineStore.loadOrders
       ? await OfflineStore.loadOrders()
       : await OfflineStore.loadOrderSummaries();
@@ -251,7 +265,10 @@ async function loadOrderListFromCache() {
         && isAcceptedByCurrentUser(o)
       ))
       .map(normalizeOrderListEntry);
-    if (!cached.length) return false;
+    if (!cached.length) {
+      renderAcceptedGroupInfo();
+      return false;
+    }
     renderCachedOrderList(cached);
     return true;
   } catch {
@@ -271,6 +288,7 @@ function renderCachedOrderList(orders) {
     );
   });
   elements.orderSelect.value = currentOrder?.id || "";
+  renderAcceptedGroupInfo();
 }
 
 function ensureCurrentOrderInSelect() {
@@ -288,6 +306,7 @@ function ensureCurrentOrderInSelect() {
   if (option) option.text = label;
   else addOption(elements.orderSelect, summary.id, label);
   elements.orderSelect.value = summary.id;
+  renderAcceptedGroupInfo();
 }
 
 function normalizeOrderListEntry(order) {
@@ -298,6 +317,113 @@ function rememberListedOrders(orders) {
   listedOrdersById = new Map((orders || [])
     .filter((order) => order?.id)
     .map((order) => [String(order.id), order]));
+}
+
+function rememberAcceptedOrderGroups(groups) {
+  acceptedOrderGroupsById = new Map((groups || [])
+    .filter((group) => group?.groupId && groupBelongsToCurrentUser(group))
+    .map((group) => [String(group.groupId), group]));
+}
+
+function rememberAcceptedOrderGroup(group) {
+  if (!group?.groupId || !groupBelongsToCurrentUser(group)) return;
+  acceptedOrderGroupsById.set(String(group.groupId), group);
+}
+
+function buildAcceptedOrderGroup(result, detailOrders = []) {
+  const summaries = Array.isArray(result?.acceptedOrders) ? result.acceptedOrders : [];
+  const byId = new Map();
+  [...detailOrders, ...summaries].forEach((order) => {
+    if (order?.id) byId.set(String(order.id), order);
+  });
+  const orders = [...byId.values()];
+  if (orders.length <= 1) return null;
+
+  const first = orders[0] || {};
+  const orderIds = orders.map((order) => String(order.id));
+  const customerGroupKey = first.customerGroupKey || "";
+  const customerName = result?.customerName || first.customerName || customerGroupKey || "";
+  const orderType = first.orderType || currentMode || "picking";
+  const acceptedBy = first.acceptedBy || currentUserName() || "";
+  const acceptedAt = first.acceptedAt || new Date().toISOString();
+  const group = {
+    groupId: "",
+    orderIds,
+    customerName,
+    customerGroupKey,
+    orderType,
+    acceptedBy,
+    acceptedAt,
+    updatedAt: new Date().toISOString(),
+  };
+  group.groupId = acceptedOrderGroupId(group);
+  return group;
+}
+
+function acceptedOrderGroupId(group) {
+  return [
+    "tablet",
+    normalizeAcceptedGroupPart(group?.acceptedBy || currentUserName() || "tablet"),
+    normalizeAcceptedGroupPart(group?.orderType || currentMode || "picking"),
+    normalizeAcceptedGroupPart(group?.customerGroupKey || group?.customerName || (group?.orderIds || []).join("-")),
+  ].join(":");
+}
+
+function normalizeAcceptedGroupPart(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "UNBEKANNT";
+}
+
+function groupBelongsToCurrentUser(group) {
+  const acceptedBy = String(group?.acceptedBy || "").trim();
+  const user = currentUserName();
+  return !acceptedBy || !user || sameUserName(acceptedBy, user);
+}
+
+function orderWithAcceptedGroup(order, group) {
+  if (!order || !group) return order;
+  return {
+    ...order,
+    tabletGroupId: group.groupId,
+    tabletGroupOrderIds: group.orderIds.slice(),
+    tabletGroupCustomerName: group.customerName || "",
+    tabletGroupCustomerGroupKey: group.customerGroupKey || "",
+  };
+}
+
+function acceptedGroupForOrder(orderOrId) {
+  const id = String(typeof orderOrId === "object" ? orderOrId?.id || "" : orderOrId || "");
+  if (!id) return null;
+  const directGroupId = typeof orderOrId === "object" ? String(orderOrId?.tabletGroupId || "") : "";
+  if (directGroupId && acceptedOrderGroupsById.has(directGroupId)) return acceptedOrderGroupsById.get(directGroupId);
+  for (const group of acceptedOrderGroupsById.values()) {
+    if ((group.orderIds || []).map(String).includes(id)) return group;
+  }
+  return null;
+}
+
+function orderIdInCurrentAcceptedGroup(orderId) {
+  const group = acceptedGroupForOrder(currentOrder);
+  return Boolean(group && (group.orderIds || []).map(String).includes(String(orderId || "")));
+}
+
+function renderAcceptedGroupInfo(group = null) {
+  if (!elements.acceptedGroupInfo) return;
+  const selectedId = elements.orderSelect?.value || "";
+  const activeGroup = group || acceptedGroupForOrder(currentOrder) || acceptedGroupForOrder(selectedId);
+  const orderIds = (activeGroup?.orderIds || []).filter(Boolean);
+  if (!activeGroup || orderIds.length <= 1) {
+    elements.acceptedGroupInfo.hidden = true;
+    elements.acceptedGroupInfo.textContent = "";
+    return;
+  }
+  const customer = activeGroup.customerName || activeGroup.customerGroupKey || "Kunde";
+  const offlineText = serverOnline ? "" : " offline";
+  elements.acceptedGroupInfo.textContent = `${orderIds.length} Auftraege fuer ${customer} uebernommen -${offlineText} ueber die Auftragsauswahl wechselbar.`;
+  elements.acceptedGroupInfo.hidden = false;
 }
 
 async function cacheAcceptedOpenOrders(orders) {
@@ -318,18 +444,27 @@ async function cacheOrderDetailsFromAccept(result) {
   try {
     const details = Array.isArray(result.acceptedOrderDetails) ? result.acceptedOrderDetails : [];
     const orders = details.length ? details : (result.order ? [result.order] : []);
+    const group = buildAcceptedOrderGroup(result, orders);
+    if (group && OfflineStore.saveOrderGroup) {
+      await OfflineStore.saveOrderGroup(group);
+      rememberAcceptedOrderGroup(group);
+      if (currentOrder?.id && group.orderIds.includes(String(currentOrder.id))) {
+        currentOrder = orderWithAcceptedGroup(currentOrder, group);
+      }
+    }
     for (const order of orders) {
-      await saveOrderToOfflineStore(order);
+      await saveOrderToOfflineStore(orderWithAcceptedGroup(order, group));
     }
 
     if (Array.isArray(result.acceptedOrders) && result.acceptedOrders.length) {
       const existing = await OfflineStore.loadOrderSummaries().catch(() => []);
       const byId = new Map(existing.filter((order) => order?.id).map((order) => [String(order.id), order]));
       result.acceptedOrders.forEach((order) => {
-        if (order?.id) byId.set(String(order.id), order);
+        if (order?.id) byId.set(String(order.id), orderWithAcceptedGroup(order, group));
       });
       await OfflineStore.saveOrderSummaries([...byId.values()]).catch(() => {});
     }
+    renderAcceptedGroupInfo(group);
   } catch {
     // Best-effort cache update.
   }
@@ -392,28 +527,27 @@ function normalizeAutoPositionNotes(notes) {
   };
 }
 
-function autoPositionNoteText(line) {
+function combinedPositionNote(line) {
+  return combineUniqueNoteParts([line?.positionNote, ...autoPositionNoteValues(line)]);
+}
+
+function autoPositionNoteValues(line) {
   const notes = normalizeAutoPositionNotes(line?.autoPositionNotes);
+  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip];
+}
+
+function combineUniqueNoteParts(parts) {
   const seen = new Set();
-  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip]
-    .map((value) => String(value || "").trim())
+  return (parts || [])
+    .map((part) => String(part || "").trim())
     .filter(Boolean)
-    .filter((value) => {
-      const key = value.toUpperCase();
+    .filter((part) => {
+      const key = part.toUpperCase();
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     })
     .join("; ");
-}
-
-function decorateAutoPositionNoteLabel(label, line) {
-  const text = autoPositionNoteText(line);
-  if (!label || !text) return;
-  const note = document.createElement("span");
-  note.className = "auto-position-note";
-  note.textContent = text;
-  label.appendChild(note);
 }
 
 function loadUser() {
@@ -501,12 +635,24 @@ function updateModeUi() {
   }
   const grid = elements.pickHeader?.querySelector(".pick-column-grid");
   if (grid) {
+    const manualStorageHeader = isManualStorageHeader();
+    grid.classList.toggle("is-manual-storage-grid", manualStorageHeader);
     grid.innerHTML = isStorage
-      ? "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Soll</span><span>Ist</span><span>Einheit</span>"
+      ? (manualStorageHeader
+        ? "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Ist</span><span>Einheit</span>"
+        : "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Soll</span><span>Ist</span><span>Einheit</span>")
       : "<span>Artikelnummer</span><span>Lagerplatz</span><span>Produktbeschreibung</span><span>Soll</span><span>Ist</span><span>Einheit</span>";
   }
   if (elements.exportPdfButton) elements.exportPdfButton.textContent = isStorage ? "Einlagerung abschliessen" : "PDF exportieren";
   renderManualStorageStartButton();
+}
+
+function isManualStorageHeader() {
+  if (!isStorageOrder()) return false;
+  const lines = Array.isArray(currentOrder?.lines)
+    ? currentOrder.lines.filter((line) => line?.lineType !== "loading-slip")
+    : [];
+  return !lines.length || lines.every((line) => line?.manual === true || isEmptyManualStorageLine(line));
 }
 
 async function loadOrderList(options = {}) {
@@ -523,7 +669,6 @@ async function loadOrderList(options = {}) {
       clearCurrentOrderCache();
       currentOrder = null;
       dirty = false;
-      elements.collapseDoneInput.checked = true;
       renderOrder();
       statusMessage = "Der geoeffnete Auftrag ist auf dem Server nicht mehr vorhanden. Tablet wurde freigegeben.";
     } else if (currentMissingOnServer) {
@@ -543,12 +688,20 @@ async function loadOrderList(options = {}) {
     });
     rememberListedOrders(orders);
     elements.orderSelect.value = selected;
+    renderAcceptedGroupInfo();
     if (statusMessage) setMessage(statusMessage, currentMissingOnServer && dirty);
     else if (!silent) setMessage(currentOrder ? "Auftragsliste aktualisiert." : `Bitte ${modeLabel()} waehlen.`, false);
     try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders); } catch { /* non-critical */ }
     cacheAcceptedOpenOrders(orders);
   } catch (error) {
-    if (!silent) setMessage(`Auftragsliste konnte nicht geladen werden: ${error.message}`, true);
+    markServerOffline();
+    const cached = await loadOrderListFromCache();
+    if (!silent) {
+      setMessage(
+        cached ? "Offline: Auftragsliste aus Cache." : `Auftragsliste konnte nicht geladen werden: ${error.message}`,
+        !cached
+      );
+    }
   }
 }
 
@@ -587,8 +740,7 @@ async function loadOrder(id) {
       try {
         localStorage.setItem(MODE_KEY, currentMode);
       } catch { /* Modus bleibt fuer diese Sitzung aktiv. */ }
-      currentOrder.collapseDone = currentOrder.collapseDone !== false;
-      elements.collapseDoneInput.checked = currentOrder.collapseDone;
+      currentOrder.collapseDone = true;
       dirty = false;
       renderOrder();
       setMessage("Offline: Auftrag aus Cache geladen. Änderungen werden bei Verbindung synchronisiert.", false);
@@ -606,8 +758,7 @@ async function loadOrder(id) {
     try {
       localStorage.setItem(MODE_KEY, currentMode);
     } catch { /* Modus bleibt fuer diese Sitzung aktiv. */ }
-    currentOrder.collapseDone = currentOrder.collapseDone !== false;
-    elements.collapseDoneInput.checked = currentOrder.collapseDone;
+    currentOrder.collapseDone = true;
     dirty = Boolean(cachedOrder);
     renderOrder();
     if (cachedOrder) {
@@ -623,6 +774,26 @@ async function loadOrder(id) {
     persistCurrentOrderCache();
     try { await saveOrderToOfflineStore(order); } catch { /* non-critical */ }
   } catch (error) {
+    markServerOffline();
+    if (window.OfflineStore) {
+      try {
+        const cached = await OfflineStore.loadOrder(id);
+        if (cached) {
+          currentOrder = cached;
+          currentMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
+          try {
+            localStorage.setItem(MODE_KEY, currentMode);
+          } catch { /* Modus bleibt fuer diese Sitzung aktiv. */ }
+          currentOrder.collapseDone = true;
+          dirty = false;
+          renderOrder();
+          setMessage("Offline: Auftrag aus Cache geladen. Aenderungen werden bei Verbindung synchronisiert.", false);
+          return;
+        }
+      } catch {
+        // Fallback auf die urspruengliche Fehlermeldung.
+      }
+    }
     setMessage(`Auftrag konnte nicht geladen werden: ${error.message}`, true);
   }
 }
@@ -632,16 +803,20 @@ function renderOrder() {
   updateModeUi();
   renderTakeOverButton();
   if (!currentOrder || !currentOrder.lines || !currentOrder.lines.length) {
+    if (elements.tabletListPanel) elements.tabletListPanel.hidden = true;
     elements.pickHeader.hidden = true;
     renderStorageLineActions();
+    renderAcceptedGroupInfo();
     updateCounts();
     return;
   }
+  if (elements.tabletListPanel) elements.tabletListPanel.hidden = false;
   elements.pickHeader.hidden = false;
 
   const sorted = sortOrderLines(currentOrder.lines);
   sorted.forEach((line) => elements.lineList.appendChild(renderLine(line)));
   renderStorageLineActions();
+  renderAcceptedGroupInfo();
   updateCounts();
 }
 
@@ -651,6 +826,12 @@ function renderStorageLineActions() {
   renderManualStorageStartButton();
   elements.storageLineActions.hidden = !isStorage || !currentOrder;
   elements.addStorageLineButton.disabled = !isStorage || !currentOrder || !canEditCurrentOrder();
+  if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.disabled = elements.addStorageLineButton.disabled;
+  if (elements.manualStoragePositionCountInput) {
+    elements.manualStoragePositionCountInput.disabled = elements.addStorageLineButton.disabled;
+    elements.manualStoragePositionCountInput.min = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN);
+    elements.manualStoragePositionCountInput.max = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX);
+  }
 }
 
 function renderManualStorageStartButton() {
@@ -674,7 +855,7 @@ function clearAutofilledManualStorageCustomer(visible) {
   if (manualStorageCustomerName().toUpperCase() === "SSI") elements.manualStorageCustomerInput.value = "";
 }
 
-function addManualStorageLine() {
+async function addManualStorageLine() {
   if (!currentOrder || !isStorageOrder()) return;
   if (!currentUserName()) {
     setMessage("Bitte erst Mitarbeiter eintragen.", true);
@@ -684,31 +865,78 @@ function addManualStorageLine() {
     setMessage("Bearbeitung erst uebernehmen.", true);
     return;
   }
+  const countResult = readManualStoragePositionCreateCount();
+  if (!countResult.ok) {
+    setMessage(countResult.error, true);
+    elements.manualStoragePositionCountInput?.focus();
+    return;
+  }
+  const preset = await manualStorageLinePreset(elements.manualStorageMaterialInput?.value || "");
   currentOrder.lines = Array.isArray(currentOrder.lines) ? currentOrder.lines : [];
-  currentOrder.lines.push(createManualStorageLine(currentOrder.lines));
+  for (let index = 0; index < countResult.value; index += 1) {
+    currentOrder.lines.push(createManualStorageLine(currentOrder.lines, preset));
+  }
+  if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.value = "";
+  if (elements.manualStoragePositionCountInput) elements.manualStoragePositionCountInput.value = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT);
   markDirty();
   renderOrder();
   saveOrder(false);
 }
 
-function createManualStorageLine(lines) {
+function createManualStorageLine(lines, preset = {}) {
   return {
     id: createLineId(),
     orderType: "storage",
     manual: true,
     warehouseOrder: nextManualStoragePosition(lines),
-    fromHandlingUnit: "",
+    fromHandlingUnit: usesSsiStorageHuPrefix() ? SSI_STORAGE_HU_PREFIX : "",
     fromHandlingUnitEditable: true,
     positionNote: "",
     autoPositionNotes: {},
-    fromBin: "",
-    product: "",
-    description: "",
+    fromBin: preset.fromBin || "",
+    product: preset.product || "",
+    description: preset.description || "",
     targetQty: "",
     actualQty: "",
-    unit: "Stk",
+    unit: preset.unit || "Stk",
     picked: false
   };
+}
+
+function readManualStoragePositionCreateCount() {
+  const raw = String(elements.manualStoragePositionCountInput?.value || MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT).trim();
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN) {
+    return {
+      ok: false,
+      value: MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT,
+      error: "Anzahl Positionen muss eine positive ganze Zahl sein."
+    };
+  }
+  if (value > MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX) {
+    return {
+      ok: false,
+      value: MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX,
+      error: `Anzahl Positionen darf maximal ${MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX} betragen.`
+    };
+  }
+  return { ok: true, value, error: "" };
+}
+
+async function manualStorageLinePreset(material) {
+  const product = normalizeDigits(material);
+  if (!product) return {};
+  const preset = { product };
+  if (!serverOnline) return preset;
+  try {
+    const article = await apiJson(`/api/articles/lookup/${encodeURIComponent(product)}?warehouse=${encodeURIComponent(manualStorageWarehouse())}`);
+    preset.product = String(article.materialnummer || product).trim();
+    preset.description = String(article.materialbezeichnung || "").trim();
+    preset.fromBin = String(article.lagerplatz || "").trim();
+  } catch {
+    // Artikelstamm-Lookup ist Komfort; unbekannte Artikel bleiben manuell erfassbar.
+  }
+  return preset;
 }
 
 async function startManualStorageOrder() {
@@ -943,7 +1171,9 @@ function currentOrderLocksSwitch(nextOrderId = "") {
   const acceptedBy = String(currentOrder.acceptedBy || "").trim();
   if (!acceptedBy || !sameUserName(acceptedBy, currentUserName())) return false;
   const target = listedOrdersById.get(String(nextOrderId || ""));
-  return !target || !isAcceptedByCurrentUser(target);
+  if (target && isAcceptedByCurrentUser(target)) return false;
+  if (orderIdInCurrentAcceptedGroup(nextOrderId)) return false;
+  return true;
 }
 
 function currentOrderLocksModeSwitch(nextMode) {
@@ -991,14 +1221,15 @@ function renderLine(line) {
   card.className =
     "pick-item" +
     (line.picked ? " is-done" : "") +
-    (line.picked && currentOrder.collapseDone ? " is-collapsed" : "") +
+    (line.picked ? " is-collapsed" : "") +
     (binWarningText ? " has-bin-warning" : "") +
     (missing ? " is-missing" : "");
 
   const checkWrap = document.createElement("button");
   checkWrap.type = "button";
   checkWrap.className = `check-target${line.picked ? " is-picked" : ""}`;
-  checkWrap.disabled = !canEditOrder || missing;
+  checkWrap.disabled = false;
+  checkWrap.setAttribute("data-blocked", !canEditOrder || missing ? "true" : "false");
   checkWrap.setAttribute("aria-pressed", line.picked ? "true" : "false");
   checkWrap.setAttribute("aria-label", line.picked ? "Position wieder öffnen" : "Position abhaken");
   const checkmark = document.createElement("span");
@@ -1007,6 +1238,7 @@ function renderLine(line) {
   checkWrap.appendChild(checkmark);
   checkWrap.addEventListener("click", (event) => {
     event.preventDefault();
+    event.stopPropagation();
     toggleLinePicked(line, card, checkWrap);
   });
   card.appendChild(checkWrap);
@@ -1014,11 +1246,11 @@ function renderLine(line) {
   const body = document.createElement("div");
   body.className = "line-body";
 
-  const isMissingHandlingUnit = !String(line.fromHandlingUnit || "").trim();
-  const canEditHandlingUnit = isStorage || line.fromHandlingUnitEditable === true || isMissingHandlingUnit;
+  const canEditHandlingUnit = isStorage || line.fromHandlingUnitEditable === true || isMissingOrIncompleteHandlingUnit(line.fromHandlingUnit);
 
   const top = document.createElement("div");
   top.className = "line-top";
+  if (isManualStorageLine) top.className += " is-manual-storage-top";
   top.appendChild(makeInput(isStorage ? "Material" : "Produkt", line.product, (value) => {
     line.product = normalizeDigits(value);
     markDirty();
@@ -1037,12 +1269,13 @@ function renderLine(line) {
     line.description = value;
     markDirty();
   }, { readOnly: !canEditOrder || missing || !isManualStorageLine }));
-  top.appendChild(makeInput("Soll", line.targetQty, (value) => {
-    line.targetQty = value;
-    if (!line.actualQty) line.actualQty = value;
-    markDirty();
-    updateCounts();
-  }, { readOnly: !canEditOrder || missing || !isManualStorageLine, className: "short-input" }));
+  if (!isManualStorageLine) {
+    top.appendChild(makeInput("Soll", line.targetQty, (value) => {
+      line.targetQty = value;
+      markDirty();
+      updateCounts();
+    }, { readOnly: true, className: "short-input" }));
+  }
   top.appendChild(
     makeInput(
       "Ist",
@@ -1052,7 +1285,7 @@ function renderLine(line) {
         markDirty();
         updateCounts();
       },
-      { readOnly: !canEditOrder || missing || (isStorage && !isManualStorageLine), className: "short-input" }
+      { readOnly: !canEditOrder || missing, className: "short-input" }
     )
   );
   top.appendChild(makeInput("Einheit", line.unit, (value) => {
@@ -1063,23 +1296,26 @@ function renderLine(line) {
 
   const locationRow = document.createElement("div");
   locationRow.className = "location-row";
+  const useSsiStorageHuPrefix = isStorage && usesSsiStorageHuPrefix();
   locationRow.appendChild(
     makeInput(
       isStorage ? "HU" : "Von HU",
-      line.fromHandlingUnit,
+      storageHandlingUnitDisplayValue(line.fromHandlingUnit, useSsiStorageHuPrefix),
       (value) => {
-        line.fromHandlingUnit = normalizeDigits(value);
+        if (useSsiStorageHuPrefix) value = normalizeSsiStorageHandlingUnit(value);
+        line.fromHandlingUnit = value;
         line.fromHandlingUnitEditable = canEditHandlingUnit;
         markDirty();
       },
-      { readOnly: !canEditOrder || missing || !canEditHandlingUnit, ...numericInputOptions() }
+      useSsiStorageHuPrefix
+        ? { readOnly: !canEditOrder || missing || !canEditHandlingUnit, ...ssiStorageHuInputOptions() }
+        : { readOnly: !canEditOrder || missing || !canEditHandlingUnit }
     )
   );
-  const noteInput = makeInput("Zusatzbemerkung", line.positionNote, (value) => {
+  const noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), (value) => {
     line.positionNote = value;
     markDirty();
   }, { readOnly: !canEditOrder || missing || (isStorage && !isManualStorageLine) });
-  decorateAutoPositionNoteLabel(noteInput, line);
   locationRow.appendChild(noteInput);
   if (isStorage && !isEmptyManualStorageLine(line)) locationRow.appendChild(makeStorageMissingButton(line));
   if (isManualStorageLine && canEditOrder && !missing) locationRow.appendChild(makeManualStorageDeleteButton(line));
@@ -1095,12 +1331,13 @@ function renderLoadingSlipLine(line) {
   card.className =
     "pick-item is-loading-slip" +
     (line.picked ? " is-done" : "") +
-    (line.picked && currentOrder.collapseDone ? " is-collapsed" : "");
+    (line.picked ? " is-collapsed" : "");
 
   const checkWrap = document.createElement("button");
   checkWrap.type = "button";
   checkWrap.className = `check-target${line.picked ? " is-picked" : ""}`;
-  checkWrap.disabled = !canEditOrder;
+  checkWrap.disabled = false;
+  checkWrap.setAttribute("data-blocked", !canEditOrder ? "true" : "false");
   checkWrap.setAttribute("aria-pressed", line.picked ? "true" : "false");
   checkWrap.setAttribute("aria-label", line.picked ? "Position wieder oeffnen" : "Position abhaken");
   const checkmark = document.createElement("span");
@@ -1109,6 +1346,7 @@ function renderLoadingSlipLine(line) {
   checkWrap.appendChild(checkmark);
   checkWrap.addEventListener("click", (event) => {
     event.preventDefault();
+    event.stopPropagation();
     toggleLinePicked(line, card, checkWrap);
   });
   card.appendChild(checkWrap);
@@ -1129,11 +1367,10 @@ function renderLoadingSlipLine(line) {
 
   const noteRow = document.createElement("div");
   noteRow.className = "location-row loading-slip-note-row";
-  const noteInput = makeInput("Zusatzbemerkung", line.positionNote, (value) => {
+  const noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), (value) => {
     line.positionNote = value;
     markDirty();
   }, { readOnly: !canEditOrder });
-  decorateAutoPositionNoteLabel(noteInput, line);
   noteRow.appendChild(noteInput);
   body.appendChild(noteRow);
 
@@ -1220,12 +1457,14 @@ function removeManualStorageLine(line) {
 }
 
 function manualStorageLineHasContent(line) {
+  const handlingUnit = usesSsiStorageHuPrefix()
+    ? (isCompleteSsiStorageHandlingUnit(line.fromHandlingUnit) ? line.fromHandlingUnit : "")
+    : line.fromHandlingUnit;
   return [
     line.product,
     line.description,
-    line.targetQty,
     line.actualQty,
-    line.fromHandlingUnit,
+    handlingUnit,
     line.fromBin,
     line.positionNote
   ].some((value) => String(value ?? "").trim());
@@ -1234,15 +1473,10 @@ function manualStorageLineHasContent(line) {
 function updateLinePickedState(line, card, button) {
   const picked = Boolean(line.picked);
   card.classList.toggle("is-done", picked);
-  card.classList.remove("is-collapsed");
+  card.classList.toggle("is-collapsed", picked);
   button.classList.toggle("is-picked", picked);
   button.setAttribute("aria-pressed", picked ? "true" : "false");
   button.setAttribute("aria-label", picked ? "Position wieder öffnen" : "Position abhaken");
-  if (picked && currentOrder && currentOrder.collapseDone) {
-    window.setTimeout(() => {
-      if (line.picked && currentOrder && currentOrder.collapseDone) card.classList.add("is-collapsed");
-    }, 180);
-  }
 }
 
 function makeInput(labelText, value, onChange, options = {}) {
@@ -1255,6 +1489,7 @@ function makeInput(labelText, value, onChange, options = {}) {
   input.className = `${options.className || ""}${options.warning ? " is-warning" : ""}`.trim();
   if (options.inputMode) input.inputMode = options.inputMode;
   if (options.pattern) input.pattern = options.pattern;
+  if (options.maxLength) input.maxLength = options.maxLength;
   if (options.autocapitalize) input.setAttribute("autocapitalize", options.autocapitalize);
   if (options.warning) input.title = options.warning;
   if (options.readOnly) {
@@ -1282,6 +1517,53 @@ function makeInput(labelText, value, onChange, options = {}) {
 
 function normalizeDigits(value) {
   return String(value || "").replace(/\D/g, "");
+}
+
+function storageOrderUsesSsiCustomer() {
+  const value = currentOrder ? currentOrder.customerName : manualStorageCustomerName();
+  return manualStorageCustomerGroupKey(value) === "SSI";
+}
+
+function usesSsiStorageHuPrefix() {
+  return isStorageOrder() && storageOrderUsesSsiCustomer();
+}
+
+function normalizeSsiStorageHandlingUnit(value) {
+  const digits = normalizeDigits(value);
+  if (!digits) return SSI_STORAGE_HU_PREFIX;
+  if (digits.startsWith(SSI_STORAGE_HU_PREFIX)) return digits.slice(0, SSI_STORAGE_HU_LENGTH);
+  const suffix = digits.length <= SSI_STORAGE_HU_SUFFIX_LENGTH
+    ? digits
+    : digits.slice(-SSI_STORAGE_HU_SUFFIX_LENGTH);
+  return SSI_STORAGE_HU_PREFIX + suffix;
+}
+
+function isCompleteSsiStorageHandlingUnit(value) {
+  const digits = normalizeDigits(value);
+  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length === SSI_STORAGE_HU_LENGTH;
+}
+
+function isIncompleteSsiStorageHandlingUnit(value) {
+  const digits = normalizeDigits(value);
+  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length < SSI_STORAGE_HU_LENGTH;
+}
+
+function isMissingOrIncompleteHandlingUnit(value) {
+  const text = String(value || "").trim();
+  return !text || isIncompleteSsiStorageHandlingUnit(text);
+}
+
+function storageHandlingUnitDisplayValue(value, useSsiStorageHuPrefix) {
+  return useSsiStorageHuPrefix ? normalizeSsiStorageHandlingUnit(value) : value || "";
+}
+
+function ssiStorageHuInputOptions() {
+  return {
+    inputMode: "numeric",
+    pattern: "[0-9]*",
+    maxLength: SSI_STORAGE_HU_LENGTH,
+    normalize: normalizeSsiStorageHandlingUnit,
+  };
 }
 
 function normalizeUppercaseText(value) {
@@ -1330,9 +1612,12 @@ function renderTakeOverButton() {
 
 function renderDiscardOrderButton(hasOrder, isMine, manualStorage) {
   if (!elements.discardOrderButton) return;
-  const visible = Boolean(hasOrder && isMine && manualStorage);
+  const localManualStorage = Boolean(manualStorage && currentOrder && (currentOrder.localDraft === true || isLocalStorageOrderId(currentOrder.id)));
+  const visible = Boolean(hasOrder && manualStorage && (isMine || localManualStorage));
   elements.discardOrderButton.hidden = !visible;
-  elements.discardOrderButton.disabled = !visible || (!serverOnline && !window.OfflineStore);
+  elements.discardOrderButton.textContent = "Einlagerung abbrechen";
+  elements.discardOrderButton.disabled = !visible || (!serverOnline && !window.OfflineStore && !localManualStorage);
+  elements.discardOrderButton.title = visible ? "Manuelle Einlagerung abbrechen und Auftrag loeschen." : "";
 }
 
 async function acceptOrderOnServer(id) {
@@ -1366,7 +1651,7 @@ async function takeOverCurrentOrder() {
   const accepted = await acceptOrderOnServer(currentOrder.id);
   if (!accepted) return;
   currentOrder = localOrderBeforeAccept ? mergeLocalOrderAfterAccept(accepted.order, localOrderBeforeAccept) : accepted.order;
-  currentOrder.collapseDone = currentOrder.collapseDone !== false;
+  currentOrder.collapseDone = true;
   renderTakeOverButton();
   renderOrder();
   persistCurrentOrderCache();
@@ -1416,19 +1701,24 @@ async function discardCurrentManualStorageOrder() {
     setMessage("Kein manueller Einlagerauftrag geoeffnet.", true);
     return;
   }
-  if (!canEditCurrentOrder()) {
+  const orderId = currentOrder.id;
+  const localManualStorage = currentOrder.localDraft === true || isLocalStorageOrderId(orderId);
+  if (!canEditCurrentOrder() && !localManualStorage) {
     setMessage("Bearbeitung erst uebernehmen.", true);
     return;
   }
-  const orderId = currentOrder.id;
+  if (!serverOnline && !window.OfflineStore && !localManualStorage) {
+    setMessage("Einlagerung kann ohne Serververbindung nicht geloescht werden.", true);
+    return;
+  }
   const label = lockedOrderLabel() || "manuelle Einlagerung";
-  if (!window.confirm(`Auftrag ${label} wirklich verwerfen? Der Auftrag wird geloescht und nicht synchronisiert.`)) return;
+  if (!window.confirm(`Manuelle Einlagerung ${label} wirklich abbrechen? Der Auftrag wird geloescht und nicht synchronisiert.`)) return;
 
   if (serverOnline && !isLocalStorageOrderId(orderId)) {
     try {
       await apiJson(`/api/orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
       await removeOrderFromOfflineStore(orderId);
-      resetToStart("Manuelle Einlagerung verworfen.");
+      resetToStart("Manuelle Einlagerung abgebrochen.");
       await loadOrderList({ silent: true });
     } catch (error) {
       setMessage(`Auftrag konnte nicht verworfen werden: ${error.message}`, true);
@@ -1441,7 +1731,7 @@ async function discardCurrentManualStorageOrder() {
     if (!isLocalStorageOrderId(orderId) && window.OfflineStore) {
       await OfflineStore.enqueue("DELETE", `/api/orders/${encodeURIComponent(orderId)}`, "", deleteOrderDedupeKey(orderId));
     }
-    resetToStart("Manuelle Einlagerung verworfen.");
+    resetToStart("Manuelle Einlagerung abgebrochen.");
     await loadOrderList({ silent: true });
   } catch {
     setMessage("Auftrag konnte lokal nicht verworfen werden.", true);
@@ -1585,26 +1875,7 @@ async function saveOrder(silent, onSuccess) {
   const revision = changeRevision;
 
   if (!serverOnline) {
-    if (window.OfflineStore) {
-      try {
-        const url = `/api/orders/${encodeURIComponent(currentOrder.id)}`;
-        await OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder, userName: currentUserName() }), storageOrderPutDedupeKey(currentOrder.id));
-        await saveOrderToOfflineStore(currentOrder);
-        if (changeRevision === revision) {
-          dirty = false;
-          clearCurrentOrderCache();
-        } else {
-          dirty = true;
-          persistCurrentOrderCache();
-        }
-        if (onSuccess) onSuccess();
-        if (!silent) setMessage("Offline gespeichert – wird synchronisiert, sobald der Server erreichbar ist.", false);
-      } catch {
-        if (!silent) setMessage("Offline: Lokales Speichern fehlgeschlagen.", true);
-      }
-    } else {
-      if (!silent) setMessage("Server nicht verbunden.", true);
-    }
+    await saveCurrentOrderOffline(silent, onSuccess, revision);
     return;
   }
 
@@ -1626,7 +1897,34 @@ async function saveOrder(silent, onSuccess) {
     loadOrderList();
     if (onSuccess) onSuccess();
   } catch (error) {
-    setMessage(`Speichern fehlgeschlagen: ${error.message}`, true);
+    markServerOffline();
+    const storedOffline = await saveCurrentOrderOffline(silent, onSuccess, revision);
+    if (!storedOffline) setMessage(`Speichern fehlgeschlagen: ${error.message}`, true);
+  }
+}
+
+async function saveCurrentOrderOffline(silent, onSuccess, revision) {
+  if (!window.OfflineStore) {
+    if (!silent) setMessage("Server nicht verbunden.", true);
+    return false;
+  }
+  try {
+    const url = `/api/orders/${encodeURIComponent(currentOrder.id)}`;
+    await OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder, userName: currentUserName() }), storageOrderPutDedupeKey(currentOrder.id));
+    await saveOrderToOfflineStore(currentOrder);
+    if (changeRevision === revision) {
+      dirty = false;
+      clearCurrentOrderCache();
+    } else {
+      dirty = true;
+      persistCurrentOrderCache();
+    }
+    if (onSuccess) onSuccess();
+    if (!silent) setMessage("Offline gespeichert - wird synchronisiert, sobald der Server erreichbar ist.", false);
+    return true;
+  } catch {
+    if (!silent) setMessage("Offline: Lokales Speichern fehlgeschlagen.", true);
+    return false;
   }
 }
 
@@ -1648,6 +1946,13 @@ async function exportPdf() {
     return;
   }
   pruneEmptyManualStorageLines();
+  const completionMessage = exportCompletionMessage();
+  if (completionMessage) {
+    renderOrder();
+    setMessage(completionMessage, true);
+    window.alert(completionMessage);
+    return;
+  }
   const validationMessage = storageOrderExportMessage();
   if (validationMessage) {
     renderOrder();
@@ -1677,12 +1982,29 @@ function loadTabletStartPage() {
   window.location.href = `${window.location.pathname || "/tablet.html"}?start=${Date.now()}`;
 }
 
+function exportCompletionMessage() {
+  const lines = (currentOrder && Array.isArray(currentOrder.lines) ? currentOrder.lines : [])
+    .filter((line) => !isEmptyManualStorageLine(line));
+  if (!lines.length) return "Export gesperrt: Auftrag hat keine Positionen.";
+  const openLines = lines.filter((line) => !line.picked && !isMissingStorageLine(line));
+  if (!openLines.length) return "";
+  return `Export gesperrt: Erst alle Positionen abhaken (${openLines.length} offen${openPositionListText(openLines)}).`;
+}
+
+function openPositionListText(lines) {
+  const positions = lines
+    .slice(0, 5)
+    .map((line, index) => String(storageLinePosition(line, index)).trim())
+    .filter(Boolean);
+  if (!positions.length) return "";
+  return `: Pos. ${positions.join(", ")}${lines.length > positions.length ? ", ..." : ""}`;
+}
+
 function resetToStart(message) {
   clearCurrentOrderCache();
   currentOrder = null;
   dirty = false;
   elements.orderSelect.value = "";
-  elements.collapseDoneInput.checked = true;
   renderOrder();
   setMessage(message || "Bitte Auftrag waehlen.", false);
 }
@@ -1821,8 +2143,15 @@ function storageLineCompletionErrors(line) {
   else if (!/^\d+$/.test(product)) errors.push("Artikelnummer darf nur Zahlen enthalten");
   if (line.manual !== true && !String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
   if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
-  if (handlingUnit && !/^\d+$/.test(handlingUnit)) errors.push("HU darf nur Zahlen enthalten");
-  if (requiresStorageHandlingUnit() && !handlingUnit) errors.push("HU fehlt");
+  if (requiresStorageHandlingUnit()) {
+    if (usesSsiStorageHuPrefix()) {
+      if (!isCompleteSsiStorageHandlingUnit(handlingUnit)) {
+        errors.push(`HU muss mit ${SSI_STORAGE_HU_PREFIX} beginnen und danach ${SSI_STORAGE_HU_SUFFIX_LENGTH} Ziffern enthalten`);
+      }
+    } else if (!handlingUnit) {
+      errors.push("HU fehlt");
+    }
+  }
   if (!readTabletQuantity(line.actualQty || line.targetQty)) errors.push("Menge fehlt");
   return errors;
 }
@@ -1833,8 +2162,7 @@ function storageLineQuantityChanged(line) {
 }
 
 function requiresStorageHandlingUnit() {
-  const warehouse = String(currentOrder?.orderWarehouse || currentOrder?.warehouse || "").trim().toUpperCase();
-  return warehouse === "SSI" || warehouse === "SI";
+  return isStorageOrder() && storageOrderUsesSsiCustomer();
 }
 
 function shouldClearBinWarning(line, nextBin) {
@@ -1913,6 +2241,9 @@ function setMessage(text, isError) {
 async function apiJson(url, options = {}) {
   const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
   const { headers: extraHeaders, ...rest } = options;
+  if (!rest.cache && String(rest.method || "GET").toUpperCase() === "GET") {
+    rest.cache = "no-store";
+  }
   const response = await fetch(`${API_BASE}${url}`, {
     headers: {
       "Content-Type": "application/json",

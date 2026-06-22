@@ -6,9 +6,9 @@
     <meta name="theme-color" content="#167a58">
     <title>Tablet Logistik</title>
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="tablet.css?v=20260618-8">
-    <script src="offline-store.js?v=20260618-8"></script>
-    <script src="tablet-legacy.js?v=20260618-8"></script>
+    <link rel="stylesheet" href="tablet.css?v=20260622-2">
+    <script src="offline-store.js?v=20260622-1"></script>
+    <script src="tablet-legacy.js?v=20260622-5"></script>
   </head>
   <body>
     <header class="tablet-header">
@@ -25,45 +25,50 @@
           <button id="pickingModeButton" type="button" class="is-active">Kommissionierung</button>
           <button id="storageModeButton" type="button">Einlagerung</button>
         </div>
-        <label>
-          Mitarbeiter
-          <input id="userNameInput" type="text" autocomplete="name" placeholder="Name">
-        </label>
-        <label>
-          Auftrag
-          <select id="orderSelect">
-            <option value="">Auftrag wählen</option>
-          </select>
-        </label>
-        <label>
-          Sortierung
-          <select id="sortModeSelect">
-            <option value="fromBin">Lagerplatz</option>
-            <option value="product">Artikelnummer</option>
-          </select>
-        </label>
-        <button id="refreshButton" type="button">Aktualisieren</button>
-        <label id="manualStorageCustomerRow" hidden>
-          Kunde
-          <input id="manualStorageCustomerInput" type="text" autocomplete="off" autocapitalize="words" placeholder="Kunde">
-        </label>
-        <label id="manualStorageWarehouseRow" hidden>
-          Lager
-          <select id="manualStorageWarehouseSelect">
-            <option value="SSI">SSI</option>
-            <option value="SI">SI</option>
-          </select>
-        </label>
-        <button id="manualStorageStartButton" type="button" hidden>Manuelle Einlagerung starten</button>
-        <button id="takeOverButton" type="button" hidden>Bearbeitung übernehmen</button>
-        <button id="leaveOrderButton" class="danger-action" type="button" hidden>Auftrag verlassen</button>
-        <button id="discardOrderButton" class="danger-action" type="button" hidden>Auftrag verwerfen</button>
-        <button id="saveButton" type="button">Jetzt speichern</button>
-        <button id="exportPdfButton" type="button">PDF exportieren</button>
-        <label class="check-row">
-          <input id="collapseDoneInput" type="checkbox" checked>
-          <span>Erledigte einklappen</span>
-        </label>
+        <div class="tablet-control-fields">
+          <label>
+            Mitarbeiter
+            <input id="userNameInput" type="text" autocomplete="name" placeholder="Name">
+          </label>
+          <label>
+            Auftrag
+            <select id="orderSelect">
+              <option value="">Auftrag wählen</option>
+            </select>
+          </label>
+          <div id="acceptedGroupInfo" class="tablet-group-info" hidden></div>
+          <label>
+            Sortierung
+            <select id="sortModeSelect">
+              <option value="fromBin">Lagerplatz</option>
+              <option value="product">Artikelnummer</option>
+            </select>
+          </label>
+        </div>
+        <div class="tablet-manual-fields">
+          <label id="manualStorageCustomerRow" hidden>
+            Kunde
+            <input id="manualStorageCustomerInput" type="text" autocomplete="off" autocapitalize="words" placeholder="Kunde">
+          </label>
+          <label id="manualStorageWarehouseRow" hidden>
+            Lager
+            <select id="manualStorageWarehouseSelect">
+              <option value="SSI">SSI</option>
+              <option value="SI">SI</option>
+            </select>
+          </label>
+        </div>
+        <div class="tablet-action-row tablet-action-row-main">
+          <button id="refreshButton" type="button">Aktualisieren</button>
+          <button id="saveButton" type="button">Jetzt speichern</button>
+          <button id="manualStorageStartButton" type="button" hidden>Manuelle Einlagerung starten</button>
+          <button id="takeOverButton" type="button" hidden>Bearbeitung übernehmen</button>
+          <button id="exportPdfButton" type="button">PDF exportieren</button>
+        </div>
+        <div class="tablet-action-row tablet-action-row-danger">
+          <button id="leaveOrderButton" class="danger-action" type="button" hidden>Auftrag verlassen</button>
+          <button id="discardOrderButton" class="danger-action" type="button" hidden>Einlagerung abbrechen</button>
+        </div>
       </section>
 
       <section class="tablet-status">
@@ -73,7 +78,7 @@
       </section>
 
       <p id="message" class="message">Bitte Auftrag laden.</p>
-      <section class="tablet-list-panel">
+      <section id="tabletListPanel" class="tablet-list-panel" hidden>
         <div id="pickHeader" class="pick-column-header" hidden>
           <span></span>
           <div class="pick-column-grid">
@@ -87,7 +92,15 @@
         </div>
         <section id="lineList" class="line-list"></section>
         <div id="storageLineActions" class="tablet-line-actions" hidden>
-          <button id="addStorageLineButton" type="button">Position hinzufügen</button>
+          <label>
+            Material
+            <input id="manualStorageMaterialInput" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="Artikelnummer">
+          </label>
+          <label>
+            Anzahl Positionen
+            <input id="manualStoragePositionCountInput" type="number" inputmode="numeric" min="1" max="100" step="1" value="1">
+          </label>
+          <button id="addStorageLineButton" type="button">Positionen anlegen</button>
         </div>
       </section>
       <section class="tablet-completion" aria-label="Abschluss">
