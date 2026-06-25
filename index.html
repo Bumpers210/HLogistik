@@ -16,7 +16,8 @@
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
     <script src="shared-ui.js?v=20260619-2" defer></script>
     <script src="offline-store.js?v=20260619-2" defer></script>
-    <script src="app.js?v=20260622-2" defer></script>
+    <script src="order-hint-rules.js?v=20260623-3" defer></script>
+    <script src="app.js?v=20260625-6" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -172,6 +173,10 @@
             <label class="line-action-field compact">
               Anzahl Positionen
               <input id="manualStoragePositionCountInput" type="number" inputmode="numeric" min="1" max="100" step="1" value="1">
+            </label>
+            <label class="line-action-field compact">
+              Stückzahl
+              <input id="manualStorageQuantityInput" type="number" inputmode="numeric" min="1" step="1" value="1">
             </label>
             <button id="addStorageLineButton" class="secondary-button" type="button">Positionen anlegen</button>
           </div>

@@ -4,17 +4,21 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260622-2";
+const CLIENT_ASSET_VERSION = "20260625-6";
 const OCR_LANGUAGE = "deu+eng";
-const OCR_RENDER_SCALE = 5;
-const OCR_PRECISE_RENDER_SCALE = 6.25;
-const OCR_RENDER_DPI = "360";
-const OCR_PRECISE_RENDER_DPI = "450";
+const OCR_RENDER_SCALE = 6;
+const OCR_PRECISE_RENDER_SCALE = 7.5;
+const OCR_RENDER_DPI = "1000";
+const OCR_PRECISE_RENDER_DPI = "1600";
 const BESTELLSCHEIN_PRECISE_OCR_SCALES = [OCR_PRECISE_RENDER_SCALE];
+const PICKING_OCR_SCALE_CANDIDATES = [
+  { label: "basis", scale: OCR_RENDER_SCALE, dpi: OCR_RENDER_DPI },
+  { label: "praezise", scale: OCR_PRECISE_RENDER_SCALE, dpi: OCR_PRECISE_RENDER_DPI }
+];
 const OCR_ROTATIONS = [0, 90, 180, 270];
 const STORAGE_IMAGE_ROTATIONS = [0, -2, 2, -4, 4];
 const OCR_STRONG_CANDIDATE_SCORE = 6500;
-const MAX_PRECISE_BIN_SCAN_PAGES = 4;
+const PICKING_OCR_MINIMUM_SCORE = 2500;
 const ACTIVE_ORDER_TIMEOUT_MS = 10 * 60 * 1000;
 const ORDER_LIST_REFRESH_MS = 30 * 1000;
 const ACTIVITY_HEARTBEAT_MS = 60 * 1000;
@@ -51,6 +55,11 @@ const state = {
   exportedAt: "",
   exportedPdfFile: "",
   exportedPdfPath: "",
+  originalFileName: "",
+  originalFilePath: "",
+  originalArchivedAt: "",
+  originalArchivePath: "",
+  originalArchiveError: "",
   orderType: "picking",
   orderWarehouse: "",
   awaitingRelease: false,
@@ -141,6 +150,7 @@ function bindElements() {
     "storageLineActions",
     "manualStorageMaterialInput",
     "manualStoragePositionCountInput",
+    "manualStorageQuantityInput",
     "addStorageLineButton",
     "emptyState",
     "pickedCount",
@@ -406,18 +416,16 @@ async function handlePdfUpload(event) {
     setImportStatus(`Lese ${file.name} ...`, "", 0);
     data = await file.arrayBuffer();
     const pdf = await window.pdfjsLib.getDocument({ data }).promise;
-    const pageTexts = await readPdfPages(pdf);
-    const fullText = pageTexts.join("\n");
     if (currentMode === "storage") {
+      const pageTexts = await readPdfPages(pdf);
+      const fullText = pageTexts.join("\n");
       const imported = await chooseBestStorageImportText(pdf, fullText, file.name, pageTexts);
       const result = await importStorageText(imported.text, file.name, imported.parsed);
 
       if (result.cancelled) {
-        setImportStatus(result.message || "Import abgebrochen.", "warning", 100);
+        setImportStatus(result.message || "Import abgebrochen.", result.type || "warning", 100);
       } else if (result.lines > 0) {
-        const suffix = imported.source === "ocr" ? " per OCR" : "";
-        const skippedNotice = result.warnings?.length ? ` ${result.warnings.length} Tabellenzeile(n) nicht uebernommen.` : "";
-        setImportStatus(`${result.lines} Einlagerungspositionen${suffix} als Entwurf importiert.${skippedNotice} Bitte pruefen und freigeben. HU und Stellplatz koennen am Tablet eingetragen werden.`, result.warnings?.length ? "warning" : "ok", 100);
+        setImportStatus(importSuccessMessage(result.lines), "ok", 100);
       } else if (result.warnings?.length) {
         setImportStatus(`Keine Einlagerungspositionen importiert. ${result.warnings.length} Tabellenzeile(n) nicht uebernommen: ${result.warnings[0]}`, "warning", 100);
       } else if (imported.text.trim()) {
@@ -428,21 +436,19 @@ async function handlePdfUpload(event) {
       return;
     }
 
-    const imported = await chooseBestImportText(pdf, fullText, pageTexts);
-    const result = await importText(imported.text, file.name, imported.parsed);
+    const imported = await chooseBestImportText(pdf);
+    if (imported.rejected) {
+      logPickingImportDiagnostics("weak-ocr-candidate", imported.diagnostics);
+      setImportStatus(imported.message || "OCR-Import abgebrochen.", "error", 100);
+      return;
+    }
+
+    const result = await importText(imported.text, file.name, imported.parsed, imported.diagnostics);
 
     if (result.cancelled) {
-      setImportStatus(result.message || "Import abgebrochen.", "warning", 100);
+      setImportStatus(result.message || "Import abgebrochen.", result.type || "warning", 100);
     } else if (result.lines > 0) {
-      const suffix = imported.source === "ocr" ? " per OCR" : "";
-      const pageNotice = imported.pageNotice ? ` ${imported.pageNotice}` : "";
-      const binNotice = result.autoBins ? ` ${result.autoBins} Stellplatz(e) automatisch gesetzt.` : "";
-      const preciseBinNotice = result.binCorrections ? ` ${result.binCorrections} Stellplatz(e) per genauer Pruefung korrigiert.` : "";
-      const binWarningNotice = result.binWarnings ? ` ${result.binWarnings} Stellplatz(e) bitte pruefen.` : "";
-      const warehouseNotice = result.warehouseHint?.shortMessage ? ` ${result.warehouseHint.shortMessage}` : "";
-      const loadingSlipNotice = result.loadingSlips ? ` ${result.loadingSlips} Ladeliste(n) als Barcode-Position angehaengt.` : "";
-      const statusType = imported.pageNotice?.startsWith("Achtung") || result.warehouseHint?.type === "warning" || result.binWarnings ? "warning" : "ok";
-      setImportStatus(`${result.lines} Positionen${suffix} als Entwurf importiert.${binNotice}${preciseBinNotice}${binWarningNotice}${loadingSlipNotice} Bitte pruefen und freigeben.${pageNotice}${warehouseNotice}`, statusType, 100);
+      setImportStatus(importSuccessMessage(result.lines), "ok", 100);
     } else if (imported.text.trim()) {
       setImportStatus("Text gelesen, aber keine Tabellenzeilen erkannt.", "error");
     } else {
@@ -450,6 +456,11 @@ async function handlePdfUpload(event) {
     }
   } catch (error) {
     console.error(error);
+    if (currentMode !== "storage") {
+      setImportStatus(error.message || "OCR-Import fehlgeschlagen.", "error");
+      return;
+    }
+
     const fallbackText = data ? extractTextFromSimplePdf(data) : "";
     if (fallbackText.trim()) {
       const result = currentMode === "storage"
@@ -458,7 +469,7 @@ async function handlePdfUpload(event) {
       const warehouseNotice = currentMode === "storage" ? "" : result.warehouseHint?.shortMessage ? ` ${result.warehouseHint.shortMessage}` : "";
       setImportStatus(
         result.cancelled ? result.message || "Import abgebrochen." : `Fallback genutzt: ${result.lines} Positionen als Entwurf importiert. Bitte prüfen und freigeben.${warehouseNotice}`,
-        result.cancelled || result.warehouseHint?.type === "warning" ? "warning" : result.lines ? "ok" : "error",
+        result.cancelled ? result.type || "warning" : result.warehouseHint?.type === "warning" ? "warning" : result.lines ? "ok" : "error",
         result.cancelled || result.lines ? 100 : null
       );
     } else {
@@ -596,20 +607,34 @@ async function readPdfPages(pdf) {
   return pages;
 }
 
-async function chooseBestImportText(pdf, fullText, pageTexts = []) {
-  setImportStatus("Starte hochaufloesende OCR ...", "", 5);
-  let ocrText = "";
+async function chooseBestImportText(pdf) {
+  setImportStatus("Starte hochaufloesende OCR-Kandidaten ...", "", 5);
+  let selection = null;
+  let ocrError = "";
   try {
-    ocrText = await readPdfWithOcr(pdf);
+    selection = await readPickingPdfWithOcrCandidate(pdf);
   } catch (error) {
+    ocrError = error?.message || String(error || "");
     console.warn("Hochaufloesende OCR fehlgeschlagen.", error);
   }
 
-  const fastCandidate = await buildPickingImportCandidate(pdf, pageTexts, fullText, "pdf-text");
-  if (!ocrText.trim()) return fastCandidate;
+  const candidate = await buildPickingImportCandidate(pdf, selection?.text || "", selection?.source || "ocr", {
+    ...(selection || {}),
+    ocrError
+  });
 
-  const ocrCandidate = await buildPickingImportCandidate(pdf, pageTexts, ocrText, "ocr");
-  return chooseBestPickingImportCandidate([ocrCandidate, fastCandidate]);
+  if (!selection || !isUsablePickingOcrSelection(selection)) {
+    const message = ocrError
+      ? `OCR-Import fehlgeschlagen: ${ocrError}`
+      : "OCR-Qualitaet zu schwach. Import abgebrochen, keine Positionen uebernommen.";
+    return {
+      ...candidate,
+      rejected: true,
+      message
+    };
+  }
+
+  return candidate;
 }
 
 async function chooseBestStorageImportText(pdf, fullText, fileName = "", pageTexts = []) {
@@ -636,13 +661,38 @@ async function chooseBestStorageImportText(pdf, fullText, fileName = "", pageTex
   return chooseBestStorageImportCandidate([ocrCandidate, fastCandidate]);
 }
 
-async function buildPickingImportCandidate(pdf, pageTexts, text, source) {
+async function buildPickingImportCandidate(pdf, text, source, info = {}) {
   const parsed = parseOrderText(text);
-  const binScan = parsed.lines.length
-    ? await refinePickingBinsWithPreciseScan(pdf, pageTexts, parsed)
-    : { parsed, corrected: 0, warnings: 0, scannedPages: 0 };
+  const binScan = {
+    parsed,
+    corrected: 0,
+    warnings: 0,
+    scannedPages: 0,
+    disabled: true,
+    reason: "Keine Stellplatzvalidierung oder -korrektur im PDF-Importpfad."
+  };
   const sanitizedParsed = sanitizeBestellscheinHandlingUnitDuplicates(binScan.parsed, text);
   const issues = validatePickingImport(text, sanitizedParsed);
+  const diagnostics = pickingImportDiagnostics(text, sanitizedParsed, {
+    source,
+    pdfPages: pdf?.numPages || 0,
+    ocrScale: OCR_RENDER_SCALE,
+    ocrDpi: OCR_RENDER_DPI,
+    ocrPreciseScale: OCR_PRECISE_RENDER_SCALE,
+    ocrPreciseDpi: OCR_PRECISE_RENDER_DPI,
+    ocrRotations: OCR_ROTATIONS,
+    ocrScales: info.ocrScales || [],
+    ocrDpis: info.ocrDpis || [],
+    ocrRotation: info.ocrRotation ?? "",
+    selectedCandidate: info.selectedCandidate || null,
+    ocrCandidates: info.ocrCandidates || [],
+    qualityScore: info.qualityScore ?? null,
+    minimumQualityScore: info.minimumQualityScore ?? PICKING_OCR_MINIMUM_SCORE,
+    qualityAccepted: info.qualityAccepted === true,
+    ocrError: info.ocrError || "",
+    binValidationApplied: false,
+    binCorrectionApplied: false
+  });
 
   return {
     text,
@@ -651,19 +701,9 @@ async function buildPickingImportCandidate(pdf, pageTexts, text, source) {
     pageNotice: bestellscheinPageNotice(text, pdf.numPages),
     binScan,
     issues,
-    qualityScore: scorePickingImportCandidate(text, sanitizedParsed, issues)
+    qualityScore: info.qualityScore ?? scorePickingImportCandidate(text, sanitizedParsed, issues),
+    diagnostics
   };
-}
-
-function chooseBestPickingImportCandidate(candidates) {
-  return candidates
-    .filter(Boolean)
-    .sort((left, right) => {
-      const leftIssues = left.issues?.length || 0;
-      const rightIssues = right.issues?.length || 0;
-      if (leftIssues !== rightIssues) return leftIssues - rightIssues;
-      return (right.qualityScore || 0) - (left.qualityScore || 0);
-    })[0] || candidates[0];
 }
 
 function scorePickingImportCandidate(text, parsed, issues = []) {
@@ -698,67 +738,6 @@ function scoreStorageImportQuality(candidate) {
   return lines * 1200 - warnings * 900 + sourceBonus;
 }
 
-async function refinePickingBinsWithPreciseScan(pdf, pageTexts = [], parsed = {}) {
-  const lines = Array.isArray(parsed?.lines) ? parsed.lines : [];
-  const targets = lines
-    .map((line, index) => ({ line, index, warning: suspiciousPickingBinWarning(line) }))
-    .filter((entry) => entry.warning);
-
-  if (!targets.length) {
-    return { parsed, corrected: 0, warnings: 0, scannedPages: 0 };
-  }
-
-  const pageNumbers = pageNumbersForPickingBinScan(pageTexts, targets);
-  let ocrLines = [];
-
-  if (pageNumbers.length) {
-    try {
-      setImportStatus(`Pruefe ${targets.length} auffaellige(n) Lagerplatz/Lagerplaetze genauer ...`, "", 70);
-      const preciseText = await readPdfPagesWithPreciseOcr(pdf, pageNumbers);
-      ocrLines = parseOrderText(preciseText).lines.filter((line) => line?.lineType !== "loading-slip");
-    } catch (error) {
-      console.warn("Genauer Lagerplatz-Scan fehlgeschlagen.", error);
-    }
-  }
-
-  let corrected = 0;
-  let warnings = 0;
-  const nextLines = [...lines];
-
-  targets.forEach(({ line, index, warning }) => {
-    const originalBin = normalizePickingBinText(line.fromBin);
-    const candidates = [preciseScanBinCandidate(line, ocrLines)]
-      .map(normalizePickingBinText)
-      .filter((value) => value && value !== originalBin && isPlausiblePickingBin(value) && !suspiciousPickingBinWarning({ fromBin: value }));
-
-    const uniqueCandidates = [...new Set(candidates)];
-    if (uniqueCandidates.length === 1) {
-      nextLines[index] = {
-        ...line,
-        fromBin: uniqueCandidates[0],
-        binWarning: "",
-        binWarningValue: ""
-      };
-      corrected += 1;
-      return;
-    }
-
-    nextLines[index] = {
-      ...line,
-      binWarning: `${warning} Bitte pruefen.`,
-      binWarningValue: originalBin || String(line.fromBin || "").trim()
-    };
-    warnings += 1;
-  });
-
-  return {
-    parsed: { ...parsed, lines: nextLines, binCorrections: corrected, binWarnings: warnings },
-    corrected,
-    warnings,
-    scannedPages: pageNumbers.length
-  };
-}
-
 function suspiciousPickingBinWarning(line) {
   if (!line || line.lineType === "loading-slip") return "";
   const bin = normalizePickingBinText(line.fromBin);
@@ -779,99 +758,255 @@ function isPlausiblePickingBin(value) {
 }
 
 function normalizePickingBinText(value) {
+  return cleanImportedWarehouseBin(value);
+}
+
+function cleanImportedWarehouseBin(value) {
   const bin = String(value || "")
     .trim()
-    .toUpperCase()
     .replace(/\s+/g, "")
     .replace(/[‐‑‒–—]/g, "-")
-    .replace(/^O/, "0")
-    .replace(/^QD/, "00");
-  if (/^H1A[A-L]1$/i.test(bin)) return `002-H1-${bin.slice(2)}`;
+    ;
   return bin;
 }
 
-function pageNumbersForPickingBinScan(pageTexts, targets) {
-  const pages = Array.isArray(pageTexts) ? pageTexts : [];
-  const pageNumbers = new Set();
-
-  targets.forEach(({ line }) => {
-    const needles = [
-      line.warehouseOrder,
-      line.fromHandlingUnit,
-      line.product,
-      line.fromBin
-    ].map((value) => normalizeSearchNeedle(value)).filter(Boolean);
-
-    pages.forEach((pageText, index) => {
-      const haystack = normalizeSearchNeedle(pageText);
-      const hits = needles.filter((needle) => haystack.includes(needle)).length;
-      if (hits >= 2 || (needles[0] && haystack.includes(needles[0]))) pageNumbers.add(index + 1);
-    });
-  });
-
-  if (!pageNumbers.size && pages.length) {
-    pages.slice(0, MAX_PRECISE_BIN_SCAN_PAGES).forEach((_, index) => pageNumbers.add(index + 1));
+async function readPickingPdfWithOcrCandidate(pdf) {
+  if (!window.Tesseract?.createWorker) {
+    throw new Error("OCR-Modul konnte nicht geladen werden. Internetverbindung pruefen und Seite neu laden.");
   }
 
-  return [...pageNumbers].sort((a, b) => a - b).slice(0, MAX_PRECISE_BIN_SCAN_PAGES);
-}
+  const scaleCandidates = pickingOcrScaleCandidates();
+  const totalSteps = Math.max(1, pdf.numPages * scaleCandidates.length * OCR_ROTATIONS.length);
+  const worker = await createOcrWorker(totalSteps, scaleCandidates[0]?.dpi || OCR_RENDER_DPI);
+  const candidateMap = new Map();
 
-function normalizeSearchNeedle(value) {
-  return String(value || "").toUpperCase().replace(/\s+/g, "");
-}
-
-async function readPdfPagesWithPreciseOcr(pdf, pageNumbers) {
-  const pages = [...new Set(pageNumbers)]
-    .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber >= 1 && pageNumber <= pdf.numPages);
-  if (!pages.length || !window.Tesseract?.createWorker) return "";
-
-  const worker = await createOcrWorker(pages.length, OCR_PRECISE_RENDER_DPI);
-  const texts = [];
   try {
-    await worker.setParameters({
-      preserve_interword_spaces: "1",
-      tessedit_pageseg_mode: window.Tesseract.PSM?.AUTO || "3",
-      user_defined_dpi: OCR_PRECISE_RENDER_DPI
-    });
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      setImportStatus(
+        `OCR Seite ${pageNumber}/${pdf.numPages} vorbereiten ...`,
+        "",
+        Math.round(((pageNumber - 1) / pdf.numPages) * 100)
+      );
 
-    for (const pageNumber of pages) {
-      setImportStatus(`Genauer Lagerplatz-Scan Seite ${pageNumber}/${pdf.numPages} ...`);
-      const canvas = await renderPdfPageToCanvas(pdf, pageNumber, OCR_PRECISE_RENDER_SCALE);
-      const result = await worker.recognize(canvas);
-      texts.push(result.data.text || "");
-      canvas.width = 0;
-      canvas.height = 0;
+      for (const scaleConfig of scaleCandidates) {
+        const baseCanvas = await renderPdfPageToCanvas(pdf, pageNumber, scaleConfig.scale);
+        try {
+          for (const rotation of OCR_ROTATIONS) {
+            const canvas = rotation ? rotateCanvas(baseCanvas, rotation) : baseCanvas;
+            const rotationLabel = rotation ? `, Drehung ${rotation} Grad` : "";
+            setImportStatus(
+              `OCR Seite ${pageNumber}/${pdf.numPages}, ${scaleConfig.label}${rotationLabel} ...`
+            );
+            await setOcrWorkerDpi(worker, scaleConfig.dpi);
+            const result = await worker.recognize(canvas);
+            const text = result.data.text || "";
+            const key = pickingOcrCandidateKey(scaleConfig, rotation);
+            const entry = candidateMap.get(key) || {
+              key,
+              label: pickingOcrCandidateLabel(scaleConfig, rotation),
+              scale: scaleConfig.scale,
+              dpi: scaleConfig.dpi,
+              rotation,
+              pages: Array.from({ length: pdf.numPages }, () => ""),
+              pageRawLines: Array.from({ length: pdf.numPages }, () => 0)
+            };
+            entry.pages[pageNumber - 1] = text;
+            entry.pageRawLines[pageNumber - 1] = countNonEmptyTextLines(text);
+            candidateMap.set(key, entry);
+
+            if (canvas !== baseCanvas) {
+              canvas.width = 0;
+              canvas.height = 0;
+            }
+          }
+        } finally {
+          baseCanvas.width = 0;
+          baseCanvas.height = 0;
+        }
+      }
     }
   } finally {
     await worker.terminate();
   }
-  return texts.join("\n");
+
+  const candidates = [...candidateMap.values()]
+    .map(buildPickingOcrCandidate)
+    .sort((a, b) => b.score - a.score);
+  const best = candidates[0] || buildPickingOcrCandidate({
+    key: "empty",
+    label: "empty",
+    scale: "",
+    dpi: "",
+    rotation: 0,
+    pages: [],
+    pageRawLines: []
+  });
+
+  return {
+    text: best.text,
+    parsed: best.parsed,
+    source: "ocr-candidate",
+    selectedCandidate: pickingOcrCandidateDiagnostic(best),
+    ocrCandidates: candidates.map(pickingOcrCandidateDiagnostic),
+    ocrScales: scaleCandidates.map((candidate) => candidate.scale),
+    ocrDpis: scaleCandidates.map((candidate) => candidate.dpi),
+    ocrRotations: [...OCR_ROTATIONS],
+    ocrScale: best.scale,
+    ocrDpi: best.dpi,
+    ocrRotation: best.rotation,
+    qualityScore: best.score,
+    minimumQualityScore: PICKING_OCR_MINIMUM_SCORE,
+    qualityAccepted: isUsablePickingOcrSelection(best)
+  };
 }
 
-function preciseScanBinCandidate(line, ocrLines) {
-  const candidates = (Array.isArray(ocrLines) ? ocrLines : [])
-    .filter((candidate) => lineMatchesPickingBinTarget(line, candidate))
-    .map((candidate) => candidate.fromBin)
-    .map(normalizePickingBinText)
+function pickingOcrScaleCandidates() {
+  const seen = new Set();
+  return PICKING_OCR_SCALE_CANDIDATES.filter((candidate) => {
+    const key = `${candidate.scale}|${candidate.dpi}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return Number(candidate.scale) > 0;
+  });
+}
+
+function pickingOcrCandidateKey(scaleConfig, rotation) {
+  return `${scaleConfig.scale}|${scaleConfig.dpi}|${rotation}`;
+}
+
+function pickingOcrCandidateLabel(scaleConfig, rotation) {
+  return `${scaleConfig.label || "ocr"} scale ${scaleConfig.scale}, ${scaleConfig.dpi} dpi, rotation ${rotation}`;
+}
+
+async function setOcrWorkerDpi(worker, dpi) {
+  const value = String(dpi || OCR_RENDER_DPI);
+  if (worker.__hlogistikDpi === value) return;
+  await worker.setParameters({ user_defined_dpi: value });
+  worker.__hlogistikDpi = value;
+}
+
+function countNonEmptyTextLines(text) {
+  return String(text || "")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .length;
+}
+
+function buildPickingOcrCandidate(entry) {
+  const text = (entry.pages || []).join("\n");
+  const parsed = sanitizeBestellscheinHandlingUnitDuplicates(parseOrderText(text), text);
+  const issues = validatePickingImport(text, parsed);
+  const metrics = pickingOcrCandidateMetrics(text, parsed, issues);
+  const score = scorePickingOcrCandidate(metrics);
+  return {
+    ...entry,
+    text,
+    parsed,
+    issues,
+    metrics,
+    score
+  };
+}
+
+function pickingOcrCandidateMetrics(text, parsed, issues = []) {
+  const parsedLines = Array.isArray(parsed?.lines) ? parsed.lines : [];
+  const normalLines = parsedLines.filter((line) => line?.lineType !== "loading-slip");
+  const rawLineCount = countNonEmptyTextLines(text);
+  const sourceLines = String(text || "")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
     .filter(Boolean);
+  const pickingLines = parseLoadingSlipLines(sourceLines).length ? linesBeforeLoadingSlip(sourceLines) : sourceLines;
+  const pickingSource = pickingLines.join("\n");
+  const warehouseLike = isWarehouseLikeText(pickingSource);
+  const expectedWarehouseRows = warehouseLike ? countWarehouseCandidateRows(pickingLines) : 0;
+  const expectedBestellscheinRows = countBestellscheinCandidateRows(pickingLines);
+  const warehouseOrderCount = normalLines.filter((line) => /^\d{6,14}$/.test(String(line.warehouseOrder || ""))).length;
+  const handlingUnitCount = normalLines.filter((line) => String(line.fromHandlingUnit || "").trim()).length;
+  const fromBinCount = normalLines.filter((line) => String(line.fromBin || "").trim()).length;
+  const productCount = normalLines.filter((line) => String(line.product || "").trim()).length;
+  const quantityCount = normalLines.filter((line) => {
+    const quantity = parseImportQuantityValue(line.targetQty);
+    return Number.isFinite(quantity) && quantity > 0;
+  }).length;
+  const toBinCount = normalLines.filter((line) => String(line.toBin || "").trim()).length;
+  const completeRequiredCount = normalLines.filter((line) => {
+    const quantity = parseImportQuantityValue(line.targetQty);
+    return String(line.warehouseOrder || "").trim()
+      && String(line.fromBin || "").trim()
+      && String(line.product || "").trim()
+      && Number.isFinite(quantity)
+      && quantity > 0
+      && String(line.toBin || "").trim();
+  }).length;
+  const missingFromBinCount = normalLines.filter((line) => !String(line.fromBin || "").trim()).length;
+  const suspiciousSourceFieldCount = normalLines.filter((line) => isSuspiciousImportedSourceBin(line)).length;
+  const expectedRows = Math.max(expectedWarehouseRows, expectedBestellscheinRows);
 
-  const uniqueCandidates = [...new Set(candidates)];
-  if (uniqueCandidates.length === 1) return uniqueCandidates[0];
-  return "";
+  return {
+    rawLineCount,
+    textLength: String(text || "").length,
+    parsedLineCount: normalLines.length,
+    expectedWarehouseRows,
+    expectedBestellscheinRows,
+    expectedRows,
+    discardedRows: Math.max(0, expectedRows - normalLines.length),
+    warehouseOrderCount,
+    handlingUnitCount,
+    fromBinCount,
+    productCount,
+    quantityCount,
+    toBinCount,
+    completeRequiredCount,
+    missingFromBinCount,
+    suspiciousSourceFieldCount,
+    issueCount: Array.isArray(issues) ? issues.length : 0
+  };
 }
 
-function lineMatchesPickingBinTarget(target, candidate) {
-  if (!candidate || candidate.lineType === "loading-slip") return false;
-  const targetOrder = normalizeSearchNeedle(target.warehouseOrder);
-  const targetHu = normalizeSearchNeedle(target.fromHandlingUnit);
-  const targetProduct = normalizeSearchNeedle(target.product);
-  let hits = 0;
+function isSuspiciousImportedSourceBin(line) {
+  const fromBin = String(line?.fromBin || "").trim();
+  if (!fromBin) return false;
+  if (String(line?.toBin || "").trim() && fromBin === String(line.toBin || "").trim()) return true;
+  if (String(line?.fromHandlingUnit || "").trim() && fromBin === String(line.fromHandlingUnit || "").trim()) return true;
+  if (String(line?.product || "").trim() && fromBin === String(line.product || "").trim()) return true;
+  if (String(line?.targetQty || "").trim() && fromBin === String(line.targetQty || "").trim()) return true;
+  return false;
+}
 
-  if (targetOrder && normalizeSearchNeedle(candidate.warehouseOrder) === targetOrder) hits += 1;
-  if (targetHu && normalizeSearchNeedle(candidate.fromHandlingUnit) === targetHu) hits += 1;
-  if (targetProduct && normalizeSearchNeedle(candidate.product) === targetProduct) hits += 1;
+function scorePickingOcrCandidate(metrics) {
+  return metrics.completeRequiredCount * 4000
+    + metrics.parsedLineCount * 600
+    + metrics.warehouseOrderCount * 250
+    + metrics.handlingUnitCount * 150
+    + metrics.fromBinCount * 450
+    + metrics.productCount * 250
+    + metrics.quantityCount * 250
+    + metrics.toBinCount * 250
+    + Math.min(metrics.textLength || 0, 800)
+    - metrics.issueCount * 4000
+    - metrics.discardedRows * 800
+    - metrics.missingFromBinCount * 1000
+    - metrics.suspiciousSourceFieldCount * 3000;
+}
 
-  return hits >= 2 || Boolean(targetOrder && normalizeSearchNeedle(candidate.warehouseOrder) === targetOrder);
+function isUsablePickingOcrSelection(selection) {
+  return Number(selection?.score ?? selection?.qualityScore ?? 0) >= PICKING_OCR_MINIMUM_SCORE
+    && Number(selection?.metrics?.parsedLineCount || selection?.selectedCandidate?.metrics?.parsedLineCount || 0) > 0;
+}
+
+function pickingOcrCandidateDiagnostic(candidate) {
+  return {
+    label: candidate.label || "",
+    scale: candidate.scale || "",
+    dpi: candidate.dpi || "",
+    rotation: Number(candidate.rotation || 0),
+    score: Number(candidate.score || 0),
+    metrics: candidate.metrics || {}
+  };
 }
 
 async function readPdfWithOcr(pdf, parseCandidate = parseOrderText, scoreCandidate = scoreOcrCandidate) {
@@ -879,7 +1014,10 @@ async function readPdfWithOcr(pdf, parseCandidate = parseOrderText, scoreCandida
     throw new Error("OCR-Modul konnte nicht geladen werden. Internetverbindung prüfen und Seite neu laden.");
   }
 
-  const worker = await createOcrWorker(pdf.numPages * OCR_ROTATIONS.length, OCR_RENDER_DPI);
+  const worker = await createOcrWorker(
+    pdf.numPages * (OCR_ROTATIONS.length + BESTELLSCHEIN_PRECISE_OCR_SCALES.length),
+    OCR_RENDER_DPI
+  );
   const pages = [];
 
   try {
@@ -993,26 +1131,66 @@ function isBestellscheinOcrCandidate(candidate, parseCandidate) {
 }
 
 function mergeBestellscheinOcrLines(baseLines, preciseLines) {
+  const normalizedBaseLines = Array.isArray(baseLines) ? baseLines : [];
+  const normalizedPreciseLines = Array.isArray(preciseLines) ? preciseLines : [];
+  const baseSignatureCounts = countBestellscheinLineSignatures(normalizedBaseLines);
   const preciseUsed = new Set();
-  return (Array.isArray(baseLines) ? baseLines : []).map((line) => {
-    const preciseIndex = (Array.isArray(preciseLines) ? preciseLines : []).findIndex((candidate, index) => (
-      !preciseUsed.has(index) && isSameBestellscheinOcrLine(line, candidate)
-    ));
+  return normalizedBaseLines.map((line, lineIndex) => {
+    const signature = bestellscheinLineSignature(line);
+    const baseHandlingUnit = cleanBestellscheinBarcode(line?.fromHandlingUnit);
+    const isAmbiguousWeakHu = (!baseHandlingUnit || !isLikelyHandlingUnit(baseHandlingUnit))
+      && baseSignatureCounts.get(signature) > 1;
+    const preciseIndex = findBestellscheinPreciseLineIndex(
+      line,
+      normalizedPreciseLines,
+      preciseUsed,
+      lineIndex,
+      isAmbiguousWeakHu
+    );
     if (preciseIndex === -1) return line;
 
     preciseUsed.add(preciseIndex);
-    const preciseLine = preciseLines[preciseIndex];
+    const preciseLine = normalizedPreciseLines[preciseIndex];
     const fromHandlingUnit = chooseBestellscheinHandlingUnit(line.fromHandlingUnit, preciseLine.fromHandlingUnit);
     if (fromHandlingUnit === line.fromHandlingUnit) return line;
     return { ...line, fromHandlingUnit, fromHandlingUnitEditable: !fromHandlingUnit };
   });
 }
 
+function countBestellscheinLineSignatures(lines) {
+  return (Array.isArray(lines) ? lines : []).reduce((counts, line) => {
+    const signature = bestellscheinLineSignature(line);
+    counts.set(signature, (counts.get(signature) || 0) + 1);
+    return counts;
+  }, new Map());
+}
+
+function findBestellscheinPreciseLineIndex(line, preciseLines, preciseUsed, baseIndex, skipAmbiguousWeakHu) {
+  const matches = (Array.isArray(preciseLines) ? preciseLines : [])
+    .map((candidate, index) => ({ candidate, index }))
+    .filter((entry) => !preciseUsed.has(entry.index) && isSameBestellscheinOcrLine(line, entry.candidate));
+
+  if (!matches.length || skipAmbiguousWeakHu) return -1;
+
+  const sameIndex = matches.find((entry) => entry.index === baseIndex);
+  if (sameIndex) return sameIndex.index;
+
+  matches.sort((left, right) => Math.abs(left.index - baseIndex) - Math.abs(right.index - baseIndex));
+  return matches[0].index;
+}
+
 function isSameBestellscheinOcrLine(left, right) {
   if (!left || !right) return false;
-  return String(left.product || "").trim() === String(right.product || "").trim()
-    && normalizeQuantity(left.targetQty) === normalizeQuantity(right.targetQty)
-    && bestellscheinDescriptionKey(left.description) === bestellscheinDescriptionKey(right.description);
+  return bestellscheinLineSignature(left) === bestellscheinLineSignature(right);
+}
+
+function bestellscheinLineSignature(line) {
+  if (!line) return "";
+  return [
+    String(line.product || "").trim(),
+    normalizeQuantity(line.targetQty),
+    bestellscheinDescriptionKey(line.description)
+  ].join("|");
 }
 
 function bestellscheinDescriptionKey(value) {
@@ -1027,7 +1205,7 @@ function chooseBestellscheinHandlingUnit(baseValue, preciseValue) {
   const precise = cleanBestellscheinBarcode(preciseValue);
   if (!base && precise) return precise;
   if (!precise || precise === base) return base;
-  if (base.length === precise.length && base.slice(0, 6) === precise.slice(0, 6)) return precise;
+  if (!isLikelyHandlingUnit(base) && isLikelyHandlingUnit(precise)) return precise;
   return base;
 }
 
@@ -1038,13 +1216,41 @@ function cleanBestellscheinBarcode(value) {
 }
 
 function buildBestellscheinOcrText(sourceText, lines) {
-  const headerMatch = String(sourceText || "").match(/^[\s\S]*?(?=\n\s*\d{6,8}\b)/);
-  const header = headerMatch ? headerMatch[0].trim() : "";
+  const header = bestellscheinOcrHeaderText(sourceText);
   const body = (Array.isArray(lines) ? lines : [])
     .filter((line) => line?.product && line?.targetQty)
     .map(bestellscheinLineToOcrText)
     .join("\n");
   return [header, body].filter(Boolean).join("\n");
+}
+
+function bestellscheinOcrHeaderText(sourceText) {
+  const lines = String(sourceText || "")
+    .replace(/\r/g, "\n")
+    .split("\n");
+  const firstBodyIndex = lines.findIndex((line) => isBestellscheinRowStart(line));
+  const headerLines = firstBodyIndex >= 0 ? lines.slice(0, firstBodyIndex) : lines;
+  const headerText = headerLines.join("\n").trim();
+  const orderHintText = bestellscheinOrderHintContextText(lines, headerText);
+  return [headerText, orderHintText].filter(Boolean).join("\n");
+}
+
+function bestellscheinOrderHintContextText(lines, headerText) {
+  if (/\bbestell\s*-?\s*hinweis\b/i.test(headerText)) return "";
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = String(lines[index] || "").replace(/\s+/g, " ").trim();
+    if (!/\bbestell\s*-?\s*hinweis\b/i.test(line)) continue;
+
+    const context = [line];
+    const labelMatch = line.match(/\bbestell\s*-?\s*hinweis\b\s*[:#-]?\s*(.*)$/i);
+    const hasSameLineValue = Boolean(String(labelMatch?.[1] || "").trim());
+    const nextLine = String(lines[index + 1] || "").replace(/\s+/g, " ").trim();
+    if (!hasSameLineValue && nextLine && !isBestellscheinRowStart(nextLine)) context.push(nextLine);
+    return context.join("\n");
+  }
+
+  return "";
 }
 
 function bestellscheinLineToOcrText(line) {
@@ -1179,7 +1385,149 @@ function bestellscheinPageNotice(text, pdfPageCount) {
   return "";
 }
 
-async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
+function pickingImportDiagnostics(text, parsed = {}, info = {}) {
+  const source = String(text || "");
+  const lines = source
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const loadingSlipLines = parseLoadingSlipLines(lines);
+  const pickingLines = loadingSlipLines.length ? linesBeforeLoadingSlip(lines) : lines;
+  const pickingSource = pickingLines.join("\n");
+  const warehouseLike = isWarehouseLikeText(pickingSource);
+
+  const parsedLineCount = Array.isArray(parsed.lines) ? parsed.lines.length : 0;
+  return {
+    source: info.source || "",
+    pdfPages: Number(info.pdfPages || 0),
+    ocrScale: info.ocrScale || "",
+    ocrDpi: info.ocrDpi || "",
+    ocrPreciseScale: info.ocrPreciseScale || "",
+    ocrPreciseDpi: info.ocrPreciseDpi || "",
+    ocrRotations: Array.isArray(info.ocrRotations) ? info.ocrRotations : [],
+    ocrScales: Array.isArray(info.ocrScales) ? info.ocrScales : [],
+    ocrDpis: Array.isArray(info.ocrDpis) ? info.ocrDpis : [],
+    ocrRotation: info.ocrRotation ?? "",
+    selectedCandidate: info.selectedCandidate || null,
+    ocrCandidates: Array.isArray(info.ocrCandidates) ? info.ocrCandidates : [],
+    qualityScore: info.qualityScore ?? null,
+    minimumQualityScore: info.minimumQualityScore ?? PICKING_OCR_MINIMUM_SCORE,
+    qualityAccepted: info.qualityAccepted === true,
+    ocrError: info.ocrError || "",
+    binValidationApplied: info.binValidationApplied === true,
+    binCorrectionApplied: info.binCorrectionApplied === true,
+    binRuleNormalizationApplied: false,
+    textAvailable: Boolean(source.trim()),
+    textLength: source.length,
+    rawLineCount: lines.length,
+    pickingLineCount: pickingLines.length,
+    warehouseLike,
+    expectedWarehouseRows: warehouseLike ? countWarehouseCandidateRows(pickingLines) : 0,
+    expectedBestellscheinRows: countBestellscheinCandidateRows(pickingLines),
+    parsedLineCount,
+    discardedWarehouseRows: Math.max(0, (warehouseLike ? countWarehouseCandidateRows(pickingLines) : 0) - parsedLineCount),
+    orderNumberDetected: Boolean(String(parsed.orderNumber || "").trim()),
+    customerDetected: Boolean(String(parsed.customerName || "").trim())
+  };
+}
+
+function logPickingImportDiagnostics(reason, diagnostics) {
+  console.warn("PDF-Import Diagnose", {
+    reason,
+    ...diagnostics
+  });
+}
+
+function pickingImportNoLinesMessage(text, diagnostics) {
+  if (!String(text || "").trim()) return "Keine lesbaren Inhalte gefunden.";
+  if (diagnostics?.warehouseLike) {
+    return "Text gelesen, aber keine Lageraufgaben-Position erkannt. Import abgebrochen.";
+  }
+  return "Text gelesen, aber keine Tabellenzeilen erkannt. Import abgebrochen.";
+}
+
+function buildPickingImportLineDiagnostics(rawLines, finalLines = rawLines) {
+  const sourceLines = Array.isArray(rawLines) ? rawLines : [];
+  const resultLines = Array.isArray(finalLines) ? finalLines : sourceLines;
+
+  return sourceLines.map((line, index) => {
+    const finalLine = resultLines[index] || line || {};
+    const rawFromBin = String(line?.fromBin || "").trim();
+    const finalFromBin = String(finalLine?.fromBin || "").trim();
+    const warehouseOrder = String(line?.warehouseOrder || finalLine?.warehouseOrder || "").trim();
+    const fromHandlingUnit = String(line?.fromHandlingUnit || finalLine?.fromHandlingUnit || "").trim();
+    const product = String(line?.product || finalLine?.product || "").trim();
+
+    return {
+      position: index + 1,
+      tableRowKey: [warehouseOrder, fromHandlingUnit, product].filter(Boolean).join(" | "),
+      warehouseOrder,
+      fromHandlingUnit,
+      product,
+      rawFromBin,
+      finalFromBin,
+      toBin: String(line?.toBin || finalLine?.toBin || "").trim(),
+      changed: rawFromBin !== finalFromBin,
+      reason: pickingImportBinDiagnosticReason(rawFromBin, finalFromBin)
+    };
+  });
+}
+
+function pickingImportBinDiagnosticReason(rawFromBin, finalFromBin) {
+  if (rawFromBin === finalFromBin) {
+    return rawFromBin
+      ? "Rohwert unveraendert uebernommen; keine Stellplatzvalidierung oder -korrektur angewendet."
+      : "Kein Rohwert aus Von-Lagerplatz erkannt; kein Stellplatz abgeleitet.";
+  }
+  if (!rawFromBin && finalFromBin) {
+    return "Finaler Stellplatz wurde gesetzt, obwohl kein Rohwert vorhanden war.";
+  }
+  if (rawFromBin && !finalFromBin) {
+    return "Finaler Stellplatz ist leer, Rohwert wurde nicht uebernommen.";
+  }
+  return "Finaler Stellplatz weicht vom Rohwert ab.";
+}
+
+function logPickingImportLineDiagnostics(diagnostics, importDiagnostics = {}) {
+  const positions = Array.isArray(diagnostics) ? diagnostics : [];
+  if (!positions.length) return;
+  console.info("PDF-Import Positionsdiagnose", {
+    source: importDiagnostics.source || "",
+    pdfPages: importDiagnostics.pdfPages || 0,
+    ocrScale: importDiagnostics.ocrScale || "",
+    ocrDpi: importDiagnostics.ocrDpi || "",
+    ocrPreciseScale: importDiagnostics.ocrPreciseScale || "",
+    ocrPreciseDpi: importDiagnostics.ocrPreciseDpi || "",
+    ocrRotations: importDiagnostics.ocrRotations || [],
+    ocrScales: importDiagnostics.ocrScales || [],
+    ocrDpis: importDiagnostics.ocrDpis || [],
+    ocrRotation: importDiagnostics.ocrRotation ?? "",
+    selectedCandidate: importDiagnostics.selectedCandidate || null,
+    ocrCandidates: importDiagnostics.ocrCandidates || [],
+    qualityScore: importDiagnostics.qualityScore ?? null,
+    minimumQualityScore: importDiagnostics.minimumQualityScore ?? PICKING_OCR_MINIMUM_SCORE,
+    qualityAccepted: importDiagnostics.qualityAccepted === true,
+    binValidationApplied: false,
+    binCorrectionApplied: false,
+    note: "Keine Stellplatzvalidierung, keine Stellplatzkorrektur, kein Regelabgleich im PDF-Importpfad.",
+    positions
+  });
+}
+
+async function importText(text, fileName = "", parsed = parseOrderText(text), importDiagnostics = {}) {
+  if (!Array.isArray(parsed.lines) || !parsed.lines.length) {
+    const diagnostics = pickingImportDiagnostics(text, parsed, importDiagnostics);
+    logPickingImportDiagnostics("no-position-lines", diagnostics);
+    return {
+      lines: 0,
+      cancelled: true,
+      type: "error",
+      message: pickingImportNoLinesMessage(text, diagnostics),
+      diagnostics
+    };
+  }
+
   const duplicate = await findDuplicateOrderForImport(parsed.orderNumber, "picking", text);
   if (duplicate) {
     return {
@@ -1203,6 +1551,11 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
   clearCurrentOrder();
   state.orderType = "picking";
   state.rawText = text;
+  state.originalFileName = String(fileName || "").trim();
+  state.originalFilePath = "";
+  state.originalArchivedAt = "";
+  state.originalArchivePath = "";
+  state.originalArchiveError = "";
   state.orderDate = new Date().toISOString().slice(0, 10);
   state.orderTime = currentTimeValue();
   state.awaitingRelease = true;
@@ -1215,22 +1568,13 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
   if (parsed.customerName && !state.customerName) state.customerName = parsed.customerName;
   state.customerGroupKey = parsed.customerGroupKey || customerGroupKeyForImport(state.customerName);
 
-  const fallbackLine = parsed.lines.length ? null : fallbackImportLine(text);
-  if (!parsed.lines.length && !fallbackLine) {
-    clearCurrentOrder();
-    render();
-    return {
-      lines: 0,
-      cancelled: true,
-      message: "Lagerauftrag erkannt, aber keine vollstaendige Position gelesen. Import abgebrochen."
-    };
-  }
-
-  const nextLines = parsed.lines.length ? parsed.lines : [fallbackLine];
+  const nextLines = parsed.lines;
   const warehouseHint = await detectPickingWarehouse(nextLines, text);
   applyWarehouseHint(warehouseHint);
   const binResult = await applyStorageBinsFromArticleStock(nextLines);
   state.lines = binResult.lines;
+  const lineDiagnostics = buildPickingImportLineDiagnostics(nextLines, state.lines);
+  logPickingImportLineDiagnostics(lineDiagnostics, importDiagnostics);
   applyDefaultDestinationCustomer(state.lines);
   applyCustomerOrderNumberRule();
   topControlsCollapsed = false;
@@ -1242,7 +1586,10 @@ async function importText(text, _fileName = "", parsed = parseOrderText(text)) {
     autoBins: binResult.applied,
     warehouseHint,
     binCorrections: Number(parsed.binCorrections || 0),
-    binWarnings: countOpenBinWarnings(state.lines)
+    binWarnings: countOpenBinWarnings(state.lines),
+    importDiagnostics: lineDiagnostics,
+    diagnostics: importDiagnostics,
+    originalFileName: state.originalFileName
   };
 }
 
@@ -1394,38 +1741,92 @@ async function applyStorageBinsFromArticleStock(lines) {
     }
   }));
 
-  let applied = 0;
+  const applied = 0;
   const enriched = lines.map((line) => {
     const materialnummer = String(line.product || "").trim();
     const handlingUnit = normalizeHandlingUnitLookup(line.fromHandlingUnit);
     if (!materialnummer || !handlingUnit) return line;
 
-    const match = (locationsByMaterial.get(materialnummer) || []).find((location) => (
-      normalizeHandlingUnitLookup(location.leNummer || location.le_nummer) === handlingUnit
-    ));
+    const match = findArticleStockLocationForLine(line, locationsByMaterial.get(materialnummer) || []);
     if (!match?.lagerplatz) return line;
 
-    const nextBin = String(match.lagerplatz || "").trim();
     const stockQty = Number(match.mengeStueck || match.menge_stueck || 0) || 0;
-    const quantityRemark = storageQuantityRemarkForLine(line, stockQty);
-    const nextAutoNotes = setAutoPositionNote(line.autoPositionNotes, "quantity", quantityRemark);
-    const binChanged = Boolean(nextBin && String(line.fromBin || "").trim().toUpperCase() !== nextBin.toUpperCase());
+    const correctedQuantity = correctedOcrWarehouseQuantityFromStock(line, stockQty);
+    const quantityLine = correctedQuantity
+      ? { ...line, targetQty: correctedQuantity, actualQty: correctedQuantity }
+      : line;
+    const quantityRemark = storageQuantityRemarkForLine(quantityLine, stockQty);
+    let nextAutoNotes = setAutoPositionNote(line.autoPositionNotes, "quantity", quantityRemark);
+    nextAutoNotes = setAutoPositionNote(
+      nextAutoNotes,
+      "quantityCorrection",
+      correctedQuantity ? `OCR-Menge korrigiert: ${line.targetQty} -> ${correctedQuantity}` : ""
+    );
     const noteChanged = JSON.stringify(nextAutoNotes) !== JSON.stringify(normalizeAutoPositionNotes(line.autoPositionNotes));
+    const quantityChanged = Boolean(correctedQuantity && correctedQuantity !== String(line.targetQty || "").trim());
 
-    if (!binChanged && !noteChanged && Number(line.stockQty || 0) === stockQty) return line;
+    if (!noteChanged && !quantityChanged && Number(line.stockQty || 0) === stockQty) return line;
 
-    if (binChanged) applied += 1;
     return {
       ...line,
-      fromBin: binChanged ? nextBin : line.fromBin,
-      binWarning: binChanged ? "" : line.binWarning || "",
-      binWarningValue: binChanged ? "" : line.binWarningValue || "",
+      targetQty: correctedQuantity || line.targetQty,
+      actualQty: correctedQuantity && !lineWasManuallyQuantityEdited(line)
+        ? correctedQuantity
+        : line.actualQty,
+      fromBin: line.fromBin,
+      binWarning: line.binWarning || "",
+      binWarningValue: line.binWarningValue || "",
       autoPositionNotes: nextAutoNotes,
       stockQty
     };
   });
 
   return { lines: enriched, applied };
+}
+
+function findArticleStockLocationForLine(line, locations) {
+  const candidates = Array.isArray(locations) ? locations : [];
+  const handlingUnit = normalizeHandlingUnitLookup(line?.fromHandlingUnit);
+  if (handlingUnit) {
+    const handlingUnitMatch = candidates.find((location) => (
+      normalizeHandlingUnitLookup(location.leNummer || location.le_nummer) === handlingUnit
+    ));
+    if (handlingUnitMatch) return handlingUnitMatch;
+  }
+
+  const fromBin = normalizePickingBinText(line?.fromBin);
+  if (!fromBin) return null;
+
+  const binMatches = candidates.filter((location) => (
+    normalizePickingBinText(location.lagerplatz) === fromBin
+  ));
+
+  return binMatches.length === 1 ? binMatches[0] : null;
+}
+
+function correctedOcrWarehouseQuantityFromStock(line, stockQty) {
+  const original = normalizeQuantity(line?.targetQty);
+  const stockQuantity = Number(stockQty || 0);
+  if (!isSuspiciousLeadingZeroOcrQuantity(original) || !Number.isInteger(stockQuantity) || stockQuantity <= 0) return "";
+
+  const originalDigits = original.replace(/\D/g, "");
+  const stockDigits = String(stockQuantity);
+  const significantOriginalDigits = originalDigits.replace(/^0+/, "");
+  if (!significantOriginalDigits) return "";
+
+  if (stockDigits === significantOriginalDigits && stockDigits !== originalDigits) return stockDigits;
+  if (stockDigits === `9${originalDigits.slice(1)}`) return stockDigits;
+  return "";
+}
+
+function isSuspiciousLeadingZeroOcrQuantity(value) {
+  return /^0\d{2,3}$/.test(String(value || "").trim());
+}
+
+function lineWasManuallyQuantityEdited(line) {
+  const actual = String(line?.actualQty || "").trim();
+  const target = String(line?.targetQty || "").trim();
+  return Boolean(actual && target && actual !== target);
 }
 
 function storageQuantityRemarkForLine(line, stockQty) {
@@ -1455,6 +1856,11 @@ async function importStorageText(text, fileName = "", parsed = parseStorageSlipT
   state.orderType = "storage";
   state.orderWarehouse = currentWarehouse();
   state.rawText = text;
+  state.originalFileName = String(fileName || "").trim();
+  state.originalFilePath = "";
+  state.originalArchivedAt = "";
+  state.originalArchivePath = "";
+  state.originalArchiveError = "";
   state.orderDate = new Date().toISOString().slice(0, 10);
   state.orderTime = currentTimeValue();
   state.orderNumber = parsed.orderNumber || await nextStorageOrderNumber();
@@ -1464,7 +1870,7 @@ async function importStorageText(text, fileName = "", parsed = parseStorageSlipT
   topControlsCollapsed = state.lines.length > 0;
   markOrderTouched();
   saveAndRender();
-  return { lines: parsed.lines.length, warnings: parsed.warnings || [] };
+  return { lines: parsed.lines.length, warnings: parsed.warnings || [], originalFileName: state.originalFileName };
 }
 
 async function nextStorageOrderNumber() {
@@ -1532,6 +1938,10 @@ function setImportStatus(message, type = "", progress = null) {
   }
 }
 
+function importSuccessMessage(positionCount) {
+  return `Auftrag erfolgreich importiert. Anzahl an Positionen: ${positionCount}.`;
+}
+
 function renderWarehouseHint() {
   if (!elements.warehouseHint) return;
   const message = String(state.warehouseHint || "").trim();
@@ -1581,11 +1991,12 @@ function parseOrderText(text) {
   const loadingSlipLines = parseLoadingSlipLines(cleanedLines);
   const pickingLines = loadingSlipLines.length ? linesBeforeLoadingSlip(cleanedLines) : cleanedLines;
 
-  const orderNumber = findFirst(text, [
-    /Bestellschein\s*Nr\.?\s*[:.-]?\s*([A-Z0-9-]{4,})/i,
-    /(?:^|\n)\s*(?:auftragsnr\.?|auftragsnummer|belegnr\.?)\s*[:#-]?\s*([A-Z0-9-]{4,})/i,
-    /(?:^|\n)\s*(?:auftrag|kommission|lieferschein)\s*[:#-]\s*([A-Z0-9-]{4,})/i
+  const printedOrderNumber = findFirst(text, [
+    /Bestellschein\s*Nr\.?\s*[:.-]?\s*([A-Z0-9-]{4,}(?:\s*-\s*[^\n\t]{2,80})?)/i,
+    /(?:^|\n)\s*(?:auftragsnr\.?|auftragsnummer|belegnr\.?)\s*[:#-]?\s*([A-Z0-9-]{4,}(?:\s*-\s*[^\n\t]{2,80})?)/i,
+    /(?:^|\n)\s*(?:auftrag|kommission|lieferschein)\s*[:#-]\s*([A-Z0-9-]{4,}(?:\s*-\s*[^\n\t]{2,80})?)/i
   ]);
+  const orderNumber = appendOrderHintFromText(printedOrderNumber, text);
   const explicitCustomerName = findFirst(text, [
     /Auslagerung\s*[:#-]?\s*([^\n\t]{3,80})/i,
     /(?:kunde|lieferadresse|empf.{0,3}nger)\s*[:#-]?\s*([^\n\t]{3,80})/i,
@@ -1603,7 +2014,7 @@ function parseOrderText(text) {
 
   if (warehouseRows.length) {
     return {
-      orderNumber: "",
+      orderNumber: orderNumber || "",
       customerName: customerName || "",
       customerGroupKey,
       lines: appendLoadingSlipLines(warehouseRows.map((line) => createLine({
@@ -1670,6 +2081,14 @@ function parseOrderText(text) {
       actualQty: line.targetQty
     })), loadingSlipLines)
   };
+}
+
+function appendOrderHintFromText(orderNumber, text) {
+  const rules = window.HLogistikOrderHintRules;
+  if (!rules || typeof rules.extractOrderHint !== "function" || typeof rules.appendOrderHintToOrderNumber !== "function") {
+    return String(orderNumber || "").trim();
+  }
+  return rules.appendOrderHintToOrderNumber(orderNumber, rules.extractOrderHint(text));
 }
 
 function appendLoadingSlipLines(lines, loadingSlipLines) {
@@ -1990,9 +2409,6 @@ function validatePickingImport(text, parsed) {
 
     if (!String(line.product || "").trim()) issues.push(`${label}: Artikelnummer fehlt.`);
     if (!quantity || quantity <= 0) issues.push(`${label}: Menge fehlt oder ist ungueltig.`);
-    if (line.lineType !== "loading-slip" && isWarehouseLikeText(source) && !String(line.fromBin || "").trim()) {
-      issues.push(`${label}: Von-Lagerplatz fehlt.`);
-    }
   });
 
   return issues;
@@ -2069,11 +2485,6 @@ function parseImportQuantityValue(value) {
   const multiplier = normalized.match(/^(\d+)x(\d+(?:\.\d+)?)$/i);
   if (multiplier) return Number(multiplier[1]) * Number(multiplier[2]);
   return Number(normalized);
-}
-
-function fallbackImportLine(text) {
-  if (isWarehouseLikeText(text)) return null;
-  return createLine({ description: String(text || "").slice(0, 140) });
 }
 
 function collectBestellscheinRows(lines) {
@@ -2316,7 +2727,7 @@ function parseWarehouseLine(line) {
   const remaining = tokens.slice(cursor);
 
   if (!product || !targetQty || remaining.length === 0) {
-    return parseWarehouseLineByColumns(normalizedLine) || parseWarehouseLineLoose(normalizedLine);
+    return parseWarehouseLineByColumns(normalizedLine) || parseWarehouseLineWithoutBin(normalizedLine) || parseWarehouseLineLoose(normalizedLine);
   }
   if (isSuspiciousMultiplierQuantity(targetQty)) return null;
 
@@ -2384,6 +2795,54 @@ function hasIntermediateWarehouseColumn(tokens, firstNumber, binIndex) {
   if (!intermediateTokens.length) return false;
   if (extractHandlingUnit(intermediateTokens.join(" "))) return false;
   return intermediateTokens.some((token) => /^\d{2,6}$/.test(String(token || "")));
+}
+
+function parseWarehouseLineWithoutBin(line) {
+  const tokens = warehouseTokens(normalizeOcrWarehouseLine(line));
+  const firstNumber = tokens.findIndex((token) => /^\d{6,}$/.test(token));
+  if (firstNumber === -1) return null;
+
+  const warehouseOrder = tokens[firstNumber];
+  let cursor = firstNumber + 1;
+  const handlingUnitInfo = parseHandlingUnitTokens(tokens, cursor);
+  const fromHandlingUnit = handlingUnitInfo.value;
+  cursor = handlingUnitInfo.next;
+  const productStart = cursor;
+  const productInfo = parseProductTokens(tokens, cursor);
+  const product = productInfo.value;
+  if (!product) return null;
+
+  const beforeProductText = tokens.slice(firstNumber + 1, productStart).join(" ");
+  if (extractBin(beforeProductText)) return null;
+
+  let unitIndex = -1;
+  let quantityIndex = -1;
+  for (let index = productInfo.next + 1; index < tokens.length; index += 1) {
+    if (!isUnitToken(tokens[index])) continue;
+    const quantity = parseQuantityToken(tokens[index - 1]);
+    if (!quantity || isSuspiciousMultiplierQuantity(quantity.value)) continue;
+    unitIndex = index;
+    quantityIndex = index - 1;
+    break;
+  }
+  if (unitIndex === -1 || quantityIndex === -1) return null;
+
+  const descriptionBeforeQuantity = tokens.slice(productInfo.next, quantityIndex).join(" ");
+  const afterUnit = tokens.slice(unitIndex + 1).join(" ");
+  const toBin = extractDestinationBin(afterUnit);
+  const description = cleanProductDescription([descriptionBeforeQuantity, afterUnit].filter(Boolean).join(" "), toBin);
+  if (!description && !toBin) return null;
+
+  return {
+    warehouseOrder,
+    fromHandlingUnit,
+    fromBin: "",
+    product,
+    description,
+    targetQty: normalizeQuantity(parseQuantityToken(tokens[quantityIndex])?.value || ""),
+    unit: normalizeUnit(tokens[unitIndex]),
+    toBin
+  };
 }
 
 function destinationToCustomerGroupFallback(lines) {
@@ -2649,17 +3108,29 @@ function warehouseHeaderKey(line) {
 
 function isWarehouseRowStart(line) {
   const normalizedLine = normalizeOcrWarehouseLine(line);
-  const match = normalizedLine.match(/^[^\d]{0,12}(\d{6,9})\b/);
+  const match = normalizedLine.match(/^[^\d]{0,12}(\d{6,14})\b/);
   if (!match) return false;
 
   const rest = normalizedLine.slice(match[0].length);
-  return Boolean(extractHandlingUnit(rest) || extractBin(rest) || findProductQuantityMatch(rest));
+  const restTokens = warehouseTokens(rest);
+  const handlingUnitInfo = parseHandlingUnitTokens(restTokens, 0);
+  return Boolean(handlingUnitInfo.value || extractHandlingUnit(rest) || extractBin(rest) || findProductQuantityMatch(rest));
 }
 
 function splitPossibleMergedWarehouseRows(text) {
-  return normalizeOcrWarehouseLine(text)
-    .split(/\s+(?=[^\d]{0,12}\d{6,9}\s+(?:[0-9OoQD]{10,}|[0OQD]{0,2}\d{1,3}-[A-Z0-9]{1,4}-[A-Z0-9C]{2,8}|\d{4,8}\D{0,12}\d))/i)
+  const parts = normalizeOcrWarehouseLine(text)
+    .split(/\s+(?=[^\d]{0,12}\d{6,14}\s+(?:[0-9OoQD]{10,}|\d{1,3}-[A-Z0-9]{1,4}-[A-Z0-9C]{2,8}|\d{4,8}\D{0,12}\d))/i)
     .filter((part) => part !== text);
+  if (parts.length <= 1) return [];
+  return parts.every(isPotentialWarehouseSplitPart) ? parts : [];
+}
+
+function isPotentialWarehouseSplitPart(text) {
+  return Boolean(
+    parseWarehouseLine(text)
+    || parseWarehouseHeader(text)
+    || extractWarehouseContinuations(text).length
+  );
 }
 
 function normalizeOcrWarehouseLine(line) {
@@ -2741,7 +3212,7 @@ function parseHandlingUnitTokens(tokens, cursor) {
   const current = normalizeHandlingUnitToken(tokens[cursor] || "");
   const next = normalizeHandlingUnitToken(tokens[cursor + 1] || "");
 
-  if (current.length >= 8 && next && isHandlingUnitContinuationToken(tokens[cursor + 1]) && `${current}${next}`.length <= 20) {
+  if (current.length >= 10 && next && isHandlingUnitContinuationToken(tokens[cursor + 1]) && `${current}${next}`.length <= 20) {
     return { value: `${current}${next}`, next: cursor + 2 };
   }
   if (current.length >= 8) return { value: current, next: cursor + 1 };
@@ -2882,9 +3353,9 @@ function extractHandlingUnit(text) {
 }
 
 function extractBin(text) {
-  const match = text.match(/\b[0OQD]{0,2}\d{1,3}-[A-Z0-9]{1,4}-[A-Z0-9C]{2,8}\b/i);
+  const match = text.match(/\b\d{1,3}-[A-Z0-9]{1,4}-[A-Z0-9C]{2,8}\b/i);
   if (!match) return "";
-  return match[0].replace(/^[OQD]/i, "0").toUpperCase();
+  return cleanImportedWarehouseBin(match[0]);
 }
 
 function extractDestinationBin(text) {
@@ -3008,6 +3479,7 @@ function normalizeAutoPositionNotes(notes) {
   return {
     destination: String(source.destination || "").trim(),
     quantity: String(source.quantity || "").trim(),
+    quantityCorrection: String(source.quantityCorrection || "").trim(),
     storagePallet: String(source.storagePallet || "").trim(),
     loadingSlip: String(source.loadingSlip || "").trim()
   };
@@ -3021,7 +3493,7 @@ function setAutoPositionNote(notes, key, value) {
 
 function autoPositionNoteValues(line) {
   const notes = normalizeAutoPositionNotes(line?.autoPositionNotes);
-  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip]
+  return [notes.destination, notes.quantity, notes.quantityCorrection, notes.storagePallet, notes.loadingSlip]
     .map((value) => String(value || "").trim())
     .filter(Boolean);
 }
@@ -3276,7 +3748,7 @@ function render() {
     }
 
     map.picked.setAttribute("aria-pressed", line.picked ? "true" : "false");
-    const canEditHandlingUnit = isStorageLine || line.fromHandlingUnitEditable === true || isMissingOrIncompleteHandlingUnit(line.fromHandlingUnit);
+    const canEditHandlingUnit = isStorageLine || state.awaitingRelease || line.fromHandlingUnitEditable === true || isMissingOrIncompleteHandlingUnit(line.fromHandlingUnit);
     map.fromHandlingUnit.value = storageHandlingUnitDisplayValue(line.fromHandlingUnit, useSsiStorageHuPrefix);
     map.positionNote.value = combinedPositionNote(line);
     map.fromBin.value = line.fromBin || "";
@@ -3301,8 +3773,12 @@ function render() {
       : map.fromHandlingUnit.placeholder;
     if (isManualStorageLine) {
       map.targetQty.closest("label")?.remove();
+      map.actualQty.placeholder = "Stückzahl";
+      map.actualQty.setAttribute("aria-label", "Stückzahl");
     } else {
       map.targetQty.readOnly = true;
+      map.actualQty.placeholder = "Ist";
+      map.actualQty.setAttribute("aria-label", "Ist");
     }
     map.actualQty.readOnly = false;
     map.actualQty.classList.remove("readonly-input");
@@ -3379,6 +3855,10 @@ function renderStorageLineActions() {
     elements.manualStoragePositionCountInput.min = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN);
     elements.manualStoragePositionCountInput.max = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX);
   }
+  if (elements.manualStorageQuantityInput) {
+    elements.manualStorageQuantityInput.disabled = !isStorage;
+    elements.manualStorageQuantityInput.min = "1";
+  }
 }
 
 function renderBinWarning(item, message) {
@@ -3398,6 +3878,12 @@ async function addManualStorageLine() {
     elements.manualStoragePositionCountInput?.focus();
     return;
   }
+  const quantityResult = readManualStoragePositionQuantity();
+  if (!quantityResult.ok) {
+    setServerStatus(quantityResult.error, "error");
+    elements.manualStorageQuantityInput?.focus();
+    return;
+  }
   const material = normalizeDigits(elements.manualStorageMaterialInput?.value || "");
   const preset = await manualStorageLinePreset(material);
 
@@ -3412,17 +3898,18 @@ async function addManualStorageLine() {
   state.createdBy = state.createdBy || currentUser.name;
   state.awaitingRelease = state.awaitingRelease || !state.id;
   for (let index = 0; index < countResult.value; index += 1) {
-    state.lines.push(createManualStorageLine(preset));
+    state.lines.push(createManualStorageLine(preset, { actualQty: quantityResult.value }));
   }
   if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.value = "";
   if (elements.manualStoragePositionCountInput) elements.manualStoragePositionCountInput.value = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT);
+  if (elements.manualStorageQuantityInput) elements.manualStorageQuantityInput.value = "1";
   topControlsCollapsed = false;
   markOrderTouched();
   saveAndRender();
   setServerStatus(`${countResult.value} manuelle Einlagerposition${countResult.value === 1 ? "" : "en"} angelegt.`, "ok");
 }
 
-function createManualStorageLine(preset = {}) {
+function createManualStorageLine(preset = {}, options = {}) {
   return createLine({
     orderType: "storage",
     manual: true,
@@ -3431,9 +3918,9 @@ function createManualStorageLine(preset = {}) {
     fromHandlingUnitEditable: true,
     product: preset.product || "",
     description: preset.description || "",
-    fromBin: preset.fromBin || "",
+    fromBin: "",
     targetQty: "",
-    actualQty: "",
+    actualQty: options.actualQty || "",
     unit: preset.unit || "Stk"
   });
 }
@@ -3467,6 +3954,19 @@ function readManualStoragePositionCreateCount() {
   return { ok: true, value, error: "" };
 }
 
+function readManualStoragePositionQuantity() {
+  const raw = String(elements.manualStorageQuantityInput?.value || "").trim();
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(value) || value <= 0) {
+    return {
+      ok: false,
+      value: "",
+      error: "Stückzahl muss eine positive ganze Zahl sein."
+    };
+  }
+  return { ok: true, value: String(value), error: "" };
+}
+
 async function manualStorageLinePreset(material) {
   const product = normalizeDigits(material);
   if (!product) return {};
@@ -3475,7 +3975,6 @@ async function manualStorageLinePreset(material) {
     const article = await apiJson(`/api/articles/lookup/${encodeURIComponent(product)}?warehouse=${encodeURIComponent(currentOrderWarehouse())}`);
     preset.product = String(article.materialnummer || product).trim();
     preset.description = String(article.materialbezeichnung || "").trim();
-    preset.fromBin = String(article.lagerplatz || "").trim();
   } catch {
     // Artikelstamm-Lookup ist Komfort; unbekannte Artikel bleiben manuell erfassbar.
   }
@@ -4944,6 +5443,11 @@ function currentOrderPayload({ touch = true } = {}) {
     exportedAt: state.exportedAt || "",
     exportedPdfFile: state.exportedPdfFile || "",
     exportedPdfPath: state.exportedPdfPath || "",
+    originalFileName: state.originalFileName || "",
+    originalFilePath: state.originalFilePath || "",
+    originalArchivedAt: state.originalArchivedAt || "",
+    originalArchivePath: state.originalArchivePath || "",
+    originalArchiveError: state.originalArchiveError || "",
     orderType,
     orderWarehouse,
     lines
@@ -5084,6 +5588,11 @@ function clearCurrentOrder() {
     exportedAt: "",
     exportedPdfFile: "",
     exportedPdfPath: "",
+    originalFileName: "",
+    originalFilePath: "",
+    originalArchivedAt: "",
+    originalArchivePath: "",
+    originalArchiveError: "",
     orderType: currentMode,
     orderWarehouse: "",
     awaitingRelease: false,
@@ -5217,11 +5726,12 @@ async function exportPdf() {
     const stockText = state.orderType === "storage"
       ? stockReceiptSummary(result.stockReceipt, result.storageArticles)
       : stockIssueSummary(result.stockIssue, result.stockWarehouse);
+    const archiveText = originalArchiveSummary(result.archiveOriginal);
     resetCurrentOrderView();
     showExportMessage(
       exportedPath
-        ? `PDF gespeichert: ${exportedPath}${copyPath ? ` | Kopie: ${copyPath}` : ""}${stockText ? ` | ${stockText}` : ""}`
-        : `${exportedFile} gespeichert.`
+        ? `PDF gespeichert: ${exportedPath}${copyPath ? ` | Kopie: ${copyPath}` : ""}${stockText ? ` | ${stockText}` : ""}${archiveText ? ` | ${archiveText}` : ""}`
+        : `${exportedFile} gespeichert.${archiveText ? ` ${archiveText}` : ""}`
     );
     showStockIssueErrors(result.stockIssue);
     await loadOrderList();
@@ -5259,6 +5769,17 @@ function stockIssueSummary(stockIssue, stockWarehouse = "") {
   if (!booked && !errors) return "Keine Bestandsbuchung";
   const warehouse = normalizeOptionalWarehouse(stockWarehouse);
   return `${booked} Bestandsbuchung(en)${warehouse ? ` aus ${warehouse}` : ""}${errors ? `, ${errors} Fehler` : ""}`;
+}
+
+function originalArchiveSummary(archiveOriginal) {
+  if (!archiveOriginal || typeof archiveOriginal !== "object") return "";
+  if (archiveOriginal.archived) {
+    return `Original archiviert: ${archiveOriginal.archivePath || archiveOriginal.fileName || "Archiv"}`;
+  }
+  if (archiveOriginal.reason === "already-archived") return "Original war bereits archiviert.";
+  if (archiveOriginal.reason === "missing-original-file") return "Original nicht archiviert: kein Originaldateiname am Auftrag.";
+  if (archiveOriginal.error) return `Original nicht archiviert: ${archiveOriginal.error}`;
+  return "";
 }
 
 function stockReceiptSummary(stockReceipt, storageArticles) {
