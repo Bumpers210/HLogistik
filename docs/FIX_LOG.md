@@ -1,6 +1,24 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-02 11:23:22 +02:00
+Stand: 2026-07-02 14:11:38 +02:00
+
+## 2026-07-02 - Wartbarkeit Phase 2B: Import-Zeilenhelfer ausgelagert
+
+Ausgangsproblem:
+
+Reine Import-/Zeilen- und Normalisierungshelfer lagen weiter direkt in `app.js`, obwohl sie keine DOM-, OCR-, Export-, Tablet- oder Serverlogik benoetigen.
+
+Umgesetzt:
+
+- Neues klassisches Browser-Skript `app-import-line-helpers.js` mit Namespace `window.HLogistikImportLineHelpers`.
+- `normalizeQuantity`, `normalizeUnit`, `isUnitToken`, `parseImportQuantityValue`, `readPositiveQuantity`, `combineUniqueNoteParts`, `normalizeAutoPositionNotes`, `autoPositionNoteValues`, `setAutoPositionNote` und `combinedPositionNote` ausgelagert.
+- Die bisherigen Funktionsnamen bleiben in `app.js` als duenne Wrapper erhalten.
+- Neues Skript in `index.html`, `server/config/static-files.mjs`, `service-worker.js` und `scripts/qa-api-matrix.mjs` eingebunden.
+- Asset-Version `app.js?v=20260702-3`, neues Helper-Skript `app-import-line-helpers.js?v=20260702-3`, Service-Worker-/Manifest-Version `1.5.153`.
+
+Validierung:
+
+- Mechanische Wartbarkeitsaenderung ohne Aenderung an OCR-/Import-Hauptpipeline, Export-, Tablet-/Offline-, Datenbank- oder CR-002-Ablauf.
 
 ## 2026-07-02 - Wartbarkeit Phase 1: Browser-/Server-Konstanten gebuendelt
 

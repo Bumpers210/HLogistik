@@ -438,7 +438,7 @@ async function run() {
     });
   }
 
-  for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
+  for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/app-import-line-helpers.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
     const response = await request(path);
     check(`static ${path}`, response.status === 200, `${response.status}`);
   }
@@ -1609,6 +1609,8 @@ async function createAppParserContext() {
   vm.runInContext(storageHuRulesCode, context, { filename: "shared/storage-hu-rules.js" });
   const manualStorageRulesCode = await readFile(new URL("../shared/manual-storage-rules.js", import.meta.url), "utf8");
   vm.runInContext(manualStorageRulesCode, context, { filename: "shared/manual-storage-rules.js" });
+  const importLineHelpersCode = await readFile(new URL("../app-import-line-helpers.js", import.meta.url), "utf8");
+  vm.runInContext(importLineHelpersCode, context, { filename: "app-import-line-helpers.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
   vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });

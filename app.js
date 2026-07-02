@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260702-2";
+const CLIENT_ASSET_VERSION = "20260702-3";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 6;
 const OCR_PRECISE_RENDER_SCALE = 7.5;
@@ -2897,10 +2897,7 @@ function countWarehouseCandidateRows(lines) {
 }
 
 function parseImportQuantityValue(value) {
-  const normalized = normalizeQuantity(String(value || "").replace(",", "."));
-  const multiplier = normalized.match(/^(\d+)x(\d+(?:\.\d+)?)$/i);
-  if (multiplier) return Number(multiplier[1]) * Number(multiplier[2]);
-  return Number(normalized);
+  return window.HLogistikImportLineHelpers.parseImportQuantityValue(value);
 }
 
 function collectBestellscheinRows(lines) {
@@ -3830,9 +3827,7 @@ function destinationPattern(value) {
 }
 
 function normalizeQuantity(value) {
-  const normalized = String(value || "").replace(",", ".");
-  if (/^\d{1,3}\.\d{3}$/.test(normalized)) return normalized.replace(".", "");
-  return normalized;
+  return window.HLogistikImportLineHelpers.normalizeQuantity(value);
 }
 
 function parsePositionLine(position, content) {
@@ -3851,15 +3846,11 @@ function parsePositionLine(position, content) {
 }
 
 function normalizeUnit(unit) {
-  const value = unit.toLowerCase();
-  if (["st", "si", "s1", "5t", "stk", "stück"].includes(value)) return "Stk";
-  if (["pck", "pak"].includes(value)) return "Pck";
-  if (value === "ve") return "VE";
-  return unit;
+  return window.HLogistikImportLineHelpers.normalizeUnit(unit);
 }
 
 function isUnitToken(value) {
-  return /^(?:ST|SI|S1|5T|STK|STÃ¼CK|PCK|PAK|VE|KG|G|M|L|PAL)$/i.test(String(value || ""));
+  return window.HLogistikImportLineHelpers.isUnitToken(value);
 }
 
 function findCustomerFromHeader(lines) {
@@ -3903,45 +3894,25 @@ function normalizeCustomerGroupKey(value) {
 }
 
 function normalizeAutoPositionNotes(notes) {
-  const source = notes && typeof notes === "object" ? notes : {};
-  return {
-    destination: String(source.destination || "").trim(),
-    quantity: String(source.quantity || "").trim(),
-    quantityCorrection: String(source.quantityCorrection || "").trim(),
-    storagePallet: String(source.storagePallet || "").trim(),
-    loadingSlip: String(source.loadingSlip || "").trim()
-  };
+  return window.HLogistikImportLineHelpers.normalizeAutoPositionNotes(notes);
 }
 
 function setAutoPositionNote(notes, key, value) {
-  const next = normalizeAutoPositionNotes(notes);
-  if (Object.prototype.hasOwnProperty.call(next, key)) next[key] = String(value || "").trim();
-  return next;
+  return window.HLogistikImportLineHelpers.setAutoPositionNote(notes, key, value);
 }
 
+// eslint-disable-next-line no-unused-vars
 function autoPositionNoteValues(line) {
-  const notes = normalizeAutoPositionNotes(line?.autoPositionNotes);
-  return [notes.destination, notes.quantity, notes.quantityCorrection, notes.storagePallet, notes.loadingSlip]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
+  return window.HLogistikImportLineHelpers.autoPositionNoteValues(line);
 }
 
 function combinedPositionNote(line) {
-  return combineUniqueNoteParts([line?.positionNote, ...autoPositionNoteValues(line)]);
+  return window.HLogistikImportLineHelpers.combinedPositionNote(line);
 }
 
+// eslint-disable-next-line no-unused-vars
 function combineUniqueNoteParts(parts) {
-  const seen = new Set();
-  return parts
-    .map((part) => String(part || "").trim())
-    .filter(Boolean)
-    .filter((part) => {
-      const key = part.toUpperCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .join("; ");
+  return window.HLogistikImportLineHelpers.combineUniqueNoteParts(parts);
 }
 
 function findFirst(text, patterns) {
@@ -4485,8 +4456,7 @@ function storageLineCompletionErrors(line) {
 }
 
 function readPositiveQuantity(value) {
-  const number = Number(String(value || "").replace(/\./g, "").replace(",", "."));
-  return Number.isFinite(number) && number > 0;
+  return window.HLogistikImportLineHelpers.readPositiveQuantity(value);
 }
 
 function parseStorageSlipText(text, _fileName = "", pageTexts = []) {
