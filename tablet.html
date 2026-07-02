@@ -6,9 +6,9 @@
     <meta name="theme-color" content="#167a58">
     <title>Tablet Logistik</title>
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="tablet.css?v=20260622-2">
-    <script src="offline-store.js?v=20260622-1"></script>
-    <script src="tablet-legacy.js?v=20260622-5"></script>
+    <link rel="stylesheet" href="tablet.css?v=20260623-7">
+    <script src="offline-store.js?v=20260623-7"></script>
+    <script src="tablet-legacy.js?v=20260623-8"></script>
   </head>
   <body>
     <header class="tablet-header">
@@ -68,6 +68,7 @@
         <div class="tablet-action-row tablet-action-row-danger">
           <button id="leaveOrderButton" class="danger-action" type="button" hidden>Auftrag verlassen</button>
           <button id="discardOrderButton" class="danger-action" type="button" hidden>Einlagerung abbrechen</button>
+          <button id="deleteStorageOrderButton" class="danger-action danger-action-strong" type="button" hidden>Einlagerung loeschen</button>
         </div>
       </section>
 
@@ -99,6 +100,10 @@
           <label>
             Anzahl Positionen
             <input id="manualStoragePositionCountInput" type="number" inputmode="numeric" min="1" max="100" step="1" value="1">
+          </label>
+          <label>
+            Stückzahl
+            <input id="manualStorageQuantityInput" type="number" inputmode="numeric" min="1" step="1" value="1">
           </label>
           <button id="addStorageLineButton" type="button">Positionen anlegen</button>
         </div>

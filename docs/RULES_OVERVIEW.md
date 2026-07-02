@@ -1,6 +1,6 @@
 # HLogistik Rules Overview
 
-Stand: 2026-06-23 08:34:12 +02:00
+Stand: 2026-07-02 08:10:00 +02:00
 
 ## Regelorte
 
@@ -10,7 +10,7 @@ Die fachlichen Serverregeln liegen in `server/rules/`:
 - `article-rules.mjs`: erlaubte Gebindearten, Standard-Gebinde und Gebindemengen-Regeln.
 - `warehouse-rules.mjs`: bekannte Lager `SSI`/`SI`, Default-Lager und Artikel-Datenbankdateien.
 - `storage-bin-rules.mjs`: SSI-Stellplatznormalisierung, inklusive H/R-Regeln, H3-O-Y-Direktplaetzen und Regalbereichslogik.
-- `order-rules.mjs`: Nach-Lagerplatz-/Kunden-Normalisierung, `9021-0OUT -> SSI`-Auftragsnummer, Kundengruppen-Key, Auftrags-Fingerprint und Grenzwerte fuer manuelle Einlagerungs-Mehrfachanlage.
+- `order-rules.mjs`: Nach-Lagerplatz-/Kunden-Normalisierung, `9021-0OUT` gewinnt als Kunde sobald irgendeine Position diesen Nach-Lagerplatz enthaelt, `9021-0OUT -> SSI`-Auftragsnummer, Kundengruppen-Key, Bestellhinweis-Regeln, Auftrags-Fingerprint und Grenzwerte fuer manuelle Einlagerungs-Mehrfachanlage.
 - `export-rules.mjs`: reine Export-Vollstaendigkeitsregel, ob relevante Positionen abgehakt sind.
 
 Weitere regelnahe Listen:
@@ -34,7 +34,8 @@ Weitere regelnahe Listen:
 - Bestellhinweis-Erkennung bleibt klassisches JavaScript statt JSON, weil Labelsuche, Normalisierung, Kandidaten-Ablehnung und Doppelanhang-Logik Reihenfolge und Regex benoetigen.
 - Manuelle Einlagerungs-Stueckzahl wird weiterhin in den bestehenden Positionsfeldern gespeichert: `actualQty` ist die Stueckzahl, `targetQty` bleibt fuer manuelle Positionen leer. Neue manuelle Stellplaetze starten leer und werden nicht aus dem Artikelstamm vorbelegt.
 - Originaldatei-Archivierung ist bewusst serverseitige Pfadlogik und keine Browserregel: Der Browser liefert nur Dateinamen, der Server loest diese ausschliesslich im konfigurierten Importordner auf.
-- Kommissionier-PDF-Import nutzt fuer Von-Lagerplaetze bewusst keine SSI-Stellplatznormalisierung und keinen Bestands-Stellplatzabgleich. Der Von-Lagerplatz kommt aus dem gewaehlten hochaufloesenden OCR-Tabellenkandidaten; erlaubt sind nur trimmen, Whitespace entfernen und Bindestriche vereinheitlichen. Die Kandidatenbewertung in `app.js` waehlt zwischen Skalen/Rotationen, ist aber keine Stellplatzvalidierung und darf keine Stellplatzwerte korrigieren.
+- Kommissionier-PDF-Import nutzt fuer Von-Lagerplaetze bewusst keine SSI-Stellplatznormalisierung und keinen Bestands-Stellplatzabgleich. Der Von-Lagerplatz kommt aus dem gewaehlten OCR-Tabellenkandidaten; erlaubt sind nur trimmen, Whitespace entfernen und Bindestriche vereinheitlichen. Die Kandidatenbewertung in `app.js` waehlt zwischen Skalen/Rotationen, ist aber keine Stellplatzvalidierung und darf keine Stellplatzwerte korrigieren.
+- Ladelisten duerfen aus OCR-Nebenkandidaten angehaengt werden. Dabei werden nur Ladelistenpositionen uebernommen; normale Auftragspositionen, Mengen, HU und Stellplaetze bleiben aus dem gewaehlten Hauptkandidaten.
 
 ## Regeln aendern
 
@@ -52,7 +53,8 @@ Bei Aenderungen an der Bestellhinweis-Erkennung `order-hint-rules.js`, `index.ht
 Bei Aenderungen an Originaldatei-Archivierung `server/original-archive.mjs`, `server/orders.mjs`, `server.mjs`, `app.js` und die Archiv-Fixtures in `scripts/qa-api-matrix.mjs` gemeinsam pruefen. Aktive Konfiguration:
 
 - `HLOGISTIK_IMPORT_DIR` oder `import-path.txt`; Fallback: Exportordner.
-- `HLOGISTIK_ARCHIVE_DIR`; Fallback: `<Importordner>/Archiv`.
+- `HLOGISTIK_ARCHIVE_DIR`; Fallback: `<Importordner>/Archiv`. `archive-path.txt` ist als lokale Pfaddatei ignoriert, wird im aktuellen Serverstand aber nicht gelesen.
+- `HLOGISTIK_EXPORT_DIR`, `EXPORT_DIR` oder `export-path.txt`; Fallback: `./Exporte`.
 
 Bei Aenderungen am Artikelstamm-Buchungsexport `server/reports.mjs`, `server.mjs`, `artikel.html`, `artikel.js` und `scripts/qa-api-matrix.mjs` gemeinsam pruefen. Die Server-Regelquelle fuer Zeitraum, Spalten und Fehlerlog-Auftragszuordnung ist `server/reports.mjs`; die echte XLSX-Erzeugung bleibt im Browser ueber die vorhandene `xlsx.full.min.js`.
 
@@ -77,5 +79,7 @@ Manuell pruefen:
 - Artikelstamm-Buchungsexport: gueltiger Zeitraum, leerer Zeitraum, ungueltiger Zeitraum, Spaltenreihenfolge, `EIN`/`AUS`, Rollenfehler, Buchungsfehler aus `bestandsbuchung_fehler` mit Auftragsreferenz und read-only Wiederholaufruf.
 - Tablet manuelle Einlagerung: online verlassen/loeschen, offline verlassen/abbrechen und leere Offline-Auswahl nach Abbruch.
 - PDF-/Textimport: `Bestellhinweis: Service Ecke`, mehrzeiliger Hinweis, kein Hinweis, Doppelanhang und Positionsparsing.
+- PDF-/Textimport: `9021-0OUT` als Nach-Lagerplatz an beliebiger Position setzt den Kunden auf `9021-0OUT`; abweichende Nach-Lagerplaetze stehen als Zusatzbemerkung.
+- PDF-/OCR-Import: Ladeliste aus Nebenkandidaten wird angehaengt, ohne normale Auftragspositionen aus Nebenkandidaten zu mischen.
 - Kommissionier-PDF-Import: OCR-only, Kandidatenbewertung fuer Skala/Rotation, Von-Lagerplatz aus korrekter Tabellenspalte, Rohwert gleich finaler Von-Lagerplatz, keine `O/0`-, `S/5`- oder SSI-Regelkorrektur.
 - CR-002 bleibt unveraendert aktiv

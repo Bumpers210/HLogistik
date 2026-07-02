@@ -1,6 +1,6 @@
 # HLogistik Manual QA Test Plan
 
-Stand: 2026-06-25 10:08:47 +02:00
+Stand: 2026-07-02 08:10:00 +02:00
 
 ## Vorbereitung
 
@@ -31,11 +31,16 @@ Geprueft werden:
 - Tablet manuelle Einlagerung: offene serverseitige Einlagerung loeschen
 - Tablet-Kommissionierung: bearbeiteten Auftrag speichern, Serverzustand laden und direkt ohne Reload exportieren
 - Tablet-Exportscript: Guard gegen parallele Exporte und Online-Speicherpflicht
+- Tablet-PDF-Export: lokales Aufraeumen erst nach bestaetigter PDF-Erstellung
 - PDF-/Textfixtures fuer `Bestellhinweis` an der Auftragsnummer
+- Ladelisten-Anhang aus OCR-Nebenkandidaten
+- Kundenregel: `9021-0OUT` gewinnt als Kunde, sobald irgendeine Position diesen Nach-Lagerplatz enthaelt
 - Lageraufgabe-Importfixture mit langer Lageraufgabe-Nummer und Spalten `Von-Handling-Unit`, `Von-Lagerplatz`, `Produkt`, `Menge`, `Basis`, `Nach-Lagerplatz`
 - Roh-Stellplatz-Import fuer Produkt `1060610`, HU `340063810002072174`/`340063810002072181`, `Von-Lagerplatz` `002-H3-SO4D1`
 - Kommissionier-PDF-Import: OCR-Kandidaten aus Skalen `6`/`7.5` und Rotationen `0`/`90`/`180`/`270`, Score-Auswahl, Diagnose mit Kandidatenliste und keine Stellplatzkorrektur
 - Artikelstamm-Buchungsexport mit Zeitraum, Spaltenreihenfolge, `EIN`/`AUS`, Rollenfehler und read-only Wiederholaufruf
+- Originaldatei-Archivierung in temporaerem QA-Importordner
+- QA-Exportartefakt-Guard gegen dauerhafte PDF/XLSX/CSV/HTML-Dateien
 - Ablehnung von mehr als `100` manuellen Einlagerungspositionen
 - Tablet-Gruppenuebernahme: zwei Auftraege gleicher Kundengruppe werden gemeinsam uebernommen und getrennt aktualisiert
 - Reports
@@ -52,7 +57,7 @@ Erwartung: Alle Ansichten laden ohne sichtbare Fehler.
 
 ## Kommissionier-PDF-Import OCR
 
-1. Seite hart neu laden, damit `app.js?v=20260625-6` aktiv ist.
+1. Seite hart neu laden, damit `app.js?v=20260702-1` und Service-Worker-/Manifest-Version `1.5.151` aktiv sind.
 2. Problematisches gescanntes Lageraufgabe-PDF importieren.
 3. Browser-Konsole oeffnen und `PDF-Import Diagnose` pruefen.
 4. Pruefen, dass `ocrScales` `6` und `7.5` enthaelt.
@@ -62,6 +67,8 @@ Erwartung: Alle Ansichten laden ohne sichtbare Fehler.
 8. `Nach-Lagerplatz`, HU, Produktnummer und Menge duerfen nicht als `Von-Lagerplatz` erscheinen.
 9. PDF mit absichtlich schlechter/leer erkannter OCR testen; Erwartung: Import bricht ab, kein halbfertiger Auftrag entsteht.
 10. Ein bisher funktionierendes PDF importieren und Positionsanzahl, Kunde, Auftragsnummer, HU, Von-Lagerplatz, Menge und Nach-Lagerplatz stichprobenartig pruefen.
+11. Auftrag mit `9021-0OUT` nicht an erster Position pruefen; Erwartung: Kunde `9021-0OUT`, Auftragsnummer `SSI`, abweichende Nach-Lagerplaetze nur in der jeweiligen Zusatzbemerkung.
+12. PDF mit Ladeliste pruefen; Erwartung: normale Positionen kommen aus dem gewaehlten Hauptkandidaten, Ladelistenpositionen koennen aus Nebenkandidaten angehaengt werden.
 
 Erwartung: Der Import uebernimmt den Von-Lagerplatz ausschliesslich aus dem gewaehlten OCR-Tabellenkandidaten. Es gibt keine Stellplatzvalidierung, keine Stellplatzkorrektur und keinen Bestands-Stellplatzersatz im PDF-Importpfad.
 
@@ -235,24 +242,25 @@ Das Rollenmodell schuetzt LAN-Workflows gegen Fehlbedienung. Es ist keine echte 
 
 1. Isolierte QA-Kopie auf Port 4175 starten.
 2. `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` ausfuehren.
-3. Pruefen, dass CR-002, Tablet-Direktexport, Einlagerabschluss und manuelle Einlagerung fachlich gruen bleiben.
+3. Pruefen, dass CR-002, Tablet-Direktexport, Einlagerabschluss, Archivierung und manuelle Einlagerung fachlich gruen bleiben.
 4. Pruefen, dass die Matrix den Check `QA export tests leave no durable PDF/HTML artifacts` meldet.
-5. Im konfigurierten Exportziel und in `Exporte/` nach `QA-*.pdf` und `QA-*.html` des aktuellen Laufes suchen.
+5. Im konfigurierten Exportziel, Import-/Archiv-Testordner und in `Exporte/` nach `QA-*.pdf`, `QA-*.xlsx`, `QA-*.csv` und `QA-*.html` des aktuellen Laufes suchen.
 6. Einen normalen Benutzerexport ohne QA-Header in einer isolierten Kopie testen und bestaetigen, dass weiterhin eine PDF-Datei erzeugt wird.
 
-Erwartung: Automatisierte Tests hinterlassen keine dauerhaften QA-PDFs oder QA-HTML-Dateien. Produktiver Export bleibt aktiv.
+Erwartung: Automatisierte Tests hinterlassen keine dauerhaften QA-PDFs, QA-XLSX, QA-CSV oder QA-HTML-Dateien. Produktiver Export bleibt aktiv.
 
 ## Originaldatei-Archivierung
 
 1. Importordner ueber `HLOGISTIK_IMPORT_DIR` oder `import-path.txt` festlegen; ohne Konfiguration ist der Exportordner der Importordner.
-2. Test-PDF in den Importordner legen und in der App importieren.
-3. Auftrag freigeben, alle Positionen abschliessen und PDF exportieren.
-4. Pruefen, dass die Export-PDF erstellt wurde.
-5. Pruefen, dass die Originaldatei nach `<Importordner>/Archiv` oder `HLOGISTIK_ARCHIVE_DIR` verschoben wurde.
-6. Gleichen Dateinamen im Archiv vorab anlegen und erneut testen; Erwartung: vorhandene Datei bleibt unveraendert, neue Datei bekommt eindeutigen Namen.
-7. Fehlerfall pruefen: Position offen lassen und Export starten; Erwartung: Originaldatei bleibt im Importordner.
-8. Fehlerfall pruefen: Originaldatei vor dem Export umbenennen/entfernen; Erwartung: PDF-Export bleibt erfolgreich, Archivfehler wird gemeldet.
-9. `/api/health` pruefen; `importDir` und `archiveDir` muessen die aktiven Ordner anzeigen.
+2. Optional Archivordner ueber `HLOGISTIK_ARCHIVE_DIR` festlegen; ohne Konfiguration ist `<Importordner>/Archiv` aktiv. `archive-path.txt` ist ignoriert, wird im aktuellen Serverstand aber nicht gelesen.
+3. Test-PDF in den Importordner legen und in der App importieren.
+4. Auftrag freigeben, alle Positionen abschliessen und PDF exportieren.
+5. Pruefen, dass die Export-PDF erstellt wurde.
+6. Pruefen, dass die Originaldatei nach `<Importordner>/Archiv` oder `HLOGISTIK_ARCHIVE_DIR` verschoben wurde.
+7. Gleichen Dateinamen im Archiv vorab anlegen und erneut testen; Erwartung: vorhandene Datei bleibt unveraendert, neue Datei bekommt eindeutigen Namen.
+8. Fehlerfall pruefen: Position offen lassen und Export starten; Erwartung: Originaldatei bleibt im Importordner.
+9. Fehlerfall pruefen: Originaldatei vor dem Export umbenennen/entfernen; Erwartung: PDF-Export bleibt erfolgreich, Archivfehler wird gemeldet.
+10. `/api/health` pruefen; `importDir` und `archiveDir` muessen die aktiven Ordner anzeigen.
 
 Erwartung: Archivierung passiert nur nach erfolgreicher PDF-Erstellung. Archivfehler beschaedigen den Auftrag nicht und rollen keine PDF zurueck.
 ## PDF-Import: OCR-only Von-Lagerplatz

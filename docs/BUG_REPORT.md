@@ -1,8 +1,111 @@
 # HLogistik Bug Report
 
-Stand: 2026-06-22 08:38:48 +02:00
+Stand: 2026-07-02 08:10:00 +02:00
 
 ## Behobene Fehler
+
+### QA-014 - P1 - Kunde 9021-0OUT wurde nicht immer aus Nach-Lagerplaetzen uebernommen
+
+Status: behoben
+
+Fix:
+
+Beim Kommissionierimport und bei der serverseitigen Auftragsnormalisierung gewinnt `9021-0OUT` als Kunde, sobald irgendeine Position diesen Nach-Lagerplatz enthaelt. Abweichende Nach-Lagerplaetze werden positionsbezogen als Zusatzbemerkung gehalten. Die Auftragsnummer wird fuer diesen Kunden weiterhin `SSI`.
+
+Validierung:
+
+QA-Matrix prueft Parser- und Server-Fall mit `9021-0OUT` an spaeterer Position sowie das bisherige Fallback-Verhalten ohne `9021-0OUT`.
+
+### QA-013 - P1 - Originaldatei blieb nach erfolgreichem PDF-Export im Importordner
+
+Status: behoben
+
+Fix:
+
+Der Server loest importierte Originaldateien ausschliesslich ueber den konfigurierten Importordner auf und verschiebt sie erst nach erfolgreicher PDF-Erstellung und Exportstatus-Speicherung in den Archivordner. Bei Archivfehlern bleibt die PDF erhalten und der Fehler wird am Auftrag dokumentiert.
+
+Validierung:
+
+QA-Matrix prueft erfolgreiche Archivierung, Kollisionen, bereits archivierte Dateien, fehlende Dateien und ungueltige Dateinamen in temporaeren QA-Ordnern.
+
+### QA-009 - P1 - Tablet-PDF-Export benoetigte teils Tab-Reload
+
+Status: behoben
+
+Reproduktion:
+
+1. `/tablet.html` oeffnen.
+2. Kommissionierauftrag uebernehmen.
+3. Positionen bearbeiten bzw. abhaken.
+4. Direkt `PDF exportieren` antippen.
+5. Ergebnis vor Fix: Export konnte auf dem Tablet haengen bleiben; nach Tab-Reload funktionierte derselbe Export.
+
+Fix:
+
+Tablet-Modern und Tablet-Legacy starten den PDF-Export nicht mehr aus einem unkontrollierten Save-Callback. Vor dem Export wird online gespeichert, die Queue fuer denselben Auftrag bereinigt, der Auftrag frisch vom Server geladen und erst danach exportiert. Offline-Fallbacks starten keinen PDF-Export. Ein `exportingPdf`-Guard verhindert parallele Exporte und gibt den Button bei Fehlern wieder frei.
+
+Validierung:
+
+QA-Matrix prueft einen Tablet-Direktexport nach gespeicherter Positionsaenderung ohne Reload-Workaround sowie die statische Guard-/Online-Save-Pflicht in `tablet.js` und `tablet-legacy.js`.
+
+### QA-008 - P2 - PDF-Import uebernahm gedruckten Bestellhinweis nicht in die Auftragsnummer
+
+Status: behoben
+
+Reproduktion:
+
+1. PDF-/OCR-Text enthaelt `Bestellschein Nr.: 60126`.
+2. Zusaetzlich ist `Bestellhinweis: Service Ecke` gedruckt.
+3. Ergebnis vor Fix: importierte Auftragsnummer blieb `60126`.
+
+Fix:
+
+Der Import sucht labelbasiert nach `Bestellhinweis`, liest den Wert aus derselben oder direkt folgenden Zeile und haengt ihn normalisiert an die Auftragsnummer an. Beispiel: `60126` wird zu `60126-Service Ecke`.
+
+Validierung:
+
+QA-Matrix prueft einzeiligen und mehrzeiligen Hinweis, fehlenden Hinweis, Doppelanhang, Tabellenheader-Ablehnung und unveraendertes Positionsparsing.
+
+### QA-006 - P1 - Tablet manuelle Einlagerung konnte in Fangzustand geraten
+
+Status: behoben
+
+Reproduktion:
+
+1. `/tablet.html` oeffnen und in `Einlagerung` wechseln.
+2. Manuelle Einlagerung starten.
+3. Bei serverseitig angelegtem Auftrag war `Einlagerung verlassen` nicht sauber als nicht-destruktiver Ausstieg nutzbar; `Einlagerung abbrechen` und Loeschen waren fachlich vermischt.
+4. Zusaetzlich konnten serverseitig gespeicherte Auftraege mit `local-storage-...`-ID faelschlich als reine Offline-Entwuerfe behandelt werden.
+
+Fix:
+
+Tablet unterscheidet jetzt `verlassen`, `abbrechen` und `loeschen`. Reine lokale Entwuerfe werden ueber `localDraft === true` erkannt, nicht ueber die Form der ID. Serverseitige offene manuelle Einlagerungen koennen ueber den separaten Loeschbutton entfernt werden.
+
+Validierung:
+
+- QA-Matrix: `tablet manual storage open order can be deleted` bestanden.
+- Headless-Chrome-CDP-Smoke: Online-Einlagerung gestartet, `Einlagerung verlassen` sichtbar, `Einlagerung loeschen` aktiv, Auftrag nach Bestaetigung nicht mehr in der Auswahl.
+
+### QA-007 - P2 - Abgebrochene lokale Tablet-Einlagerung blieb als Cache-Eintrag sichtbar
+
+Status: behoben
+
+Reproduktion:
+
+1. Tablet-Seite online laden.
+2. Server stoppen.
+3. Manuelle Einlagerung offline starten.
+4. `Einlagerung verlassen`, Auftrag aus Offline-Auswahl wieder laden.
+5. `Einlagerung abbrechen`.
+6. Ergebnis vor Fix: IndexedDB war leer, aber die alte Auswahl blieb als `[Cache]` sichtbar.
+
+Fix:
+
+`loadOrderListFromCache()` rendert bei leerem Offline-Cache jetzt explizit eine leere Offline-Auswahl und leert die gemerkten Listeneintraege.
+
+Validierung:
+
+Headless-Chrome-CDP-Smoke: Offline-Entwurf verlassen, aus Cache erneut laden, abbrechen; `OfflineStore` ist leer und die Auswahl zeigt nur `Einlagerung waehlen (Offline-Cache)`.
 
 ### QA-001 - P2 - Artikelvalidierung lieferte Serverfehler
 
@@ -89,7 +192,7 @@ Der Service Worker nutzt jetzt bekannte Navigation-Fallbacks fuer:
 - `/artikel.html`
 - `/auswertungen.html`
 
-Cache-Version und Manifest-Version wurden auf `1.5.113` erhoeht.
+Aktueller Stand: Service Worker und Manifest stehen auf `1.5.151`.
 
 Validierung:
 

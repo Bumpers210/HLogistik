@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260625-6";
+const CLIENT_ASSET_VERSION = "20260702-1";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 6;
 const OCR_PRECISE_RENDER_SCALE = 7.5;
@@ -16,15 +16,18 @@ const PICKING_OCR_SCALE_CANDIDATES = [
   { label: "praezise", scale: OCR_PRECISE_RENDER_SCALE, dpi: OCR_PRECISE_RENDER_DPI }
 ];
 const OCR_ROTATIONS = [0, 90, 180, 270];
+const PICKING_OCR_UPRIGHT_ROTATIONS = [0];
 const STORAGE_IMAGE_ROTATIONS = [0, -2, 2, -4, 4];
 const OCR_STRONG_CANDIDATE_SCORE = 6500;
 const PICKING_OCR_MINIMUM_SCORE = 2500;
+const PICKING_OCR_FAST_ACCEPT_SCORE = 6500;
 const ACTIVE_ORDER_TIMEOUT_MS = 10 * 60 * 1000;
 const ORDER_LIST_REFRESH_MS = 30 * 1000;
 const ACTIVITY_HEARTBEAT_MS = 60 * 1000;
 const ORDER_NOTICE_DURATION_MS = 12000;
 const CONNECTION_CHECK_MS = 30 * 1000;
 const CONNECTION_CHECK_TIMEOUT_MS = 5000;
+const SSI_DESTINATION_CUSTOMER = "9021-0OUT";
 const SSI_STORAGE_HU_PREFIX = "34006381000";
 const SSI_STORAGE_HU_SUFFIX_LENGTH = 7;
 const SSI_STORAGE_HU_LENGTH = SSI_STORAGE_HU_PREFIX.length + SSI_STORAGE_HU_SUFFIX_LENGTH;
@@ -416,9 +419,9 @@ async function handlePdfUpload(event) {
     setImportStatus(`Lese ${file.name} ...`, "", 0);
     data = await file.arrayBuffer();
     const pdf = await window.pdfjsLib.getDocument({ data }).promise;
+    const pageTexts = await readPdfPages(pdf);
+    const fullText = pageTexts.join("\n");
     if (currentMode === "storage") {
-      const pageTexts = await readPdfPages(pdf);
-      const fullText = pageTexts.join("\n");
       const imported = await chooseBestStorageImportText(pdf, fullText, file.name, pageTexts);
       const result = await importStorageText(imported.text, file.name, imported.parsed);
 
@@ -436,7 +439,7 @@ async function handlePdfUpload(event) {
       return;
     }
 
-    const imported = await chooseBestImportText(pdf);
+    const imported = await chooseBestImportText(pdf, fullText);
     if (imported.rejected) {
       logPickingImportDiagnostics("weak-ocr-candidate", imported.diagnostics);
       setImportStatus(imported.message || "OCR-Import abgebrochen.", "error", 100);
@@ -607,7 +610,21 @@ async function readPdfPages(pdf) {
   return pages;
 }
 
-async function chooseBestImportText(pdf) {
+async function chooseBestImportText(pdf, fullText = "") {
+  const textCandidate = String(fullText || "").trim()
+    ? await buildPickingImportCandidate(pdf, fullText, "pdf-text", {
+      ocrScales: [],
+      ocrDpis: [],
+      documentType: importDocumentType(fullText, parseOrderText(fullText))
+    })
+    : null;
+  if (isAcceptedSiBestellscheinImportCandidate(textCandidate)) {
+    return markPickingImportCandidateAccepted(textCandidate, "pdf-text-si-bestellschein");
+  }
+  if (isAcceptedPdfTextImportCandidate(textCandidate)) {
+    return markPickingImportCandidateAccepted(textCandidate, "pdf-text");
+  }
+
   setImportStatus("Starte hochaufloesende OCR-Kandidaten ...", "", 5);
   let selection = null;
   let ocrError = "";
@@ -622,22 +639,34 @@ async function chooseBestImportText(pdf) {
     ...(selection || {}),
     ocrError
   });
+  const selected = chooseBestPickingImportCandidate([candidate]);
+
+  if (isAcceptedPickingImportCandidate(selected)) {
+    return markPickingImportCandidateAccepted(selected);
+  }
 
   if (!selection || !isUsablePickingOcrSelection(selection)) {
     const message = ocrError
       ? `OCR-Import fehlgeschlagen: ${ocrError}`
       : "OCR-Qualitaet zu schwach. Import abgebrochen, keine Positionen uebernommen.";
     return {
-      ...candidate,
+      ...selected,
       rejected: true,
       message
     };
   }
 
-  return candidate;
+  return markPickingImportCandidateAccepted(candidate);
 }
 
 async function chooseBestStorageImportText(pdf, fullText, fileName = "", pageTexts = []) {
+  const fastCandidate = {
+    text: fullText,
+    parsed: parseStorageSlipText(fullText, fileName, pageTexts),
+    source: "pdf-text"
+  };
+  if (isAcceptedStoragePdfTextImportCandidate(fastCandidate)) return fastCandidate;
+
   setImportStatus("Starte hochaufloesende OCR ...", "", 5);
   let ocrText = "";
   try {
@@ -646,11 +675,6 @@ async function chooseBestStorageImportText(pdf, fullText, fileName = "", pageTex
     console.warn("Hochaufloesende OCR fehlgeschlagen.", error);
   }
 
-  const fastCandidate = {
-    text: fullText,
-    parsed: parseStorageSlipText(fullText, fileName, pageTexts),
-    source: "pdf-text"
-  };
   if (!ocrText.trim()) return fastCandidate;
 
   const ocrCandidate = {
@@ -661,8 +685,22 @@ async function chooseBestStorageImportText(pdf, fullText, fileName = "", pageTex
   return chooseBestStorageImportCandidate([ocrCandidate, fastCandidate]);
 }
 
+function isAcceptedStoragePdfTextImportCandidate(candidate) {
+  const lines = Array.isArray(candidate?.parsed?.lines) ? candidate.parsed.lines : [];
+  const warnings = Array.isArray(candidate?.parsed?.warnings) ? candidate.parsed.warnings : [];
+  return lines.length > 0
+    && warnings.length === 0
+    && lines.every(isCompleteStorageImportLine);
+}
+
+function isCompleteStorageImportLine(line) {
+  if (!line || !String(line.product || "").trim()) return false;
+  const quantity = parseImportQuantityValue(line.targetQty);
+  return Number.isFinite(quantity) && quantity > 0;
+}
+
 async function buildPickingImportCandidate(pdf, text, source, info = {}) {
-  const parsed = parseOrderText(text);
+  const parsed = appendLoadingSlipLinesToParsed(parseOrderText(text), info.loadingSlipLines);
   const binScan = {
     parsed,
     corrected: 0,
@@ -675,6 +713,7 @@ async function buildPickingImportCandidate(pdf, text, source, info = {}) {
   const issues = validatePickingImport(text, sanitizedParsed);
   const diagnostics = pickingImportDiagnostics(text, sanitizedParsed, {
     source,
+    documentType: info.documentType || importDocumentType(text, sanitizedParsed),
     pdfPages: pdf?.numPages || 0,
     ocrScale: OCR_RENDER_SCALE,
     ocrDpi: OCR_RENDER_DPI,
@@ -686,6 +725,9 @@ async function buildPickingImportCandidate(pdf, text, source, info = {}) {
     ocrRotation: info.ocrRotation ?? "",
     selectedCandidate: info.selectedCandidate || null,
     ocrCandidates: info.ocrCandidates || [],
+    ocrTimings: info.ocrTimings || [],
+    loadingSlipCandidates: info.loadingSlipCandidates || [],
+    loadingSlipExpected: info.loadingSlipExpected,
     qualityScore: info.qualityScore ?? null,
     minimumQualityScore: info.minimumQualityScore ?? PICKING_OCR_MINIMUM_SCORE,
     qualityAccepted: info.qualityAccepted === true,
@@ -698,12 +740,71 @@ async function buildPickingImportCandidate(pdf, text, source, info = {}) {
     text,
     parsed: sanitizedParsed,
     source,
+    documentType: info.documentType || importDocumentType(text, sanitizedParsed),
     pageNotice: bestellscheinPageNotice(text, pdf.numPages),
     binScan,
     issues,
     qualityScore: info.qualityScore ?? scorePickingImportCandidate(text, sanitizedParsed, issues),
     diagnostics
   };
+}
+
+function chooseBestPickingImportCandidate(candidates) {
+  return candidates
+    .filter(Boolean)
+    .sort((left, right) => Number(right.qualityScore || 0) - Number(left.qualityScore || 0))[0] || candidates.find(Boolean) || {};
+}
+
+function markPickingImportCandidateAccepted(candidate, source = "") {
+  if (!candidate) return candidate;
+  return {
+    ...candidate,
+    source: source || candidate.source,
+    diagnostics: {
+      ...(candidate.diagnostics || {}),
+      source: source || candidate.diagnostics?.source || candidate.source || "",
+      qualityScore: candidate.qualityScore ?? candidate.diagnostics?.qualityScore ?? null,
+      qualityAccepted: true,
+      documentType: candidate.documentType || candidate.diagnostics?.documentType || ""
+    }
+  };
+}
+
+function isAcceptedPickingImportCandidate(candidate) {
+  if (!candidate || candidate.rejected) return false;
+  const lines = Array.isArray(candidate.parsed?.lines) ? candidate.parsed.lines : [];
+  return lines.some((line) => line?.lineType !== "loading-slip")
+    && !candidate.issues?.length
+    && Number(candidate.qualityScore || 0) >= PICKING_OCR_MINIMUM_SCORE;
+}
+
+function isAcceptedSiBestellscheinImportCandidate(candidate) {
+  if (!candidate || candidate.rejected) return false;
+  const lines = Array.isArray(candidate.parsed?.lines) ? candidate.parsed.lines : [];
+  const normalLines = lines.filter((line) => line?.lineType !== "loading-slip");
+  return isSiBestellscheinText(candidate.text)
+    && normalLines.some(isCompleteImportLine)
+    && !candidate.issues?.length;
+}
+
+function isAcceptedPdfTextImportCandidate(candidate) {
+  if (!isAcceptedPickingImportCandidate(candidate)) return false;
+  const metrics = pickingOcrCandidateMetrics(candidate.text, candidate.parsed, candidate.issues);
+  if (metrics.issueCount > 0 || metrics.discardedRows > 0 || metrics.suspiciousSourceFieldCount > 0) return false;
+  if (metrics.bestellscheinLike) {
+    return metrics.bestellscheinCompleteCount > 0
+      && metrics.bestellscheinOrderDetected
+      && metrics.bestellscheinCustomerDetected;
+  }
+  return metrics.completeRequiredCount > 0 && metrics.completeRequiredCount === metrics.parsedLineCount;
+}
+
+function importDocumentType(text, parsed = {}) {
+  if (isSiBestellscheinText(text)) return "si-bestellschein";
+  if (isBestellscheinText(text)) return "bestellschein";
+  if (isWarehouseLikeText(text)) return "lageraufgabe";
+  if (Array.isArray(parsed?.lines) && parsed.lines.length) return "picking";
+  return "";
 }
 
 function scorePickingImportCandidate(text, parsed, issues = []) {
@@ -776,9 +877,46 @@ async function readPickingPdfWithOcrCandidate(pdf) {
   }
 
   const scaleCandidates = pickingOcrScaleCandidates();
+  const fastScaleCandidates = scaleCandidates.slice(0, 1);
+  const uprightRotations = PICKING_OCR_UPRIGHT_ROTATIONS;
+  const candidateMap = new Map();
+  const timings = [];
   const totalSteps = Math.max(1, pdf.numPages * scaleCandidates.length * OCR_ROTATIONS.length);
   const worker = await createOcrWorker(totalSteps, scaleCandidates[0]?.dpi || OCR_RENDER_DPI);
-  const candidateMap = new Map();
+
+  try {
+    let stageStarted = importNowMs();
+    const fastResult = await readPickingPdfOcrCandidateSet(pdf, fastScaleCandidates, uprightRotations, { worker, candidateMap });
+    stageStarted = pushImportTiming(timings, "basis-gerade", stageStarted, fastResult);
+    if (isFastAcceptedPickingOcrCandidate(fastResult.best)) {
+      const resultWithLoadingSlip = await readLoadingSlipOcrFallbackIfNeeded(pdf, fastResult, scaleCandidates, worker, candidateMap, timings);
+      return pickingOcrSelectionResult(resultWithLoadingSlip, scaleCandidates, resultWithLoadingSlip.rotations || uprightRotations, timings);
+    }
+
+    if (scaleCandidates.length > fastScaleCandidates.length) {
+      const uprightResult = await readPickingPdfOcrCandidateSet(pdf, scaleCandidates, uprightRotations, { worker, candidateMap });
+      stageStarted = pushImportTiming(timings, "praezise-gerade", stageStarted, uprightResult);
+      if (isStableUprightPickingOcrResult(uprightResult, scaleCandidates)) {
+        const resultWithLoadingSlip = await readLoadingSlipOcrFallbackIfNeeded(pdf, uprightResult, scaleCandidates, worker, candidateMap, timings);
+        return pickingOcrSelectionResult(resultWithLoadingSlip, scaleCandidates, resultWithLoadingSlip.rotations || uprightRotations, timings);
+      }
+    }
+
+    stageStarted = importNowMs();
+    const fullResult = await readPickingPdfOcrCandidateSet(pdf, scaleCandidates, OCR_ROTATIONS, { worker, candidateMap });
+    pushImportTiming(timings, "rotations-fallback", stageStarted, fullResult);
+    return pickingOcrSelectionResult(fullResult, scaleCandidates, OCR_ROTATIONS, timings);
+  } finally {
+    await worker.terminate();
+  }
+}
+
+async function readPickingPdfOcrCandidateSet(pdf, scaleCandidates, rotations, options = {}) {
+  const rotationCandidates = Array.isArray(rotations) && rotations.length ? rotations : OCR_ROTATIONS;
+  const totalSteps = Math.max(1, pdf.numPages * scaleCandidates.length * rotationCandidates.length);
+  const worker = options.worker || await createOcrWorker(totalSteps, scaleCandidates[0]?.dpi || OCR_RENDER_DPI);
+  const ownsWorker = !options.worker;
+  const candidateMap = options.candidateMap || new Map();
 
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
@@ -791,15 +929,12 @@ async function readPickingPdfWithOcrCandidate(pdf) {
       for (const scaleConfig of scaleCandidates) {
         const baseCanvas = await renderPdfPageToCanvas(pdf, pageNumber, scaleConfig.scale);
         try {
-          for (const rotation of OCR_ROTATIONS) {
+          for (const rotation of rotationCandidates) {
             const canvas = rotation ? rotateCanvas(baseCanvas, rotation) : baseCanvas;
             const rotationLabel = rotation ? `, Drehung ${rotation} Grad` : "";
             setImportStatus(
               `OCR Seite ${pageNumber}/${pdf.numPages}, ${scaleConfig.label}${rotationLabel} ...`
             );
-            await setOcrWorkerDpi(worker, scaleConfig.dpi);
-            const result = await worker.recognize(canvas);
-            const text = result.data.text || "";
             const key = pickingOcrCandidateKey(scaleConfig, rotation);
             const entry = candidateMap.get(key) || {
               key,
@@ -808,10 +943,23 @@ async function readPickingPdfWithOcrCandidate(pdf) {
               dpi: scaleConfig.dpi,
               rotation,
               pages: Array.from({ length: pdf.numPages }, () => ""),
-              pageRawLines: Array.from({ length: pdf.numPages }, () => 0)
+              pageRawLines: Array.from({ length: pdf.numPages }, () => 0),
+              processedPages: Array.from({ length: pdf.numPages }, () => false)
             };
+            if (entry.processedPages[pageNumber - 1]) {
+              if (canvas !== baseCanvas) {
+                canvas.width = 0;
+                canvas.height = 0;
+              }
+              continue;
+            }
+
+            await setOcrWorkerDpi(worker, scaleConfig.dpi);
+            const result = await worker.recognize(canvas);
+            const text = result.data.text || "";
             entry.pages[pageNumber - 1] = text;
             entry.pageRawLines[pageNumber - 1] = countNonEmptyTextLines(text);
+            entry.processedPages[pageNumber - 1] = true;
             candidateMap.set(key, entry);
 
             if (canvas !== baseCanvas) {
@@ -826,7 +974,7 @@ async function readPickingPdfWithOcrCandidate(pdf) {
       }
     }
   } finally {
-    await worker.terminate();
+    if (ownsWorker) await worker.terminate();
   }
 
   const candidates = [...candidateMap.values()]
@@ -843,20 +991,157 @@ async function readPickingPdfWithOcrCandidate(pdf) {
   });
 
   return {
+    best,
+    candidates,
+    scaleCandidates,
+    rotations: rotationCandidates
+  };
+}
+
+async function readLoadingSlipOcrFallbackIfNeeded(pdf, currentResult, scaleCandidates, worker, candidateMap, timings) {
+  if (!shouldRunLoadingSlipOcrFallback(currentResult)) return currentResult;
+
+  setImportStatus("Pruefe Ladeliste in OCR-Rotationen ...", "", 5);
+  const stageStarted = importNowMs();
+  const fallbackResult = await readPickingPdfOcrCandidateSet(pdf, scaleCandidates, OCR_ROTATIONS, { worker, candidateMap });
+  pushImportTiming(timings, "ladeliste-rotationen", stageStarted, fallbackResult);
+
+  return {
+    ...fallbackResult,
+    best: currentResult.best || fallbackResult.best,
+    loadingSlipFallback: true
+  };
+}
+
+function shouldRunLoadingSlipOcrFallback(result) {
+  const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+  if (collectLoadingSlipLinesFromOcrCandidates(candidates).lines.length) return false;
+
+  const best = result?.best;
+  if (!best || Number(best.rotation || 0) !== 0) return false;
+  if (!isCleanUprightPickingOcrCandidate(best)) return false;
+  if (best.metrics?.bestellscheinLike) return false;
+
+  const source = String(best.text || "");
+  if (isLoadingSlipStartLine(source) || isLoadingSlipHeaderBarcodeLine(source)) return true;
+
+  const rawLineCount = Number(best.metrics?.rawLineCount || 0);
+  const parsedLineCount = Number(best.metrics?.parsedLineCount || 0);
+  const expectedRows = Number(best.metrics?.expectedRows || 0);
+  return rawLineCount - Math.max(parsedLineCount, expectedRows) >= 8;
+}
+
+function isFastAcceptedPickingOcrCandidate(candidate) {
+  return isUsablePickingOcrSelection(candidate)
+    && Number(candidate?.score || 0) >= PICKING_OCR_FAST_ACCEPT_SCORE
+    && Number(candidate?.metrics?.issueCount || 0) === 0
+    && Number(candidate?.metrics?.discardedRows || 0) === 0
+    && Number(candidate?.metrics?.suspiciousSourceFieldCount || 0) === 0;
+}
+
+function isStableUprightPickingOcrResult(result, scaleCandidates = []) {
+  const candidates = (Array.isArray(result?.candidates) ? result.candidates : [])
+    .filter((candidate) => Number(candidate?.rotation || 0) === 0);
+  const requiredCleanCandidates = Math.min(2, Math.max(1, Array.isArray(scaleCandidates) ? scaleCandidates.length : 1));
+  const cleanCandidates = candidates.filter(isCleanUprightPickingOcrCandidate);
+  const best = result?.best;
+
+  if (isFastAcceptedPickingOcrCandidate(best)) return true;
+  if (!isCleanUprightPickingOcrCandidate(best) || cleanCandidates.length < requiredCleanCandidates) return false;
+
+  const bestSignature = pickingOcrCompletenessSignature(best);
+  if (!bestSignature) return false;
+  return cleanCandidates.filter((candidate) => pickingOcrCompletenessSignature(candidate) === bestSignature).length >= requiredCleanCandidates;
+}
+
+function isCleanUprightPickingOcrCandidate(candidate) {
+  const metrics = candidate?.metrics || {};
+  return isUsablePickingOcrSelection(candidate)
+    && Number(metrics.issueCount || 0) === 0
+    && Number(metrics.discardedRows || 0) === 0
+    && Number(metrics.suspiciousSourceFieldCount || 0) === 0
+    && hasCompleteUprightPickingOcrCoverage(candidate);
+}
+
+function hasCompleteUprightPickingOcrCoverage(candidate) {
+  const metrics = candidate?.metrics || {};
+  const parsedLineCount = Number(metrics.parsedLineCount || 0);
+  if (!parsedLineCount) return false;
+
+  if (metrics.bestellscheinLike) {
+    const completeCount = Number(metrics.bestellscheinCompleteCount || 0);
+    return completeCount > 0
+      && completeCount === parsedLineCount
+      && Number(metrics.handlingUnitCount || 0) >= completeCount;
+  }
+
+  const completeCount = Number(metrics.completeRequiredCount || 0);
+  return completeCount > 0 && completeCount === parsedLineCount;
+}
+
+function pickingOcrCompletenessSignature(candidate) {
+  const metrics = candidate?.metrics || {};
+  const parsedLineCount = Number(metrics.parsedLineCount || 0);
+  if (!parsedLineCount) return "";
+  const completeCount = metrics.bestellscheinLike
+    ? Number(metrics.bestellscheinCompleteCount || 0)
+    : Number(metrics.completeRequiredCount || 0);
+  return [
+    metrics.bestellscheinLike ? "bestellschein" : "lageraufgabe",
+    parsedLineCount,
+    completeCount,
+    Number(metrics.expectedRows || 0),
+    Number(metrics.handlingUnitCount || 0),
+    Number(metrics.fromBinCount || 0),
+    Number(metrics.toBinCount || 0)
+  ].join("|");
+}
+
+function importNowMs() {
+  return window.performance?.now ? window.performance.now() : Date.now();
+}
+
+function pushImportTiming(timings, label, startedAt, result = null) {
+  const endedAt = importNowMs();
+  if (Array.isArray(timings)) {
+    timings.push({
+      label,
+      ms: Math.max(0, Math.round(endedAt - Number(startedAt || endedAt))),
+      best: result?.best ? pickingOcrCandidateDiagnostic(result.best) : null
+    });
+  }
+  return endedAt;
+}
+
+function pickingOcrSelectionResult(result, allScaleCandidates, rotations, timings = []) {
+  const best = result.best;
+  const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+  const scaleCandidates = Array.isArray(allScaleCandidates) && allScaleCandidates.length
+    ? allScaleCandidates
+    : result.scaleCandidates || [];
+  const rotationCandidates = Array.isArray(rotations) && rotations.length ? rotations : result.rotations || [];
+  const loadingSlipResult = collectLoadingSlipLinesFromOcrCandidates(candidates);
+  const parsed = appendLoadingSlipLinesToParsed(best.parsed, loadingSlipResult.lines);
+  return {
     text: best.text,
-    parsed: best.parsed,
+    parsed,
     source: "ocr-candidate",
     selectedCandidate: pickingOcrCandidateDiagnostic(best),
     ocrCandidates: candidates.map(pickingOcrCandidateDiagnostic),
     ocrScales: scaleCandidates.map((candidate) => candidate.scale),
     ocrDpis: scaleCandidates.map((candidate) => candidate.dpi),
-    ocrRotations: [...OCR_ROTATIONS],
+    ocrRotations: [...rotationCandidates],
     ocrScale: best.scale,
     ocrDpi: best.dpi,
     ocrRotation: best.rotation,
     qualityScore: best.score,
     minimumQualityScore: PICKING_OCR_MINIMUM_SCORE,
-    qualityAccepted: isUsablePickingOcrSelection(best)
+    qualityAccepted: isUsablePickingOcrSelection(best),
+    ocrTimings: Array.isArray(timings) ? timings : [],
+    loadingSlipLines: loadingSlipResult.lines,
+    loadingSlipCandidates: loadingSlipResult.diagnostics,
+    loadingSlipExpected: loadingSlipResult.expected,
+    loadingSlipFallback: result.loadingSlipFallback === true
   };
 }
 
@@ -922,6 +1207,7 @@ function pickingOcrCandidateMetrics(text, parsed, issues = []) {
   const pickingLines = parseLoadingSlipLines(sourceLines).length ? linesBeforeLoadingSlip(sourceLines) : sourceLines;
   const pickingSource = pickingLines.join("\n");
   const warehouseLike = isWarehouseLikeText(pickingSource);
+  const bestellscheinLike = isBestellscheinText(pickingSource);
   const expectedWarehouseRows = warehouseLike ? countWarehouseCandidateRows(pickingLines) : 0;
   const expectedBestellscheinRows = countBestellscheinCandidateRows(pickingLines);
   const warehouseOrderCount = normalLines.filter((line) => /^\d{6,14}$/.test(String(line.warehouseOrder || ""))).length;
@@ -944,6 +1230,12 @@ function pickingOcrCandidateMetrics(text, parsed, issues = []) {
   }).length;
   const missingFromBinCount = normalLines.filter((line) => !String(line.fromBin || "").trim()).length;
   const suspiciousSourceFieldCount = normalLines.filter((line) => isSuspiciousImportedSourceBin(line)).length;
+  const bestellscheinCompleteCount = bestellscheinLike ? normalLines.filter(isCompleteImportLine).length : 0;
+  const bestellscheinOrderDetected = bestellscheinLike && Boolean(String(parsed?.orderNumber || "").trim());
+  const bestellscheinCustomerDetected = bestellscheinLike && (
+    Boolean(String(parsed?.customerName || "").trim()) ||
+    /030\s*\/\s*012|hummel\s+logistik|schwan\s+international/i.test(pickingSource)
+  );
   const expectedRows = Math.max(expectedWarehouseRows, expectedBestellscheinRows);
 
   return {
@@ -952,6 +1244,7 @@ function pickingOcrCandidateMetrics(text, parsed, issues = []) {
     parsedLineCount: normalLines.length,
     expectedWarehouseRows,
     expectedBestellscheinRows,
+    bestellscheinLike,
     expectedRows,
     discardedRows: Math.max(0, expectedRows - normalLines.length),
     warehouseOrderCount,
@@ -961,6 +1254,9 @@ function pickingOcrCandidateMetrics(text, parsed, issues = []) {
     quantityCount,
     toBinCount,
     completeRequiredCount,
+    bestellscheinCompleteCount,
+    bestellscheinOrderDetected,
+    bestellscheinCustomerDetected,
     missingFromBinCount,
     suspiciousSourceFieldCount,
     issueCount: Array.isArray(issues) ? issues.length : 0
@@ -978,6 +1274,20 @@ function isSuspiciousImportedSourceBin(line) {
 }
 
 function scorePickingOcrCandidate(metrics) {
+  if (metrics.bestellscheinLike && metrics.bestellscheinCompleteCount > 0) {
+    return metrics.bestellscheinCompleteCount * 3200
+      + metrics.parsedLineCount * 500
+      + metrics.productCount * 250
+      + metrics.quantityCount * 250
+      + metrics.handlingUnitCount * 150
+      + (metrics.bestellscheinOrderDetected ? 400 : 0)
+      + (metrics.bestellscheinCustomerDetected ? 300 : 0)
+      + Math.min(metrics.textLength || 0, 800)
+      - metrics.issueCount * 4000
+      - metrics.discardedRows * 800
+      - metrics.suspiciousSourceFieldCount * 3000;
+  }
+
   return metrics.completeRequiredCount * 4000
     + metrics.parsedLineCount * 600
     + metrics.warehouseOrderCount * 250
@@ -1296,6 +1606,12 @@ function isBestellscheinText(value) {
   return /bestellschein|entnahmeanweisungen/i.test(String(value || ""));
 }
 
+function isSiBestellscheinText(value) {
+  const source = String(value || "");
+  return isBestellscheinText(source)
+    && /030\s*\/\s*012|hummel\s+logistik|schwan\s+international|\bauslagerung\b|\bSI\b/i.test(source);
+}
+
 async function renderPdfPageToCanvas(pdf, pageNumber, scale = OCR_RENDER_SCALE) {
   const page = await pdf.getPage(pageNumber);
   const viewport = page.getViewport({ scale });
@@ -1396,10 +1712,13 @@ function pickingImportDiagnostics(text, parsed = {}, info = {}) {
   const pickingLines = loadingSlipLines.length ? linesBeforeLoadingSlip(lines) : lines;
   const pickingSource = pickingLines.join("\n");
   const warehouseLike = isWarehouseLikeText(pickingSource);
+  const loadingSlipAudit = auditLoadingSlipImport(lines, parsed.lines || []);
+  const loadingSlipExpected = Math.max(Number(info.loadingSlipExpected || 0), Number(loadingSlipAudit.expected || 0));
 
   const parsedLineCount = Array.isArray(parsed.lines) ? parsed.lines.length : 0;
   return {
     source: info.source || "",
+    documentType: info.documentType || importDocumentType(source, parsed),
     pdfPages: Number(info.pdfPages || 0),
     ocrScale: info.ocrScale || "",
     ocrDpi: info.ocrDpi || "",
@@ -1411,6 +1730,11 @@ function pickingImportDiagnostics(text, parsed = {}, info = {}) {
     ocrRotation: info.ocrRotation ?? "",
     selectedCandidate: info.selectedCandidate || null,
     ocrCandidates: Array.isArray(info.ocrCandidates) ? info.ocrCandidates : [],
+    ocrTimings: Array.isArray(info.ocrTimings) ? info.ocrTimings : [],
+    loadingSlipExpected,
+    loadingSlipAttached: loadingSlipAudit.attached,
+    loadingSlipIssues: loadingSlipAudit.issues,
+    loadingSlipCandidates: Array.isArray(info.loadingSlipCandidates) ? info.loadingSlipCandidates : [],
     qualityScore: info.qualityScore ?? null,
     minimumQualityScore: info.minimumQualityScore ?? PICKING_OCR_MINIMUM_SCORE,
     qualityAccepted: info.qualityAccepted === true,
@@ -1505,6 +1829,9 @@ function logPickingImportLineDiagnostics(diagnostics, importDiagnostics = {}) {
     ocrRotation: importDiagnostics.ocrRotation ?? "",
     selectedCandidate: importDiagnostics.selectedCandidate || null,
     ocrCandidates: importDiagnostics.ocrCandidates || [],
+    loadingSlipExpected: importDiagnostics.loadingSlipExpected ?? 0,
+    loadingSlipAttached: importDiagnostics.loadingSlipAttached ?? 0,
+    loadingSlipCandidates: importDiagnostics.loadingSlipCandidates || [],
     qualityScore: importDiagnostics.qualityScore ?? null,
     minimumQualityScore: importDiagnostics.minimumQualityScore ?? PICKING_OCR_MINIMUM_SCORE,
     qualityAccepted: importDiagnostics.qualityAccepted === true,
@@ -1606,7 +1933,7 @@ async function detectPickingWarehouse(lines, text = "") {
 
   const source = String(text || "");
   if (/\bSSI\b/i.test(source)) scores.SSI.textHits += 1;
-  if (/Schwan\s+International/i.test(source)) scores.SI.textHits += 1;
+  if (/Schwan\s+International|030\s*\/\s*012|Hummel\s+Logistik\s+SI/i.test(source)) scores.SI.textHits += 1;
 
   if (serverOnline && materials.length) {
     await Promise.all(["SSI", "SI"].flatMap((warehouse) => materials.map(async (materialnummer) => {
@@ -2027,10 +2354,11 @@ function parseOrderText(text) {
 
   const bestellscheinRows = collectBestellscheinRows(pickingLines);
   if (bestellscheinRows.length) {
+    const bestellscheinCustomer = bestellscheinCustomerName(text, explicitCustomerName);
     return {
       orderNumber: orderNumber || "",
-      customerName: cleanCustomerName(explicitCustomerName || "Bestellschein"),
-      customerGroupKey: customerGroupKeyForImport(cleanCustomerName(explicitCustomerName || "Bestellschein")),
+      customerName: bestellscheinCustomer,
+      customerGroupKey: customerGroupKeyForImport(bestellscheinCustomer),
       lines: appendLoadingSlipLines(bestellscheinRows.map((line, index) => createLine({
         ...line,
         warehouseOrder: String(index + 1),
@@ -2091,6 +2419,13 @@ function appendOrderHintFromText(orderNumber, text) {
   return rules.appendOrderHintToOrderNumber(orderNumber, rules.extractOrderHint(text));
 }
 
+function bestellscheinCustomerName(text, explicitCustomerName = "") {
+  const explicit = cleanCustomerName(explicitCustomerName);
+  if (explicit && !/^auslagerung$/i.test(explicit)) return explicit;
+  if (isSiBestellscheinText(text)) return "030 / 012 Hummel Logistik SI";
+  return explicit || "Bestellschein";
+}
+
 function appendLoadingSlipLines(lines, loadingSlipLines) {
   if (!Array.isArray(lines)) return lines;
   const additions = (Array.isArray(loadingSlipLines) ? loadingSlipLines : [])
@@ -2110,6 +2445,56 @@ function countLoadingSlipLines(lines) {
   return (Array.isArray(lines) ? lines : [])
     .filter((line) => line?.lineType === "loading-slip" && String(line.barcode || "").trim())
     .length;
+}
+
+function appendLoadingSlipLinesToParsed(parsed, loadingSlipLines) {
+  if (!parsed || !Array.isArray(parsed.lines)) return parsed;
+  const lines = appendLoadingSlipLines(parsed.lines, loadingSlipLines);
+  return lines === parsed.lines ? parsed : { ...parsed, lines };
+}
+
+function collectLoadingSlipLinesFromOcrCandidates(candidates) {
+  const seen = new Set();
+  const lines = [];
+  const diagnostics = [];
+
+  (Array.isArray(candidates) ? candidates : []).forEach((candidate) => {
+    const sourceLines = String(candidate?.text || "")
+      .replace(/\r/g, "\n")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const parsedLines = parseLoadingSlipLines(sourceLines);
+    const added = [];
+
+    parsedLines.forEach((line) => {
+      const barcode = String(line?.barcode || "").trim();
+      if (!barcode || seen.has(barcode)) return;
+      seen.add(barcode);
+      lines.push(line);
+      added.push(barcode);
+    });
+
+    const audit = auditLoadingSlipImport(sourceLines, parsedLines);
+    if (audit.expected || parsedLines.length) {
+      diagnostics.push({
+        label: candidate?.label || "",
+        scale: candidate?.scale || "",
+        dpi: candidate?.dpi || "",
+        rotation: Number(candidate?.rotation || 0),
+        score: Number(candidate?.score || 0),
+        expected: audit.expected,
+        parsed: parsedLines.length,
+        added
+      });
+    }
+  });
+
+  return {
+    lines,
+    diagnostics,
+    expected: diagnostics.reduce((maximum, entry) => Math.max(maximum, Number(entry.expected || 0)), 0)
+  };
 }
 
 function mergeServerLoadingSlipLines(order, serverOrder) {
@@ -2222,7 +2607,7 @@ function parseLoadingSlipBlock(lines) {
   if (!isLikelyLoadingSlip(lines)) return null;
 
   const rows = collectBestellscheinRows(lines);
-  const row = rows[0] || parseStackedLoadingSlipRow(lines);
+  const row = rows[0] || parseStackedLoadingSlipRow(lines) || parseCompactLoadingSlipRow(lines);
   if (!row) return null;
 
   const barcode = extractLoadingSlipHeaderBarcode(lines) || row.fromHandlingUnit || "";
@@ -2256,9 +2641,10 @@ function loadingSlipBlocksFrom(lines) {
     const isStart = isLoadingSlipStartLine(line);
     const isHeaderBarcode = isLoadingSlipHeaderBarcodeLine(line);
     const isRow = isBestellscheinRowStart(line) || /^\d{6,8}\b/.test(String(line || "").trim());
+    const startsHeaderOnlySlip = !current && isHeaderBarcode;
     const startsNestedSlip = current && isHeaderBarcode && (currentHasRows || currentHasHeaderBarcode);
 
-    if (isStart || startsNestedSlip) {
+    if (isStart || startsHeaderOnlySlip || startsNestedSlip) {
       if (current?.length) blocks.push(current);
       current = [line];
       currentHasRows = isRow;
@@ -2291,9 +2677,12 @@ function linesBeforeLoadingSlip(lines) {
 }
 
 function isLikelyLoadingSlip(lines) {
-  const source = Array.isArray(lines) ? lines.join("\n") : String(lines || "");
-  return /lad[ce](?:schein|liste)|lade(?:schein|liste)|bestellschein|entnahmeanweisungen/i.test(source) && (
-    collectBestellscheinRows(lines).length > 0 || Boolean(parseStackedLoadingSlipRow(lines))
+  const sourceLines = Array.isArray(lines) ? lines : String(lines || "").replace(/\r/g, "\n").split("\n");
+  const source = sourceLines.join("\n");
+  const hasLoadingSlipMarker = /lad[ce](?:schein|liste)|lade(?:schein|liste)|bestellschein|entnahmeanweisungen/i.test(source);
+  const hasHeaderBarcode = sourceLines.some(isLoadingSlipHeaderBarcodeLine);
+  return (hasLoadingSlipMarker || hasHeaderBarcode) && (
+    collectBestellscheinRows(lines).length > 0 || Boolean(parseStackedLoadingSlipRow(lines)) || Boolean(parseCompactLoadingSlipRow(lines))
   );
 }
 
@@ -2317,6 +2706,31 @@ function parseStackedLoadingSlipRow(lines) {
     unit: normalizeUnit(rowMatch[4]),
     toBin: ""
   };
+}
+
+function parseCompactLoadingSlipRow(lines) {
+  const sourceLines = Array.isArray(lines) ? lines : String(lines || "").replace(/\r/g, "\n").split("\n");
+  for (const line of sourceLines) {
+    const normalized = normalizeLoadingSlipText(line);
+    const rowMatch = normalized.match(/^(\d{6,8})\b\s+(.+?)\s+(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:[,.]\d+)?)\s*(St(?:Ã¼|ue|u|ii|i)ck|STK?|PC|PCS|KG|G|KAR|PCK|PAK|VE|PAL)\b/i);
+    if (!rowMatch) continue;
+
+    const description = cleanLoadingSlipDescription(rowMatch[2]);
+    const targetQty = normalizeLoadingSlipQuantity(rowMatch[3]);
+    if (!description || !targetQty) continue;
+
+    return {
+      fromHandlingUnit: "",
+      fromBin: "",
+      product: rowMatch[1],
+      description,
+      targetQty,
+      unit: normalizeUnit(rowMatch[4]),
+      toBin: ""
+    };
+  }
+
+  return null;
 }
 
 function normalizeLoadingSlipText(value) {
@@ -2846,22 +3260,27 @@ function parseWarehouseLineWithoutBin(line) {
 }
 
 function destinationToCustomerGroupFallback(lines) {
-  return firstDestinationName(lines);
-}
-
-function firstDestinationName(lines) {
-  return (Array.isArray(lines) ? lines : [])
-    .map((line) => line?.toBin)
-    .map(normalizeDestinationName)
-    .find(Boolean) || "";
+  return destinationCustomerNameForLines(lines);
 }
 
 function destinationToCustomerNameFallback(lines) {
-  return firstDestinationName(lines);
+  return destinationCustomerNameForLines(lines);
 }
 
 function defaultDestinationCustomerName(lines) {
-  return firstDestinationName(lines);
+  return destinationCustomerNameForLines(lines);
+}
+
+function destinationCustomerNameForLines(lines) {
+  const destinations = destinationNamesForLines(lines);
+  return destinations.includes(SSI_DESTINATION_CUSTOMER) ? SSI_DESTINATION_CUSTOMER : destinations[0] || "";
+}
+
+function destinationNamesForLines(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .map((line) => line?.toBin)
+    .map(normalizeDestinationName)
+    .filter(Boolean);
 }
 
 function applyDefaultDestinationCustomer(lines) {
@@ -2885,11 +3304,11 @@ function orderNumberForCustomer(orderNumber, customerName) {
 }
 
 function requiresSsiOrderNumber(customerName) {
-  return normalizeDestinationName(customerName) === "9021-0OUT";
+  return normalizeDestinationName(customerName) === SSI_DESTINATION_CUSTOMER;
 }
 
 function annotateDestinationExceptions(lines) {
-  const defaultDestination = firstDestinationName(lines);
+  const defaultDestination = destinationCustomerNameForLines(lines);
   if (!defaultDestination) return lines;
 
   return lines.map((line) => {
@@ -2909,8 +3328,8 @@ function normalizeDestinationName(value) {
     .toUpperCase()
     .replace(/\s*-\s*/g, "-")
     .replace(/\s+/g, " ")
-    .replace(/^(?:8021|9021|99021)-0?0?UT\b/, "9021-0OUT");
-  if (/^9021-0OUT\b/.test(normalized)) return "9021-0OUT";
+    .replace(/^(?:8021|9021|99021)-0?0?UT\b/, SSI_DESTINATION_CUSTOMER);
+  if (new RegExp(`^${SSI_DESTINATION_CUSTOMER}\\b`).test(normalized)) return SSI_DESTINATION_CUSTOMER;
   return normalized;
 }
 
@@ -3364,14 +3783,21 @@ function extractDestinationBin(text) {
   const match = matches.at(-1);
   if (match) return normalizeDestinationName(trimDestinationFooterNoise(match[0], source.slice(match.index + match[0].length)));
   const fallback = source.match(/((?:9\d{3,4}|\d{4})[ -][A-Z0-9]+(?:[ -][A-Z0-9]+)*)\s*$/i);
-  return fallback ? normalizeDestinationName(fallback[1]) : "";
+  return fallback ? normalizeDestinationName(trimDestinationFooterNoise(fallback[1])) : "";
 }
 
 function trimDestinationFooterNoise(destination, followingText = "") {
+  let value = String(destination || "").trim();
+  if (/\s+\d{1,2}$/.test(value) && /^\s*[,.;:¢]/.test(String(followingText || ""))) {
+    value = value.replace(/\s+\d{1,2}$/, "");
+  }
+  return trimDestinationWhitespaceSuffix(value);
+}
+
+function trimDestinationWhitespaceSuffix(destination) {
   const value = String(destination || "").trim();
-  if (!/\s+\d{1,2}$/.test(value)) return value;
-  if (/^\s*[,.;:¢]/.test(String(followingText || ""))) return value.replace(/\s+\d{1,2}$/, "");
-  return value;
+  const match = value.match(/^((?:9\d{3,4}|\d{4})-[A-Z0-9]+(?:-[A-Z0-9]+)*)(?:\s+.+)$/i);
+  return match ? match[1] : value;
 }
 
 function cleanProductDescription(value, toBin = "") {

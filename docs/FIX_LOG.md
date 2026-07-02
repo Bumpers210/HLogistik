@@ -1,6 +1,189 @@
 # HLogistik Fix Log
 
-Stand: 2026-06-25 10:08:47 +02:00
+Stand: 2026-07-02 08:10:00 +02:00
+
+## 2026-07-02 - Projektdokumentation synchronisiert
+
+Ausgangsproblem:
+
+Nach den Stabilitaetsarbeiten waren einzelne README-/Audit-Aussagen veraltet, besonders zu Tablet-Export, Originaldatei-Archivierung, Import-/Archivpfaden, OCR-Stellplatzverhalten, Rollenmodell und aktuellen Asset-Versionen.
+
+Umgesetzt:
+
+- README und aktive `docs/`-Dokumente auf den aktuellen technischen Stand gebracht.
+- Konfiguration fuer `HLOGISTIK_IMPORT_DIR`, `HLOGISTIK_ARCHIVE_DIR`, `import-path.txt`, Exportpfad und `ARTICLE_DELETE_PASSWORD` dokumentiert; `archive-path.txt` ist als ignorierte lokale Pfaddatei erwaehnt, wird aber im aktuellen Serverstand nicht gelesen.
+- Klarstellungen ergaenzt: Rollenmodell ist LAN-Schutz, CR-002 bleibt aktiv, Kommissionier-PDF-Import korrigiert Von-Lagerplaetze nicht per Stellplatzregel, Originaldateien werden erst nach erfolgreicher PDF-Erstellung archiviert.
+- Aktueller Clientstand dokumentiert: `app.js?v=20260702-1`, Service Worker/Manifest `1.5.151`.
+
+Validierung:
+
+- Reine Dokumentationsaenderung; keine App-, Import-, Export-, Datenbank-, Service-Worker- oder Testlogik veraendert.
+
+## 2026-07-02 - Kundenregel fuer 9021-0OUT beim Import korrigiert
+
+Backup:
+
+- Code-Backup: `Backups/code-backup-customer-destination-20260702-072749/`
+
+Ausgangsproblem:
+
+Bei Kommissionierimporten wurde der Kunde aus dem ersten/default Nach-Lagerplatz abgeleitet. Wenn `9021-0OUT` erst in einer spaeteren Position vorkam, wurde der Auftrag nicht sicher als `9021-0OUT`/`SSI` behandelt.
+
+Umgesetzt:
+
+- Die Kundenermittlung fuer Nach-Lagerplaetze bevorzugt jetzt `9021-0OUT`, sobald dieser Nach-Lagerplatz in irgendeiner Position vorkommt.
+- Abweichende Nach-Lagerplaetze werden positionsbezogen weiter als automatische Zusatzbemerkung gespeichert.
+- Ohne `9021-0OUT` bleibt das bisherige Verhalten erhalten: erster Nach-Lagerplatz ist Kunde, weitere abweichende Nach-Lagerplaetze werden als Zusatzbemerkung notiert.
+- Server-Normalisierung nutzt dieselbe Zielkundenregel beim Speichern/Freigeben.
+- Asset-Version `app.js?v=20260702-1`, Service-Worker-/Manifest-Version `1.5.151`.
+
+Validierung:
+
+- QA-Matrix erweitert fuer gemischte Nach-Lagerplaetze mit `9021-0OUT` an zweiter Position und fuer bestehendes Fallback-Verhalten ohne `9021-0OUT`.
+- CR-002 bleibt unveraendert.
+
+## 2026-07-01 - Ladelisten aus OCR-Nebenkandidaten ergaenzen
+
+Backup:
+
+- Code-Backup: `Backups/code-backup-loading-slip-ocr-20260701-152300/`
+
+Ausgangsproblem:
+
+Beim Auftrag `20260701142350.pdf` wurde die Haupttabelle sauber importiert, die Ladeliste im unteren Dokumentbereich wurde im gewaehlen OCR-Kandidaten aber verdreht/kaputt erkannt. Dadurch enthielt der gespeicherte Auftrag keine `loading-slip`-Position.
+
+Umgesetzt:
+
+- Der Hauptimport bleibt unveraendert kandidatentreu: normale Auftragspositionen kommen weiterhin nur aus dem gewaehlen OCR-Hauptkandidaten.
+- Wenn ein sauberer gerader Hauptkandidat viele zusaetzliche OCR-Zeilen ohne erkannte Ladeliste enthaelt, wird ein Rotationsnachlauf gestartet, der ausschliesslich Ladelisten aus Nebenkandidaten sammelt.
+- Ladelisten werden dedupliziert per Barcode an die Hauptpositionen angehaengt; Mengen, HU und Stellplaetze der normalen Positionen werden nicht aus anderen OCR-Kandidaten uebernommen.
+- Ladelisten koennen jetzt auch erkannt werden, wenn nur die Kopfzeile `Nummer: A...` sauber erkannt wurde und das Wort `Ladeliste`/`Ladeschein` fehlt.
+- Importdiagnose enthaelt jetzt Ladelisten-Kandidaten, erwartete und angehaengte Ladelisten.
+- Asset-Version `app.js?v=20260701-6`, Service-Worker-/Manifest-Version `1.5.150`.
+
+Validierung:
+
+- Isolierter Parsercheck fuer header-only Ladelistenblock `Nummer: A 12 34 56 78 90` mit Artikelzeile `1076846 Zusatz Artikel 12 ST`.
+- `node --check app.js`
+- `node --check scripts/qa-api-matrix.mjs`
+- `node --check service-worker.js`
+- `npm.cmd run lint`
+- Isolierte QA-Kopie `tmp/loading-slip-ocr-qa-20260701-153105/`: `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` mit 100/100 Checks.
+- CR-002 bleibt unveraendert.
+
+## 2026-07-01 - Import-OCR weiter beschleunigt
+
+Backup:
+
+- Code-Backup: `Backups/code-backup-import-speed-plan-20260701-142224/`
+
+Ausgangsproblem:
+
+Der PDF-Import dauerte nach der Qualitaetsverbesserung weiterhin spuerbar lange, weil nach einem nicht ausreichend sicheren Basislauf weiterhin sehr frueh die komplette Rotationsmatrix gestartet wurde. Einlagerungs-PDFs starteten zudem OCR auch dann, wenn die PDF-Textschicht bereits vollstaendige Zeilen lieferte.
+
+Umgesetzt:
+
+- Kommissionier-OCR prueft jetzt zuerst `1000 DPI / 0 Grad`, danach `1600 DPI / 0 Grad`; Rotationen `90/180/270` bleiben erhalten, laufen aber nur noch als Fallback.
+- Wenn beide geraden OCR-Kandidaten sauber, vollstaendig und konsistent sind, wird der Import ohne Rotationsfallback akzeptiert.
+- OCR-Timings werden in der Importdiagnose mitgefuehrt, damit langsame Faelle im Browser nachvollziehbar bleiben.
+- Einlagerungs-PDFs akzeptieren eine saubere PDF-Textschicht vor OCR; unsichere oder gewarnte Textkandidaten gehen weiterhin durch die bisherige OCR.
+- Keine neuen Mengenregeln und keine neue Stellplatzkorrektur.
+- Asset-Version `app.js?v=20260701-5`, Service-Worker-/Manifest-Version `1.5.149`.
+
+Validierung:
+
+- `node --check app.js`
+- `node --check scripts/qa-api-matrix.mjs`
+- `node --check service-worker.js`
+- `npm.cmd run lint`
+- Isolierte QA-Kopie `tmp/import-speed-plan-qa-20260701-142702/`: `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` mit 98/98 Checks.
+- CR-002 bleibt unveraendert.
+
+## 2026-07-01 - Kommissionierimport beschleunigt
+
+Backup:
+
+- Code-Backup: `Backups/code-backup-import-speedup-20260701-132644/`
+
+Ausgangsproblem:
+
+Seit der letzten OCR-Qualitaetsverbesserung dauerte der Kommissionierimport ungewoehnlich lange, weil der schnelle Basis-OCR-Kandidat bei Eskalation erneut im Vollscan erkannt wurde und der Tesseract-Worker neu gestartet werden konnte.
+
+Umgesetzt:
+
+- Saubere PDF-Textkandidaten werden vor OCR akzeptiert, aber nur bei vollstaendigen Pflichtfeldern, ohne Import-Issues, ohne verworfene Zeilen und ohne verdaechtige Quellfelder.
+- Schnelllauf und Vollscan verwenden denselben OCR-Worker.
+- Bereits erkannte OCR-Kandidaten, insbesondere `1000 DPI / Rotation 0`, werden im Vollscan wiederverwendet statt erneut erkannt.
+- Der volle 1000/1600-DPI- und Rotationsfallback bleibt erhalten; die OCR-Qualitaetsbewertung wurde nicht abgesenkt.
+- Asset-Version `app.js?v=20260701-4`, Service-Worker-/Manifest-Version `1.5.148`.
+
+Validierung:
+
+- `node --check app.js`
+- `node --check scripts/qa-api-matrix.mjs`
+- `node --check service-worker.js`
+- `npm.cmd run lint`
+- Isolierte QA-Kopie `tmp/import-speedup-qa-20260701-132952/`: `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` mit 96/96 Checks.
+- QA-Matrix erweitert um PDF-Text-Fast-Path und schwachen Text-Fast-Path.
+- QA-Matrix prueft statisch Worker-Wiederverwendung und Kandidaten-Reuse.
+- Keine neuen Mengenregeln, keine neue Stellplatzkorrektur.
+- CR-002 bleibt unveraendert.
+
+## 2026-07-01 - Importqualitaet und OCR-Laufzeit
+
+Backup:
+
+- Code-Backup: `Backups/code-backup-import-quality-speed-20260701-125336/`
+
+Ausgangsproblem:
+
+Bei heutigen Ansbach-/Insel-Auftraegen wurden Nach-Lagerplaetze durch OCR-Folgeworte erweitert. Die bestehende Bestandsheuristik fuer klare Leading-Zero-OCR-Mengen wie `038` -> `938` bleibt erhalten; es wurden keine neuen Mengenregeln ergaenzt.
+
+Umgesetzt:
+
+- Nach-Lagerplaetze werden bei klaren Kundencodes wieder auf den eigentlichen Code gekuerzt, z. B. `9020-ANSBACH CO PA` zu `9020-ANSBACH`.
+- Hyphen-Kundencodes wie `9020-INSEL-ROTH` bleiben erhalten; angehaengte OCR-Worte wie `OF` werden entfernt.
+- Die bestehende Import-Mengenkorrektur anhand eindeutig passendem Lagerbestand bleibt erhalten; neue Mengenregeln wurden nicht eingefuehrt.
+- OCR laeuft zuerst mit einem schnellen Basis-Kandidaten; nur unsichere Ergebnisse gehen weiter durch die volle 1000/1600-DPI- und Rotationssuche.
+- Asset-Version `app.js?v=20260701-3`, Service-Worker-/Manifest-Version `1.5.147`.
+
+Validierung:
+
+- `node --check app.js`
+- `node --check scripts/qa-api-matrix.mjs`
+- `node --check service-worker.js`
+- `npm.cmd run lint`
+- Isolierte QA-Kopie `tmp/import-quality-speed-qa-20260701-130354/`: `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` mit 94/94 Checks.
+- Ansbach- und Insel-Fixtures wurden in die QA-Matrix aufgenommen.
+- Die QA-Matrix prueft, dass die vorhandene Leading-Zero-Mengenkorrektur erhalten bleibt und normale/unpassende Mengen unveraendert bleiben.
+- CR-002 bleibt unveraendert.
+
+## 2026-07-01 - SI-Bestellschein-Import wieder erlaubt
+
+Backup:
+
+- Code-Backup: `Backups/code-backup-si-import-refactor-20260701-105737/`
+
+Ausgangsproblem:
+
+Nach der OCR-Kandidatenbewertung wurden Kommissionier-PDFs insgesamt stabiler, SI-Bestellscheine konnten aber als zu schwach bewertet werden, weil sie keinen `Von-Lagerplatz` wie Lageraufgabe-Tabellen enthalten.
+
+Umgesetzt:
+
+- PDF-Text wird fuer SI-Bestellscheine wieder als eigener, kontrollierter Kandidat zugelassen.
+- OCR-Kandidaten behalten die bestehende Skala-/Rotationsauswahl, bekommen aber fuer Bestellscheine ein eigenes Scoring ohne Pflicht auf `Von-Lagerplatz`.
+- `030 / 012 Hummel Logistik SI`, `Hummel Logistik SI` und `Schwan International` zaehlen als SI-Hinweis fuer die Lagererkennung.
+- Bestellschein-Parser setzt bei SI-Kontext wieder `030 / 012 Hummel Logistik SI`, falls kein expliziter Kunde sauber erkannt wird.
+- Asset-Version `app.js?v=20260701-1`, Service-Worker-/Manifest-Version `1.5.145`.
+
+Validierung:
+
+- `node --check app.js`
+- `node --check scripts/qa-api-matrix.mjs`
+- `node --check service-worker.js`
+- `npm.cmd run lint`
+- Isolierte QA-Kopie `tmp/si-bestellschein-import-qa-20260701-110727/`: `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` mit 92/92 Checks.
+- CR-002 bleibt unveraendert.
 
 ## 2026-06-25 - PDF-Import OCR-Kandidatenbewertung
 

@@ -1,5 +1,6 @@
 import { normalizeSsiStorageBin } from "../server/helpers.mjs";
 import {
+  destinationCustomerNameForLines,
   MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX,
   normalizeManualStoragePositionCreateCount,
 } from "../server/rules/order-rules.mjs";
@@ -36,6 +37,11 @@ async function run() {
   check("ssi A shelf normalizes to H1", normalizeSsiStorageBin("AA8C3") === "002-H1-SAA8C3", normalizeSsiStorageBin("AA8C3"));
   check("ssi AT shelf normalizes to H1", normalizeSsiStorageBin("AT8A1") === "002-H1-SAT8A1", normalizeSsiStorageBin("AT8A1"));
   check("ssi AU shelf normalizes to H4", normalizeSsiStorageBin("AU8A1") === "002-H4-SAU8A1", normalizeSsiStorageBin("AU8A1"));
+  check(
+    "destination customer rule prefers 9021-0OUT from any line",
+    destinationCustomerNameForLines([{ toBin: "9020-ANSBACH" }, { toBin: "9021-0OUT" }]) === "9021-0OUT",
+    destinationCustomerNameForLines([{ toBin: "9020-ANSBACH" }, { toBin: "9021-0OUT" }])
+  );
   check("manual storage count default is 1", normalizeManualStoragePositionCreateCount("").value === 1, JSON.stringify(normalizeManualStoragePositionCreateCount("")));
   check("manual storage invalid count rejected", normalizeManualStoragePositionCreateCount("0").ok === false, JSON.stringify(normalizeManualStoragePositionCreateCount("0")));
   check("manual storage max count accepted", normalizeManualStoragePositionCreateCount(String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX)).ok === true, String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX));
@@ -89,6 +95,49 @@ async function run() {
     JSON.stringify({ orderNumber: refinedLateOrderHint.orderNumber, lines: refinedLateOrderHint.lines })
   );
 
+  const siBestellscheinOcrCandidate = await siBestellscheinOcrCandidateFixture();
+  check(
+    "picking OCR candidate accepts SI Bestellschein without source bin",
+    siBestellscheinOcrCandidate.accepted === true &&
+      siBestellscheinOcrCandidate.score >= 2500 &&
+      siBestellscheinOcrCandidate.parsed.lines.length === 1 &&
+      siBestellscheinOcrCandidate.parsed.lines[0]?.fromBin === "" &&
+      siBestellscheinOcrCandidate.parsed.customerName === "030 / 012 Hummel Logistik SI" &&
+      siBestellscheinOcrCandidate.parsed.customerGroupKey === "030 012 HUMMEL LOGISTIK SI",
+    JSON.stringify(siBestellscheinOcrCandidate)
+  );
+
+  const pdfTextFastAccept = await pdfTextFastAcceptFixture();
+  check(
+    "picking import accepts clean PDF text before OCR",
+    pdfTextFastAccept.accepted === true &&
+      pdfTextFastAccept.parsed.lines.length === 1 &&
+      pdfTextFastAccept.parsed.lines[0]?.fromBin === "002-H4-SAA8C3" &&
+      pdfTextFastAccept.parsed.lines[0]?.toBin === "9021-0OUT" &&
+      pdfTextFastAccept.issues.length === 0,
+    JSON.stringify(pdfTextFastAccept)
+  );
+
+  const weakPdfTextFastAccept = await weakPdfTextFastAcceptFixture();
+  check(
+    "picking import rejects weak PDF text fast path",
+    weakPdfTextFastAccept.accepted === false &&
+      weakPdfTextFastAccept.parsed.lines.length === 1 &&
+      !String(weakPdfTextFastAccept.parsed.lines[0]?.fromBin || "").trim(),
+    JSON.stringify(weakPdfTextFastAccept)
+  );
+
+  const loadingSlipFromSecondaryOcr = await loadingSlipFromSecondaryOcrCandidateFixture();
+  check(
+    "picking import appends loading slip from secondary OCR candidate",
+    loadingSlipFromSecondaryOcr.normalCount === 1 &&
+      loadingSlipFromSecondaryOcr.loadingCount === 1 &&
+      loadingSlipFromSecondaryOcr.loadingLine?.barcode === "A1234567890" &&
+      loadingSlipFromSecondaryOcr.loadingLine?.product === "1076846" &&
+      loadingSlipFromSecondaryOcr.loadingLine?.targetQty === "12",
+    JSON.stringify(loadingSlipFromSecondaryOcr)
+  );
+
   const mergedBestellscheinHu = await mergeBestellscheinHuFixture();
   check(
     "picking import does not overwrite differing Bestellschein HU during OCR refinement",
@@ -114,7 +163,7 @@ async function run() {
 
   const warehouseQuantityCorrection = await warehouseQuantityCorrectionFixture();
   check(
-    "picking import corrects leading-zero OCR quantity from unique stock quantity",
+    "picking import keeps existing leading-zero stock quantity correction",
     warehouseQuantityCorrection.corrected === "938"
       && warehouseQuantityCorrection.normal === ""
       && warehouseQuantityCorrection.unrelated === "",
@@ -186,31 +235,113 @@ async function run() {
     JSON.stringify(ocrConfusedBinImport)
   );
 
+  const ansbachDestinationImport = await parseWarehouseAnsbachDestinationFixture();
+  check(
+    "picking import trims OCR words after Ansbach destination bin",
+    ansbachDestinationImport.parsed.lines.length === 2 &&
+      ansbachDestinationImport.parsed.lines.every((line) => line.toBin === "9020-ANSBACH") &&
+      ansbachDestinationImport.parsed.lines[0]?.targetQty === "633" &&
+      ansbachDestinationImport.parsed.lines[1]?.targetQty === "250" &&
+      !ansbachDestinationImport.parsed.lines.some((line) => /(?:\bCO\b|\bPA\b|ZOOS|633\s*$)/i.test(String(line.description || ""))),
+    JSON.stringify(ansbachDestinationImport)
+  );
+
+  const inselDestinationImport = await parseWarehouseInselDestinationFixture();
+  check(
+    "picking import trims OCR words after Insel destination bin without changing quantity",
+    inselDestinationImport.parsed.lines.length === 1 &&
+      inselDestinationImport.parsed.lines[0]?.toBin === "9020-INSEL-ROTH" &&
+      inselDestinationImport.parsed.lines[0]?.targetQty === "1.000" &&
+      inselDestinationImport.parsed.lines[0]?.actualQty === "1.000",
+    JSON.stringify(inselDestinationImport)
+  );
+
+  const mixedSsiDestinationImport = await parseWarehouseMixedSsiDestinationFixture();
+  check(
+    "picking import uses 9021-0OUT as customer when any destination matches",
+    mixedSsiDestinationImport.parsed.customerName === "9021-0OUT" &&
+      mixedSsiDestinationImport.parsed.customerGroupKey === "9021 0OUT" &&
+      mixedSsiDestinationImport.parsed.lines.length === 2 &&
+      mixedSsiDestinationImport.parsed.lines[0]?.autoPositionNotes?.destination === "9020-ANSBACH" &&
+      !String(mixedSsiDestinationImport.parsed.lines[1]?.autoPositionNotes?.destination || "").trim(),
+    JSON.stringify(mixedSsiDestinationImport.parsed)
+  );
+
+  const mixedNonSsiDestinationImport = await parseWarehouseMixedNonSsiDestinationFixture();
+  check(
+    "picking import keeps first destination customer when no 9021-0OUT is present",
+    mixedNonSsiDestinationImport.parsed.customerName === "9020-ANSBACH" &&
+      mixedNonSsiDestinationImport.parsed.customerGroupKey === "9020 ANSBACH" &&
+      mixedNonSsiDestinationImport.parsed.lines.length === 2 &&
+      !String(mixedNonSsiDestinationImport.parsed.lines[0]?.autoPositionNotes?.destination || "").trim() &&
+      mixedNonSsiDestinationImport.parsed.lines[1]?.autoPositionNotes?.destination === "9030-KUNDE",
+    JSON.stringify(mixedNonSsiDestinationImport.parsed)
+  );
+
   const pickingImportSource = extractFunctionSource(appSource, "async function chooseBestImportText");
   const pickingCandidateSource = extractFunctionSource(appSource, "async function buildPickingImportCandidate");
   const pickingOcrReaderSource = extractFunctionSource(appSource, "async function readPickingPdfWithOcrCandidate");
+  const pickingOcrCandidateSetSource = extractFunctionSource(appSource, "async function readPickingPdfOcrCandidateSet");
   const pickingOcrScoreSource = extractFunctionSource(appSource, "function scorePickingOcrCandidate");
   const pickingDiagnosticsSource = extractFunctionSource(appSource, "function pickingImportDiagnostics");
+  const loadingSlipFallbackSource = extractFunctionSource(appSource, "async function readLoadingSlipOcrFallbackIfNeeded");
+  const storageImportSource = extractFunctionSource(appSource, "async function chooseBestStorageImportText");
   const stockEnrichmentSource = extractFunctionSource(appSource, "async function applyStorageBinsFromArticleStock");
   check(
-    "picking PDF import uses OCR-only candidate scoring",
+    "picking PDF import keeps OCR scoring and permits SI Bestellschein PDF text",
     pickingImportSource.includes("readPickingPdfWithOcrCandidate(pdf)") &&
-      !pickingImportSource.includes("pdf-text") &&
-      !pickingImportSource.includes("chooseBestPickingImportCandidate"),
+      pickingImportSource.includes("isAcceptedSiBestellscheinImportCandidate") &&
+      pickingImportSource.includes("isAcceptedPdfTextImportCandidate") &&
+      pickingImportSource.includes("pdf-text") &&
+      pickingImportSource.includes("chooseBestPickingImportCandidate"),
     pickingImportSource
   );
   check(
     "picking PDF import evaluates multiple OCR scale and rotation candidates",
     appSource.includes("PICKING_OCR_SCALE_CANDIDATES") &&
+      appSource.includes("PICKING_OCR_UPRIGHT_ROTATIONS") &&
+      pickingOcrReaderSource.includes("readPickingPdfOcrCandidateSet") &&
+      pickingOcrReaderSource.includes("isFastAcceptedPickingOcrCandidate") &&
+      pickingOcrReaderSource.includes("isStableUprightPickingOcrResult") &&
+      pickingOcrReaderSource.includes("readLoadingSlipOcrFallbackIfNeeded") &&
+      appSource.includes("PICKING_OCR_FAST_ACCEPT_SCORE") &&
+      pickingOcrReaderSource.includes("createOcrWorker") &&
       pickingOcrReaderSource.includes("candidateMap") &&
-      pickingOcrReaderSource.includes("OCR_ROTATIONS") &&
-      pickingOcrReaderSource.includes("pickingOcrScaleCandidates") &&
-      pickingOcrReaderSource.includes("pickingOcrCandidateDiagnostic"),
+      pickingOcrReaderSource.includes("worker.terminate") &&
+      pickingOcrCandidateSetSource.includes("candidateMap") &&
+      pickingOcrCandidateSetSource.includes("rotationCandidates") &&
+      pickingOcrCandidateSetSource.includes("processedPages") &&
+      appSource.includes("pickingOcrCandidateDiagnostic"),
+    `${pickingOcrReaderSource}\n${pickingOcrCandidateSetSource}`
+  );
+  check(
+    "picking PDF import checks precise upright OCR before rotation fallback",
+    pickingOcrReaderSource.includes("uprightResult") &&
+      pickingOcrReaderSource.includes("rotations-fallback") &&
+      pickingOcrReaderSource.indexOf("uprightResult") < pickingOcrReaderSource.indexOf("fullResult") &&
+      pickingOcrReaderSource.indexOf("fullResult") < pickingOcrReaderSource.indexOf("rotations-fallback"),
     pickingOcrReaderSource
+  );
+  check(
+    "picking PDF import can scan rotations only for loading slips",
+    loadingSlipFallbackSource.includes("shouldRunLoadingSlipOcrFallback") &&
+      loadingSlipFallbackSource.includes("readPickingPdfOcrCandidateSet") &&
+      loadingSlipFallbackSource.includes("ladeliste-rotationen") &&
+      appSource.includes("collectLoadingSlipLinesFromOcrCandidates") &&
+      appSource.includes("appendLoadingSlipLinesToParsed"),
+    loadingSlipFallbackSource
+  );
+  check(
+    "storage PDF import accepts clean PDF text before OCR",
+    storageImportSource.includes("isAcceptedStoragePdfTextImportCandidate") &&
+      storageImportSource.includes("readPdfWithOcr") &&
+      storageImportSource.indexOf("isAcceptedStoragePdfTextImportCandidate") < storageImportSource.indexOf("readPdfWithOcr"),
+    storageImportSource
   );
   check(
     "picking PDF import scores OCR candidates with measurable table quality",
     pickingOcrScoreSource.includes("completeRequiredCount") &&
+      pickingOcrScoreSource.includes("bestellscheinCompleteCount") &&
       pickingOcrScoreSource.includes("missingFromBinCount") &&
       pickingOcrScoreSource.includes("suspiciousSourceFieldCount") &&
       pickingOcrScoreSource.includes("discardedRows"),
@@ -220,6 +351,8 @@ async function run() {
     "picking PDF import diagnostics expose candidate scores",
     pickingDiagnosticsSource.includes("selectedCandidate") &&
       pickingDiagnosticsSource.includes("ocrCandidates") &&
+      pickingDiagnosticsSource.includes("loadingSlipCandidates") &&
+      pickingDiagnosticsSource.includes("loadingSlipAttached") &&
       pickingDiagnosticsSource.includes("qualityScore") &&
       pickingDiagnosticsSource.includes("qualityAccepted"),
     pickingDiagnosticsSource
@@ -545,6 +678,37 @@ async function run() {
     "order create with 9021-0OUT customer rule",
     orderCreate.status === 200 && orderCreate.body.order.customerName === "9021-0OUT" && orderCreate.body.order.orderNumber === "SSI",
     `${orderCreate.status} ${JSON.stringify(orderCreate.body)}`
+  );
+
+  const mixedDestinationPayload = {
+    ...orderPayload,
+    orderNumber: `QA-MIX-${suffix}`,
+    customerName: "Pruefkunde",
+    lines: [
+      {
+        ...orderPayload.lines[0],
+        position: "1",
+        toBin: "9020-ANSBACH"
+      },
+      {
+        ...orderPayload.lines[0],
+        position: "2",
+        fromHandlingUnit: `${hu}-2`,
+        toBin: "9021-0OUT"
+      }
+    ]
+  };
+  const mixedDestinationOrderCreate = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(mixedDestinationPayload)
+  });
+  check(
+    "order create prefers 9021-0OUT customer from later destination line",
+    mixedDestinationOrderCreate.status === 200 &&
+      mixedDestinationOrderCreate.body.order.customerName === "9021-0OUT" &&
+      mixedDestinationOrderCreate.body.order.orderNumber === "SSI",
+    `${mixedDestinationOrderCreate.status} ${JSON.stringify(mixedDestinationOrderCreate.body)}`
   );
 
   const orderId = orderCreate.body.order.id;
@@ -1439,7 +1603,7 @@ async function createAppParserContext() {
   vm.runInContext(orderHintRulesCode, context, { filename: "order-hint-rules.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
-  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
+  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
   return context;
 }
 
@@ -1500,6 +1664,112 @@ async function parseRefinedBestellscheinLateOrderHintFixture() {
     fromHandlingUnit: "30684317"
   }]);
   return context.__parseOrderText(refinedText);
+}
+
+async function siBestellscheinOcrCandidateFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Bestellschein Nr.: 60210",
+    "Auslagerung:",
+    "030 / 012 Hummel Logistik SI",
+    "Entnahmeanweisungen: von 012 ( Hummel Logistik SI ) an 421 ( Palettierung )",
+    "1076846 Header start beginning 77/35 M 30 ST",
+    "Lagerplatz: 012/1076846",
+    "30684317"
+  ].join("\n");
+  const candidate = appParserContext.__buildPickingOcrCandidate({
+    key: "qa-si-bestellschein",
+    label: "qa SI Bestellschein",
+    scale: 6,
+    dpi: "1000",
+    rotation: 0,
+    pages: [text],
+    pageRawLines: [7]
+  });
+  return {
+    accepted: appParserContext.__isUsablePickingOcrSelection(candidate),
+    score: candidate.score,
+    metrics: candidate.metrics,
+    parsed: candidate.parsed
+  };
+}
+
+async function pdfTextFastAcceptFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "80019999 340063810002111 002-H4-SAA8C3 1063588 938 ST Regranulat 9021-0OUT"
+  ].join("\n");
+  return pdfTextCandidateAcceptance(text);
+}
+
+async function weakPdfTextFastAcceptFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "80019999 340063810002111 1063588 Regranulat 938 ST 9021-0OUT"
+  ].join("\n");
+  return pdfTextCandidateAcceptance(text);
+}
+
+function pdfTextCandidateAcceptance(text) {
+  const parsed = appParserContext.__parseOrderText(text);
+  const issues = appParserContext.__validatePickingImport(text, parsed);
+  const qualityScore = appParserContext.__scorePickingImportCandidate(text, parsed, issues);
+  const candidate = {
+    text,
+    parsed,
+    issues,
+    qualityScore,
+    documentType: "lageraufgabe"
+  };
+  return {
+    accepted: appParserContext.__isAcceptedPdfTextImportCandidate(candidate),
+    qualityScore,
+    parsed,
+    issues
+  };
+}
+
+async function loadingSlipFromSecondaryOcrCandidateFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const mainText = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "80019999 340063810002111 002-H4-SAA8C3 1063588 938 ST Regranulat 9021-0OUT",
+    "MMS 00 000 vT",
+    "UI9Y9IS9IpP"
+  ].join("\n");
+  const rotatedLoadingSlipText = [
+    "Nummer: A 12 34 56 78 90",
+    "1076846 Zusatz Artikel 12 ST"
+  ].join("\n");
+  const mainCandidate = appParserContext.__buildPickingOcrCandidate({
+    key: "main-upright",
+    label: "main upright",
+    scale: 6,
+    dpi: "1000",
+    rotation: 0,
+    pages: [mainText],
+    pageRawLines: [4]
+  });
+  const loadingCandidate = appParserContext.__buildPickingOcrCandidate({
+    key: "loading-rotated",
+    label: "loading rotated",
+    scale: 6,
+    dpi: "1000",
+    rotation: 180,
+    pages: [rotatedLoadingSlipText],
+    pageRawLines: [2]
+  });
+  const loadingSlipResult = appParserContext.__collectLoadingSlipLinesFromOcrCandidates([mainCandidate, loadingCandidate]);
+  const parsed = appParserContext.__appendLoadingSlipLinesToParsed(mainCandidate.parsed, loadingSlipResult.lines);
+  const loadingLines = parsed.lines.filter((line) => line.lineType === "loading-slip");
+  return {
+    normalCount: parsed.lines.filter((line) => line.lineType !== "loading-slip").length,
+    loadingCount: loadingLines.length,
+    loadingLine: loadingLines[0] || null,
+    diagnostics: loadingSlipResult.diagnostics
+  };
 }
 
 async function mergeBestellscheinHuFixture() {
@@ -1650,6 +1920,64 @@ async function parseWarehouseOcrConfusedBinFixture() {
     "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
     "101089273 340063810002088229 002-H3-5010A2 808650 39 ST SPEICHER BOSS XPE4369894 9021-00UT",
     "101089277 340063810002105926 002-H3-5Z2D1 751393 74250 ST SCHAFT FUER POINT88+PEN68 9021-00UT"
+  ].join("\n");
+  const parsed = appParserContext.__parseOrderText(text);
+  return {
+    parsed,
+    issues: appParserContext.__validatePickingImport(text, parsed)
+  };
+}
+
+async function parseWarehouseAnsbachDestinationFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "80015632 30684317 002-H1-SAM5C2 1076846 633 ST BOSS NatureColors umbra 70//9020-ANSBACH |",
+    "Co pa 633",
+    "80015631 30684318 002-H1-SAM5C3 1076847 250 ST Header star beginning 9020-ANSBACH",
+    "ZOOS CA Oo)"
+  ].join("\n");
+  const parsed = appParserContext.__parseOrderText(text);
+  return {
+    parsed,
+    issues: appParserContext.__validatePickingImport(text, parsed)
+  };
+}
+
+async function parseWarehouseInselDestinationFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "80015585 30684319 002-H1-SAM5C4 1076846 1.000 ST Headercard Swing cool Demon H9020-INSEL-ROTH",
+    "OF, 03.24"
+  ].join("\n");
+  const parsed = appParserContext.__parseOrderText(text);
+  return {
+    parsed,
+    issues: appParserContext.__validatePickingImport(text, parsed)
+  };
+}
+
+async function parseWarehouseMixedSsiDestinationFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "80015640 30684320 002-H1-SAM5C2 1076846 633 ST BOSS NatureColors umbra 9020-ANSBACH",
+    "80015641 30684321 002-H1-SAM5C3 1076847 250 ST Header start beginning 9021-0OUT"
+  ].join("\n");
+  const parsed = appParserContext.__parseOrderText(text);
+  return {
+    parsed,
+    issues: appParserContext.__validatePickingImport(text, parsed)
+  };
+}
+
+async function parseWarehouseMixedNonSsiDestinationFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "80015642 30684322 002-H1-SAM5C2 1076846 633 ST BOSS NatureColors umbra 9020-ANSBACH",
+    "80015643 30684323 002-H1-SAM5C3 1076847 250 ST Header start beginning 9030-KUNDE"
   ].join("\n");
   const parsed = appParserContext.__parseOrderText(text);
   return {

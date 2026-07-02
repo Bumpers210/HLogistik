@@ -1,6 +1,13 @@
 # HLogistik Robustness Audit
 
-Stand: 2026-06-25 10:08:47 +02:00
+Stand: 2026-07-02 08:10:00 +02:00
+
+## Aktueller Stabilitaetsstand
+
+- Aktueller Clientstand: `app.js?v=20260702-1`.
+- Aktuelle Service-Worker-/Manifest-Version: `1.5.151`.
+- Die QA-Matrix deckt Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung, Buchungsexport, CR-002 und QA-Artefaktfreiheit ab.
+- Laufzeitdaten, lokale Pfaddateien und QA-Artefakte sind nicht Teil des Commit-Scopes.
 
 ## PDF-Import OCR-Kandidatenbewertung
 
@@ -18,7 +25,7 @@ Robustheitsgewinn:
 
 - Fehlorientierte oder qualitativ schwache OCR-Laeufe werden nicht mehr still mit besseren Seiten/Zeilen anderer Kandidaten vermischt.
 - Die Diagnose zeigt Kandidaten, Scores, Skalen, DPI, Rotation und Roh-/Finalwerte pro importierter Position.
-- Cache-Bump auf `app.js?v=20260625-6` und Service Worker `1.5.144` verhindert, dass bekannte Clients die alte Importlogik behalten.
+- Cache-Bump auf den aktuellen Clientstand `app.js?v=20260702-1` und Service Worker `1.5.151` verhindert, dass bekannte Clients alte Importlogik behalten.
 
 Validierung:
 
@@ -82,7 +89,7 @@ Validierung:
 
 Geprueft und umgesetzt:
 
-- Der Export liest ausschliesslich aus `lagerbewegung`; es gibt keine Schreiboperation, keine Dateipfadeingabe und keine serverseitige Exportdatei.
+- Der Export liest read-only aus `lagerbewegung` und `bestandsbuchung_fehler`; es gibt keine Schreiboperation, keine Dateipfadeingabe und keine serverseitige Exportdatei.
 - Zeitraumparameter muessen echte ISO-Daten sein; `Von` nach `Bis` wird als HTTP 400 abgelehnt.
 - `Bis` schliesst den ganzen gewaehlten Tag ein, indem serverseitig bis kleiner Folgetag gefiltert wird.
 - Rollenfehler werden vor der Datenabfrage mit HTTP 403 abgelehnt.
@@ -151,7 +158,7 @@ Geprueft und verbessert:
 - Separates Loeschen serverseitig angelegter offener manueller Einlagerungen.
 - Abbrechen reiner lokaler Offline-Entwuerfe inklusive Sync-Queue- und Cache-Bereinigung.
 - Offline-Listenrendering bei leerem Cache, damit geloeschte lokale Eintraege nicht als `[Cache]` sichtbar bleiben.
-- Cache-Bump fuer Tablet-Assets und Service Worker auf `1.5.122`.
+- Tablet-Assets und Service Worker sind im aktuellen Stand ueber Manifest/Service Worker `1.5.151` auszuliefern.
 
 Ergebnis:
 
@@ -182,7 +189,7 @@ Validierung:
 
 - QA-Matrix erweitert: zwei Auftraege gleicher Kundengruppe werden gemeinsam uebernommen; Details und Summaries werden geliefert; getrennte Updates bleiben getrennt.
 - Browser-Smoke online und offline gegen `tmp/tablet-offline-group-qa/` auf Port `4175`.
-- Cache-/Manifest-Version: `1.5.118`.
+- Aktuelle Cache-/Manifest-Version: `1.5.151`.
 
 ## Manuelle Einlagerung
 
@@ -287,7 +294,7 @@ Der Offline-Navigationsfallback ist fuer bekannte App-Seiten konsistenter:
 - `/auswertungen.html` -> `/auswertungen.html`
 - unbekannte Pfade -> `/index.html`
 
-Cache- und Manifest-Version: `1.5.113`.
+Aktuelle Cache- und Manifest-Version: `1.5.151`.
 
 ## UI-Robustheit
 
@@ -319,7 +326,7 @@ Neue Absicherung:
 - Der Server akzeptiert den Discard-Modus nur fuer lokale Requests und QA-Auftraege.
 - Im Discard-Modus wird kein PDF in dauerhafte Exportziele kopiert.
 - Temporaere HTML-/PDF-Dateien werden im `finally` geloescht.
-- Die QA-Matrix prueft am Ende des Laufes auf verbleibende `QA-*.pdf` und `QA-*.html` fuer den aktuellen Lauf.
+- Die QA-Matrix prueft am Ende des Laufes auf verbleibende `QA-*.pdf`, `QA-*.xlsx`, `QA-*.csv` und `QA-*.html` fuer den aktuellen Lauf.
 
 Produktiver Export:
 

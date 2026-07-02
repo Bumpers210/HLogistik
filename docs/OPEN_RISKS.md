@@ -1,6 +1,12 @@
 # HLogistik Open Risks
 
-Stand: 2026-06-25 10:08:47 +02:00
+Stand: 2026-07-02 08:10:00 +02:00
+
+## Aktueller Stand nach Stabilisierung
+
+Keine neuen offenen P0/P1-Risiken aus dem sortierten Stabilitaetsstand. Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung und Artikelstamm-Buchungsexport sind in der QA-Matrix abgedeckt. Der aktuelle Clientstand ist `app.js?v=20260702-1`, Service Worker/Manifest `1.5.151`.
+
+Weiter offen bleiben nur bewusst dokumentierte Betriebsentscheidungen: CR-002, automatische SQLite-Wiederherstellung, Passwort-Fallback und echtes Authentifizierungskonzept.
 
 ## Aktueller Lauf - PDF-Import OCR-Kandidatenbewertung
 
@@ -8,7 +14,7 @@ Kein neues offenes Produktivrisiko aus der technischen Umstellung. Der Import wa
 
 Restempfehlung:
 
-Mindestens zwei problematische Original-PDFs und ein bisher funktionierendes PDF manuell im Browser importieren. Die CLI-Umgebung hat keine lokale OCR-Engine; die echte OCR-Qualitaet muss deshalb im Browserpfad validiert werden. Nach Deployment Browser hart neu laden bzw. Service Worker aktualisieren, damit `app.js?v=20260625-6` und Cache `1.5.144` aktiv sind.
+Mindestens zwei problematische Original-PDFs und ein bisher funktionierendes PDF manuell im Browser importieren. Die CLI-Umgebung hat keine lokale OCR-Engine; die echte OCR-Qualitaet muss deshalb im Browserpfad validiert werden. Nach Deployment Browser hart neu laden bzw. Service Worker aktualisieren, damit `app.js?v=20260702-1` und Cache `1.5.151` aktiv sind.
 
 ## Aktueller Lauf - PDF-Import Roh-Stellplatz
 
@@ -24,7 +30,7 @@ Kein neues offenes Produktivrisiko aus dem Fix. Der Import bricht bei 0 Position
 
 Restempfehlung:
 
-Nach Deployment Browser hart neu laden bzw. Service-Worker aktualisieren, damit `app.js?v=20260625-2` und Cache `1.5.140` aktiv sind. Fuer echte OCR-Qualitaet bleibt RISK-005 relevant.
+Nach Deployment Browser hart neu laden bzw. Service-Worker aktualisieren, damit `app.js?v=20260702-1` und Cache `1.5.151` aktiv sind. Fuer echte OCR-Qualitaet bleibt RISK-005 relevant.
 
 ## Aktueller Lauf - Artikelstamm Buchungsexport
 
@@ -114,6 +120,16 @@ Serverseitige Regeln sind ausgelagert. Einige Browser-/Tablet-Legacy-Konstanten,
 
 Empfehlung: Bei spaeterer Modernisierung ein klassisches Browser-Regelbundle mit Regressionstests fuer Desktop und Tablet planen.
 
+## RISK-009 - `archive-path.txt` ist reserviert, aber nicht aktiv
+
+Prioritaet: P3
+
+`archive-path.txt` ist als lokale Pfaddatei in `.gitignore` beruecksichtigt. Der aktuelle Serverstand liest fuer den Archivordner aber nur `HLOGISTIK_ARCHIVE_DIR`; ohne Umgebungsvariable wird `<Importordner>/Archiv` verwendet.
+
+Betreiberentscheidung:
+
+Soll `archive-path.txt` wie `import-path.txt` und `export-path.txt` aktiv unterstuetzt werden, ist dafuer eine kleine Serveraenderung mit QA-Test noetig. Bis dahin muss fuer abweichende Archivordner `HLOGISTIK_ARCHIVE_DIR` gesetzt werden.
+
 ## Erledigt in diesem Lauf
 
 - RISK-004: Service-Worker-Offline-Fallback fuer Desktop-Unterseiten vereinheitlicht.
@@ -151,3 +167,11 @@ Kein neues kritisches Produktivrisiko aus dem Fix. Die Archivierung ist nachgela
 Restempfehlung:
 
 Den gewuenschten Importordner betrieblich festlegen und entweder `HLOGISTIK_IMPORT_DIR` oder `import-path.txt` setzen. Ohne Konfiguration nutzt der Server den Exportordner als Importordner, damit keine beliebigen Benutzerpfade akzeptiert werden.
+
+## Aktueller Lauf - Kundenregel 9021-0OUT
+
+Kein neues offenes Risiko aus dem Fix. `9021-0OUT` wird als Kunde gesetzt, sobald irgendeine Position diesen Nach-Lagerplatz enthaelt. Abweichende Nach-Lagerplaetze bleiben positionsbezogen als Zusatzbemerkung sichtbar.
+
+Restempfehlung:
+
+Einen echten Mischauftrag mit `9021-0OUT` an spaeterer Position nach hartem Browser-Reload importieren und gegen den PDF-Ausdruck pruefen.

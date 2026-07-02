@@ -6,6 +6,8 @@ const MAIN_USER_KEY = "kommissionier-app-user-v1";
 const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const CURRENT_ORDER_CACHE_KEY = "tablet-pick-current-order-v1";
 const ORDER_LIST_REFRESH_MS = 30000;
+const CONNECTION_CHECK_MS = 30000;
+const CONNECTION_CHECK_TIMEOUT_MS = 5000;
 const AUTO_SAVE_MS = 10000;
 const SSI_STORAGE_HU_PREFIX = "34006381000";
 const SSI_STORAGE_HU_SUFFIX_LENGTH = 7;
@@ -20,30 +22,40 @@ let serverOnline = false;
 let currentMode = "picking";
 let dirty = false;
 let orderListTimer = null;
+let connectionCheckTimer = null;
+let connectionCheckInProgress = false;
+let connectionCheckStartedAt = 0;
 let saveTimer = null;
 let changeRevision = 0;
 let listedOrdersById = new Map();
 let acceptedOrderGroupsById = new Map();
 let manualStorageCustomerEdited = false;
+let exportingPdf = false;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
   bindEvents();
   loadUser();
   initialize();
+  startConnectionMonitor();
 });
 
 window.addEventListener("online", () => {
-  if (!serverOnline) initialize();
+  initialize({ showChecking: false });
+});
+
+window.addEventListener("offline", () => {
+  markServerOffline();
 });
 
 window.addEventListener("pagehide", persistCurrentOrderCache);
 window.addEventListener("beforeunload", persistCurrentOrderCache);
+window.addEventListener("focus", () => initialize({ showChecking: false }));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     persistCurrentOrderCache();
-  } else if (serverOnline) {
-    loadOrderList({ silent: true });
+  } else {
+    initialize({ showChecking: false });
   }
 });
 
@@ -66,6 +78,7 @@ function bindElements() {
     "takeOverButton",
     "leaveOrderButton",
     "discardOrderButton",
+    "deleteStorageOrderButton",
     "saveButton",
     "exportPdfButton",
     "doneCount",
@@ -78,6 +91,7 @@ function bindElements() {
     "storageLineActions",
     "manualStorageMaterialInput",
     "manualStoragePositionCountInput",
+    "manualStorageQuantityInput",
     "addStorageLineButton",
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
@@ -131,15 +145,24 @@ function bindEvents() {
   elements.takeOverButton.addEventListener("click", takeOverCurrentOrder);
   if (elements.leaveOrderButton) elements.leaveOrderButton.addEventListener("click", leaveCurrentOrder);
   if (elements.discardOrderButton) elements.discardOrderButton.addEventListener("click", discardCurrentManualStorageOrder);
+  if (elements.deleteStorageOrderButton) elements.deleteStorageOrderButton.addEventListener("click", deleteCurrentManualStorageOrder);
   elements.saveButton.addEventListener("click", () => saveOrder(false));
   elements.exportPdfButton.addEventListener("click", exportPdf);
   elements.addStorageLineButton.addEventListener("click", addManualStorageLine);
 }
 
-async function initialize() {
-  setConnectionStatus(null);
+async function initialize(options = {}) {
+  const showChecking = options.showChecking !== false;
+  if (connectionCheckInProgress && Date.now() - connectionCheckStartedAt < CONNECTION_CHECK_TIMEOUT_MS * 2) return;
+  connectionCheckInProgress = true;
+  connectionCheckStartedAt = Date.now();
+  let timeoutId = null;
+
   try {
-    await apiJson("/api/health");
+    if (showChecking) setConnectionStatus(null);
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    if (controller) timeoutId = window.setTimeout(() => controller.abort(), CONNECTION_CHECK_TIMEOUT_MS);
+    await apiJson("/api/health", controller ? { signal: controller.signal } : {});
     serverOnline = true;
     setConnectionStatus(true);
     await flushSyncQueue();
@@ -159,12 +182,42 @@ async function initialize() {
     setConnectionStatus(false);
     const cached = await loadOrderListFromCache();
     setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden.", !cached);
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
+    connectionCheckInProgress = false;
+    connectionCheckStartedAt = 0;
   }
+}
+
+function startConnectionMonitor() {
+  if (connectionCheckTimer) return;
+  connectionCheckTimer = window.setInterval(() => {
+    initialize({ showChecking: false });
+  }, CONNECTION_CHECK_MS);
 }
 
 function markServerOffline() {
   serverOnline = false;
   setConnectionStatus(false);
+}
+
+async function ensureServerOnlineForPdf() {
+  if (serverOnline) return true;
+
+  setConnectionStatus(null);
+  setMessage("Pruefe Serververbindung fuer PDF-Export...", false);
+  try {
+    await apiJson("/api/health");
+    serverOnline = true;
+    setConnectionStatus(true);
+    await flushSyncQueue();
+    loadOrderList({ silent: true });
+    return true;
+  } catch (error) {
+    markServerOffline();
+    await loadOrderListFromCache();
+    throw new Error(`PDF-Export nur online moeglich. Server nicht erreichbar: ${error.message}`);
+  }
 }
 
 async function flushSyncQueue() {
@@ -210,9 +263,14 @@ async function handleSyncedQueueItem(item, result) {
   }
   const localOrder = payload.order || {};
   if (!localOrder.id) return;
+  const localOrderId = String(localOrder.id || "");
   const syncedOrder = applyOrderSummaryToOrder(localOrder, result?.order);
   await saveOrderToOfflineStore(syncedOrder);
-  if (currentOrder && String(currentOrder.id) === String(localOrder.id)) {
+  const syncedOrderId = String(syncedOrder?.id || "");
+  if (syncedOrderId && localOrderId && syncedOrderId !== localOrderId) {
+    await removeOrderCacheEntry(localOrderId);
+  }
+  if (currentOrder && [localOrderId, syncedOrderId].includes(String(currentOrder.id))) {
     applyOrderSummaryToOrder(currentOrder, result?.order);
     persistCurrentOrderCache();
     renderOrder();
@@ -266,6 +324,7 @@ async function loadOrderListFromCache() {
       ))
       .map(normalizeOrderListEntry);
     if (!cached.length) {
+      renderEmptyCachedOrderList();
       renderAcceptedGroupInfo();
       return false;
     }
@@ -274,6 +333,13 @@ async function loadOrderListFromCache() {
   } catch {
     return false;
   }
+}
+
+function renderEmptyCachedOrderList() {
+  clearSelect(elements.orderSelect);
+  addOption(elements.orderSelect, "", `${modeLabel()} waehlen (Offline-Cache)`);
+  rememberListedOrders([]);
+  elements.orderSelect.value = "";
 }
 
 function renderCachedOrderList(orders) {
@@ -639,12 +705,16 @@ function updateModeUi() {
     grid.classList.toggle("is-manual-storage-grid", manualStorageHeader);
     grid.innerHTML = isStorage
       ? (manualStorageHeader
-        ? "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Ist</span><span>Einheit</span>"
+        ? "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Stückzahl</span><span>Einheit</span>"
         : "<span>Material</span><span>Stellplatz</span><span>Artikelbezeichnung</span><span>Soll</span><span>Ist</span><span>Einheit</span>")
       : "<span>Artikelnummer</span><span>Lagerplatz</span><span>Produktbeschreibung</span><span>Soll</span><span>Ist</span><span>Einheit</span>";
   }
-  if (elements.exportPdfButton) elements.exportPdfButton.textContent = isStorage ? "Einlagerung abschliessen" : "PDF exportieren";
+  if (elements.exportPdfButton) elements.exportPdfButton.textContent = exportingPdf ? "PDF wird erstellt..." : exportButtonLabel();
   renderManualStorageStartButton();
+}
+
+function exportButtonLabel() {
+  return isStorageOrder() ? "Einlagerung abschliessen" : "PDF exportieren";
 }
 
 function isManualStorageHeader() {
@@ -832,6 +902,10 @@ function renderStorageLineActions() {
     elements.manualStoragePositionCountInput.min = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN);
     elements.manualStoragePositionCountInput.max = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX);
   }
+  if (elements.manualStorageQuantityInput) {
+    elements.manualStorageQuantityInput.disabled = elements.addStorageLineButton.disabled;
+    elements.manualStorageQuantityInput.min = "1";
+  }
 }
 
 function renderManualStorageStartButton() {
@@ -871,19 +945,26 @@ async function addManualStorageLine() {
     elements.manualStoragePositionCountInput?.focus();
     return;
   }
+  const quantityResult = readManualStoragePositionQuantity();
+  if (!quantityResult.ok) {
+    setMessage(quantityResult.error, true);
+    elements.manualStorageQuantityInput?.focus();
+    return;
+  }
   const preset = await manualStorageLinePreset(elements.manualStorageMaterialInput?.value || "");
   currentOrder.lines = Array.isArray(currentOrder.lines) ? currentOrder.lines : [];
   for (let index = 0; index < countResult.value; index += 1) {
-    currentOrder.lines.push(createManualStorageLine(currentOrder.lines, preset));
+    currentOrder.lines.push(createManualStorageLine(currentOrder.lines, preset, { actualQty: quantityResult.value }));
   }
   if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.value = "";
   if (elements.manualStoragePositionCountInput) elements.manualStoragePositionCountInput.value = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT);
+  if (elements.manualStorageQuantityInput) elements.manualStorageQuantityInput.value = "1";
   markDirty();
   renderOrder();
   saveOrder(false);
 }
 
-function createManualStorageLine(lines, preset = {}) {
+function createManualStorageLine(lines, preset = {}, options = {}) {
   return {
     id: createLineId(),
     orderType: "storage",
@@ -893,11 +974,11 @@ function createManualStorageLine(lines, preset = {}) {
     fromHandlingUnitEditable: true,
     positionNote: "",
     autoPositionNotes: {},
-    fromBin: preset.fromBin || "",
+    fromBin: "",
     product: preset.product || "",
     description: preset.description || "",
     targetQty: "",
-    actualQty: "",
+    actualQty: options.actualQty || "",
     unit: preset.unit || "Stk",
     picked: false
   };
@@ -923,6 +1004,19 @@ function readManualStoragePositionCreateCount() {
   return { ok: true, value, error: "" };
 }
 
+function readManualStoragePositionQuantity() {
+  const raw = String(elements.manualStorageQuantityInput?.value || "").trim();
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(value) || value <= 0) {
+    return {
+      ok: false,
+      value: "",
+      error: "Stückzahl muss eine positive ganze Zahl sein."
+    };
+  }
+  return { ok: true, value: String(value), error: "" };
+}
+
 async function manualStorageLinePreset(material) {
   const product = normalizeDigits(material);
   if (!product) return {};
@@ -932,7 +1026,6 @@ async function manualStorageLinePreset(material) {
     const article = await apiJson(`/api/articles/lookup/${encodeURIComponent(product)}?warehouse=${encodeURIComponent(manualStorageWarehouse())}`);
     preset.product = String(article.materialnummer || product).trim();
     preset.description = String(article.materialbezeichnung || "").trim();
-    preset.fromBin = String(article.lagerplatz || "").trim();
   } catch {
     // Artikelstamm-Lookup ist Komfort; unbekannte Artikel bleiben manuell erfassbar.
   }
@@ -1278,7 +1371,7 @@ function renderLine(line) {
   }
   top.appendChild(
     makeInput(
-      "Ist",
+      isManualStorageLine ? "Stückzahl" : "Ist",
       line.actualQty,
       (value) => {
         line.actualQty = value;
@@ -1600,24 +1693,51 @@ function renderTakeOverButton() {
     );
   }
   if (elements.leaveOrderButton) {
-    elements.leaveOrderButton.hidden = !hasOrder || !isMine || manualStorage;
+    elements.leaveOrderButton.hidden = !hasOrder || !isMine;
     elements.leaveOrderButton.disabled = !hasOrder;
+    elements.leaveOrderButton.textContent = manualStorage ? "Einlagerung verlassen" : "Auftrag verlassen";
+    elements.leaveOrderButton.title = manualStorage
+      ? "Einlagerung verlassen, ohne sie zu loeschen."
+      : "Auftrag verlassen und zur Auswahl zurueckkehren.";
   }
   renderDiscardOrderButton(hasOrder, isMine, manualStorage);
+  renderDeleteStorageOrderButton(hasOrder, isMine, manualStorage);
   if (elements.saveButton) elements.saveButton.disabled = !canEditOrder;
-  if (elements.exportPdfButton) elements.exportPdfButton.disabled = !canEditOrder;
+  if (elements.exportPdfButton) {
+    elements.exportPdfButton.disabled = !canEditOrder || exportingPdf;
+    elements.exportPdfButton.textContent = exportingPdf ? "PDF wird erstellt..." : exportButtonLabel();
+  }
   renderManualStorageStartButton();
   renderStorageLineActions();
 }
 
 function renderDiscardOrderButton(hasOrder, isMine, manualStorage) {
   if (!elements.discardOrderButton) return;
-  const localManualStorage = Boolean(manualStorage && currentOrder && (currentOrder.localDraft === true || isLocalStorageOrderId(currentOrder.id)));
+  const localManualStorage = isLocalManualStorageOrder(currentOrder);
   const visible = Boolean(hasOrder && manualStorage && (isMine || localManualStorage));
   elements.discardOrderButton.hidden = !visible;
   elements.discardOrderButton.textContent = "Einlagerung abbrechen";
-  elements.discardOrderButton.disabled = !visible || (!serverOnline && !window.OfflineStore && !localManualStorage);
-  elements.discardOrderButton.title = visible ? "Manuelle Einlagerung abbrechen und Auftrag loeschen." : "";
+  elements.discardOrderButton.disabled = !visible || !localManualStorage;
+  elements.discardOrderButton.title = visible
+    ? localManualStorage
+      ? "Lokal gestartete Einlagerung abbrechen und nicht synchronisieren."
+      : "Serverseitig angelegte Einlagerungen bitte ueber Einlagerung loeschen entfernen."
+    : "";
+}
+
+function renderDeleteStorageOrderButton(hasOrder, isMine, manualStorage) {
+  if (!elements.deleteStorageOrderButton) return;
+  const serverBackedManualStorage = Boolean(manualStorage && currentOrder && !isLocalManualStorageOrder(currentOrder));
+  const visible = Boolean(hasOrder && serverBackedManualStorage && isMine);
+  elements.deleteStorageOrderButton.hidden = !visible;
+  elements.deleteStorageOrderButton.disabled = !visible || Boolean(currentOrder?.exportedAt) || (!serverOnline && !window.OfflineStore);
+  elements.deleteStorageOrderButton.title = visible
+    ? "Serverseitig angelegte offene Einlagerung loeschen oder offline zur Loeschung vormerken."
+    : "";
+}
+
+function isLocalManualStorageOrder(order) {
+  return Boolean(isManualStorageOrder(order) && order.localDraft === true);
 }
 
 async function acceptOrderOnServer(id) {
@@ -1678,6 +1798,10 @@ async function leaveCurrentOrder() {
     resetToStart("Tablet freigegeben.");
     return;
   }
+  if (isManualStorageOrder(currentOrder)) {
+    await leaveCurrentManualStorageOrder();
+    return;
+  }
   const label = lockedOrderLabel();
   const warning = dirty
     ? `Auftrag ${label} verlassen? Ungespeicherte Aenderungen auf diesem Tablet werden verworfen.`
@@ -1696,51 +1820,147 @@ async function leaveCurrentOrder() {
   }
 }
 
+async function leaveCurrentManualStorageOrder() {
+  if (!currentOrder?.id || !isManualStorageOrder(currentOrder)) {
+    resetToStart("Einlagerung verlassen.");
+    return;
+  }
+  const label = lockedOrderLabel() || "manuelle Einlagerung";
+  const localManualStorage = isLocalManualStorageOrder(currentOrder);
+  if (dirty) {
+    const question = localManualStorage
+      ? `Einlagerung ${label} verlassen? Ungespeicherte Aenderungen werden lokal gespeichert.`
+      : `Einlagerung ${label} verlassen? Ungespeicherte Aenderungen werden vorher gespeichert.`;
+    if (!window.confirm(question)) return;
+    const saved = localManualStorage
+      ? await saveLocalManualStorageDraft()
+      : await saveManualStorageBeforeLeave();
+    if (!saved) return;
+  }
+
+  const leavingOrderId = currentOrder.id;
+  if (!localManualStorage) {
+    try {
+      await releaseOrderOnServer(leavingOrderId);
+    } catch (error) {
+      resetToStart("Einlagerung lokal verlassen. Serverfreigabe konnte nicht bestaetigt werden.");
+      await loadOrderList({ silent: true });
+      setMessage(`Einlagerung lokal verlassen. Servermeldung: ${error.message}`, true);
+      return;
+    }
+  }
+
+  resetToStart(localManualStorage
+    ? "Einlagerung verlassen. Sie bleibt lokal gespeichert."
+    : "Einlagerung verlassen. Bitte Einlagerung waehlen.");
+  await loadOrderList({ silent: true });
+}
+
+async function saveManualStorageBeforeLeave() {
+  await saveOrder(true);
+  if (dirty) {
+    setMessage("Einlagerung konnte nicht gespeichert werden. Verlassen wurde abgebrochen.", true);
+    return false;
+  }
+  return true;
+}
+
+async function saveLocalManualStorageDraft() {
+  if (!window.OfflineStore || !currentOrder) {
+    setMessage("Offline-Cache ist nicht verfuegbar. Einlagerung bleibt geoeffnet.", true);
+    return false;
+  }
+  try {
+    await queueManualStorageOrderCreate(currentOrder);
+    await saveOrderToOfflineStore(currentOrder);
+    dirty = false;
+    clearCurrentOrderCache();
+    return true;
+  } catch {
+    setMessage("Einlagerung konnte nicht lokal gespeichert werden. Verlassen wurde abgebrochen.", true);
+    return false;
+  }
+}
+
 async function discardCurrentManualStorageOrder() {
   if (!currentOrder?.id || !isManualStorageOrder(currentOrder)) {
     setMessage("Kein manueller Einlagerauftrag geoeffnet.", true);
     return;
   }
   const orderId = currentOrder.id;
-  const localManualStorage = currentOrder.localDraft === true || isLocalStorageOrderId(orderId);
-  if (!canEditCurrentOrder() && !localManualStorage) {
-    setMessage("Bearbeitung erst uebernehmen.", true);
-    return;
-  }
-  if (!serverOnline && !window.OfflineStore && !localManualStorage) {
-    setMessage("Einlagerung kann ohne Serververbindung nicht geloescht werden.", true);
+  const localManualStorage = isLocalManualStorageOrder(currentOrder);
+  if (!localManualStorage) {
+    setMessage("Diese Einlagerung ist bereits am Server angelegt. Bitte Einlagerung loeschen verwenden.", true);
     return;
   }
   const label = lockedOrderLabel() || "manuelle Einlagerung";
-  if (!window.confirm(`Manuelle Einlagerung ${label} wirklich abbrechen? Der Auftrag wird geloescht und nicht synchronisiert.`)) return;
+  if (!window.confirm(`Einlagerung ${label} abbrechen? Lokal gespeicherte Daten und die ausstehende Anlage werden verworfen.`)) return;
 
-  if (serverOnline && !isLocalStorageOrderId(orderId)) {
+  try {
+    await removeOrderFromOfflineStore(orderId);
+    resetToStart("Einlagerung abgebrochen und lokal geloescht.");
+    await loadOrderList({ silent: true });
+  } catch {
+    setMessage("Einlagerung konnte lokal nicht abgebrochen werden.", true);
+  }
+}
+
+async function deleteCurrentManualStorageOrder() {
+  if (!currentOrder?.id || !isManualStorageOrder(currentOrder)) {
+    setMessage("Kein manueller Einlagerauftrag geoeffnet.", true);
+    return;
+  }
+  if (isLocalManualStorageOrder(currentOrder)) {
+    await discardCurrentManualStorageOrder();
+    return;
+  }
+  if (currentOrder.exportedAt) {
+    setMessage("Abgeschlossene Einlagerungen koennen nicht geloescht werden.", true);
+    return;
+  }
+  if (!canEditCurrentOrder()) {
+    setMessage("Bearbeitung erst uebernehmen.", true);
+    return;
+  }
+  if (!serverOnline && !window.OfflineStore) {
+    setMessage("Einlagerung kann ohne Serververbindung nicht geloescht werden.", true);
+    return;
+  }
+
+  const orderId = currentOrder.id;
+  const label = lockedOrderLabel() || "manuelle Einlagerung";
+  if (!window.confirm(`Einlagerung ${label} wirklich loeschen? Der offene Auftrag wird entfernt.`)) return;
+
+  if (serverOnline) {
     try {
       await apiJson(`/api/orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
       await removeOrderFromOfflineStore(orderId);
-      resetToStart("Manuelle Einlagerung abgebrochen.");
+      resetToStart("Einlagerung geloescht.");
       await loadOrderList({ silent: true });
     } catch (error) {
-      setMessage(`Auftrag konnte nicht verworfen werden: ${error.message}`, true);
+      setMessage(`Einlagerung konnte nicht geloescht werden: ${error.message}`, true);
     }
     return;
   }
 
   try {
     await removeOrderFromOfflineStore(orderId);
-    if (!isLocalStorageOrderId(orderId) && window.OfflineStore) {
-      await OfflineStore.enqueue("DELETE", `/api/orders/${encodeURIComponent(orderId)}`, "", deleteOrderDedupeKey(orderId));
-    }
-    resetToStart("Manuelle Einlagerung abgebrochen.");
+    await OfflineStore.enqueue("DELETE", `/api/orders/${encodeURIComponent(orderId)}`, "", deleteOrderDedupeKey(orderId));
+    resetToStart("Offline: Einlagerung geloescht. Server-Loeschung wird bei Verbindung synchronisiert.");
     await loadOrderList({ silent: true });
   } catch {
-    setMessage("Auftrag konnte lokal nicht verworfen werden.", true);
+    setMessage("Offline: Einlagerung konnte nicht zur Loeschung vorgemerkt werden.", true);
   }
 }
 
 async function removeOrderFromOfflineStore(orderId) {
   if (!window.OfflineStore || !orderId) return;
   await removeQueuedOrderMutations(orderId);
+  await removeOrderCacheEntry(orderId);
+}
+
+async function removeOrderCacheEntry(orderId) {
+  if (!window.OfflineStore || !orderId) return;
   if (OfflineStore.deleteOrder) await OfflineStore.deleteOrder(orderId);
   if (OfflineStore.deleteOrderSummary) {
     await OfflineStore.deleteOrderSummary(orderId);
@@ -1864,19 +2084,23 @@ function currentUserName() {
   return String(elements.userNameInput.value || "").trim();
 }
 
-async function saveOrder(silent, onSuccess) {
-  if (!currentOrder || !currentOrder.id) return;
+async function saveOrder(silent, onSuccess, options = {}) {
+  if (!currentOrder || !currentOrder.id) return false;
   if (!canEditCurrentOrder()) {
     if (!silent) setMessage("Bearbeitung erst uebernehmen.", true);
-    return;
+    return false;
   }
+  const allowOffline = options?.allowOffline !== false;
   touchOrder();
   persistCurrentOrderCache();
   const revision = changeRevision;
 
   if (!serverOnline) {
-    await saveCurrentOrderOffline(silent, onSuccess, revision);
-    return;
+    if (!allowOffline) {
+      if (!silent) setMessage("PDF-Export nur online moeglich.", true);
+      return false;
+    }
+    return saveCurrentOrderOffline(silent, onSuccess, revision);
   }
 
   try {
@@ -1895,11 +2119,14 @@ async function saveOrder(silent, onSuccess) {
     setMessage(silent ? "Automatisch gespeichert." : "Auftrag gespeichert.", false);
     await saveOrderToOfflineStore(currentOrder);
     loadOrderList();
-    if (onSuccess) onSuccess();
+    if (onSuccess) await onSuccess(result);
+    return true;
   } catch (error) {
     markServerOffline();
+    if (!allowOffline) throw error;
     const storedOffline = await saveCurrentOrderOffline(silent, onSuccess, revision);
     if (!storedOffline) setMessage(`Speichern fehlgeschlagen: ${error.message}`, true);
+    return storedOffline;
   }
 }
 
@@ -1910,8 +2137,8 @@ async function saveCurrentOrderOffline(silent, onSuccess, revision) {
   }
   try {
     const url = `/api/orders/${encodeURIComponent(currentOrder.id)}`;
-    await OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder, userName: currentUserName() }), storageOrderPutDedupeKey(currentOrder.id));
     await saveOrderToOfflineStore(currentOrder);
+    await OfflineStore.enqueue("PUT", url, JSON.stringify({ order: currentOrder, userName: currentUserName() }), storageOrderPutDedupeKey(currentOrder.id));
     if (changeRevision === revision) {
       dirty = false;
       clearCurrentOrderCache();
@@ -1919,7 +2146,7 @@ async function saveCurrentOrderOffline(silent, onSuccess, revision) {
       dirty = true;
       persistCurrentOrderCache();
     }
-    if (onSuccess) onSuccess();
+    if (onSuccess) await onSuccess();
     if (!silent) setMessage("Offline gespeichert - wird synchronisiert, sobald der Server erreichbar ist.", false);
     return true;
   } catch {
@@ -1929,12 +2156,9 @@ async function saveCurrentOrderOffline(silent, onSuccess, revision) {
 }
 
 async function exportPdf() {
+  if (exportingPdf) return;
   if (!currentOrder || !currentOrder.id) {
     setMessage("Kein Auftrag ausgewählt.", true);
-    return;
-  }
-  if (!serverOnline) {
-    setMessage("PDF kann nur am Server exportiert werden.", true);
     return;
   }
   if (!currentUserName()) {
@@ -1945,36 +2169,82 @@ async function exportPdf() {
     setMessage("Bearbeitung erst uebernehmen.", true);
     return;
   }
-  pruneEmptyManualStorageLines();
-  const completionMessage = exportCompletionMessage();
-  if (completionMessage) {
-    renderOrder();
-    setMessage(completionMessage, true);
-    window.alert(completionMessage);
-    return;
-  }
-  const validationMessage = storageOrderExportMessage();
-  if (validationMessage) {
-    renderOrder();
-    setMessage(validationMessage, true);
-    window.alert(validationMessage);
-    return;
-  }
+  exportingPdf = true;
+  renderTakeOverButton();
+  try {
+    await ensureServerOnlineForPdf();
 
-  setMessage("PDF wird auf dem Server erstellt...", false);
-  await saveOrder(true, async () => {
-    try {
-      await apiJson(`/api/orders/${encodeURIComponent(currentOrder.id)}/export-pdf`, {
-        method: "POST",
-        body: JSON.stringify({ order: currentOrder, userName: currentUserName() }),
-      });
-      dirty = false;
-      clearCurrentOrderCache();
-      loadTabletStartPage();
-    } catch (error) {
-      setMessage(`PDF-Export fehlgeschlagen: ${error.message}`, true);
+    pruneEmptyManualStorageLines();
+    const completionMessage = exportCompletionMessage();
+    if (completionMessage) {
+      renderOrder();
+      window.alert(completionMessage);
+      throw new Error(completionMessage);
     }
-  });
+    const validationMessage = storageOrderExportMessage();
+    if (validationMessage) {
+      renderOrder();
+      window.alert(validationMessage);
+      throw new Error(validationMessage);
+    }
+
+    setMessage("Aenderungen werden vor dem PDF-Export gespeichert...", false);
+    const exportOrderId = currentOrder.id;
+    await flushSyncQueue();
+    const savedOnline = await saveOrder(true, null, { allowOffline: false });
+    if (!savedOnline || !serverOnline) {
+      throw new Error("PDF-Export nur online moeglich. Aenderungen wurden nicht serverseitig gespeichert.");
+    }
+    await reloadCurrentOrderFromServer();
+
+    const freshCompletionMessage = exportCompletionMessage();
+    if (freshCompletionMessage) {
+      renderOrder();
+      throw new Error(freshCompletionMessage);
+    }
+    const freshValidationMessage = storageOrderExportMessage();
+    if (freshValidationMessage) {
+      renderOrder();
+      throw new Error(freshValidationMessage);
+    }
+
+    setMessage("PDF wird auf dem Server erstellt...", false);
+    const exportResult = await apiJson(`/api/orders/${encodeURIComponent(currentOrder.id)}/export-pdf`, {
+      method: "POST",
+      body: JSON.stringify({ order: currentOrder, userName: currentUserName() }),
+    });
+    if (!exportResult || exportResult.ok !== true) {
+      throw new Error("PDF-Export wurde vom Server nicht bestaetigt.");
+    }
+    await removeQueuedOrderMutations(exportOrderId);
+    dirty = false;
+    clearCurrentOrderCache();
+    exportingPdf = false;
+    renderTakeOverButton();
+    loadTabletStartPage();
+  } catch (error) {
+    setMessage(`PDF-Export fehlgeschlagen: ${error.message}`, true);
+  } finally {
+    exportingPdf = false;
+    renderTakeOverButton();
+  }
+}
+
+async function reloadCurrentOrderFromServer() {
+  const orderId = currentOrder?.id;
+  if (!orderId) throw new Error("Kein Auftrag ausgewaehlt.");
+  const order = await apiJson(`/api/orders/${encodeURIComponent(orderId)}`);
+  currentOrder = order;
+  currentMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
+  try {
+    localStorage.setItem(MODE_KEY, currentMode);
+  } catch { /* Modus bleibt fuer diese Sitzung aktiv. */ }
+  currentOrder.collapseDone = true;
+  dirty = false;
+  clearCurrentOrderCache();
+  renderOrder();
+  try { await saveOrderToOfflineStore(order); } catch { /* non-critical */ }
+  return order;
 }
 
 function loadTabletStartPage() {
