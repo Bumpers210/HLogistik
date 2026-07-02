@@ -73,7 +73,7 @@ Erwartung: Alle Ansichten laden ohne sichtbare Fehler.
 
 ## Kommissionier-PDF-Import OCR
 
-1. Seite hart neu laden, damit `app.js?v=20260702-1` und Service-Worker-/Manifest-Version `1.5.151` aktiv sind.
+1. Seite hart neu laden, damit `app.js?v=20260702-2` und Service-Worker-/Manifest-Version `1.5.152` aktiv sind.
 2. Problematisches gescanntes Lageraufgabe-PDF importieren.
 3. Browser-Konsole oeffnen und `PDF-Import Diagnose` pruefen.
 4. Pruefen, dass `ocrScales` `6` und `7.5` enthaelt.

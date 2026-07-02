@@ -1,6 +1,27 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-02 08:40:00 +02:00
+Stand: 2026-07-02 11:23:22 +02:00
+
+## 2026-07-02 - Wartbarkeit Phase 1: Browser-/Server-Konstanten gebuendelt
+
+Ausgangsproblem:
+
+SSI-HU-Prefix, HU-Suffixlaenge und manuelle Einlagerungsgrenzen waren mehrfach in Desktop, Tablet und Servercode hinterlegt. Kleine Aenderungen an diesen Konstanten haetten dadurch mehrere Laufzeitdateien treffen muessen.
+
+Umgesetzt:
+
+- Neue Server-Regeldatei `server/rules/storage-hu-rules.mjs` fuer SSI-HU-Prefix `34006381000`, Suffixlaenge `7`, berechnete Gesamtlange und reine HU-Helfer.
+- Neue klassische Browser-Regelskripte `shared/storage-hu-rules.js` und `shared/manual-storage-rules.js` fuer Desktop und Tablet-Legacy.
+- Desktop und Tablet nutzen die neuen Browser-Regeln fuer HU-Default, HU-Vollstaendigkeit, Prefix-Strip und manuelle Positionsnamen `M...`.
+- `server.mjs` nutzt die neue Server-HU-Regeldatei; `server/rules/order-rules.mjs` benennt den manuellen Positionspraefix.
+- Neue Shared-Skripte in `index.html`, `tablet.html`, `server/config/static-files.mjs` und `service-worker.js` aufgenommen.
+- Asset-Version `app.js?v=20260702-2`, Service-Worker-/Manifest-Version `1.5.152`.
+- Browser-/Tablet-Storage-Keys bewusst nicht ausgelagert, damit LocalStorage- und Offline-Kompatibilitaet unveraendert bleiben.
+
+Validierung:
+
+- Kleine Wartbarkeitsaenderung ohne Import-, Export-, Tablet-Offline-, Datenbank- oder CR-002-Ablaufumbau.
+- Pflichttests siehe Abschluss des zugehoerigen Arbeitslaufs.
 
 ## 2026-07-02 - Testbasis verbindlich gemacht
 

@@ -73,6 +73,14 @@ import { ROLE_PERMISSIONS, hasGroupPermission } from "./server/rules/permission-
 import { WAREHOUSES } from "./server/rules/warehouse-rules.mjs";
 import { validateOrderCompletionForExport } from "./server/rules/export-rules.mjs";
 import {
+  SSI_STORAGE_HU_PREFIX,
+  SSI_STORAGE_HU_SUFFIX_LENGTH,
+  normalizeSsiStorageHandlingUnit,
+  isCompleteSsiStorageHandlingUnit,
+  isIncompleteSsiStorageHandlingUnit,
+  stripSsiStorageHandlingUnitPrefix,
+} from "./server/rules/storage-hu-rules.mjs";
+import {
   MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX,
   isReusableOrderNumber,
   normalizeCustomerGroupKey,
@@ -100,9 +108,6 @@ const localHostname = readLocalHostname();
 const maxBodyBytes = 2 * 1024 * 1024;
 const configuredArticleDeletePassword = String(globalThis.process?.env?.ARTICLE_DELETE_PASSWORD || "");
 const articleDeletePassword = configuredArticleDeletePassword || "HLogistik2026!";
-const SSI_STORAGE_HU_PREFIX = "34006381000";
-const SSI_STORAGE_HU_SUFFIX_LENGTH = 7;
-const SSI_STORAGE_HU_LENGTH = SSI_STORAGE_HU_PREFIX.length + SSI_STORAGE_HU_SUFFIX_LENGTH;
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
@@ -986,30 +991,6 @@ function normalizeHandlingUnitLookup(value) {
     .replace(/[^A-Z0-9]/g, "");
 }
 
-function normalizeDigits(value) {
-  return String(value || "").replace(/\D/g, "");
-}
-
-function normalizeSsiStorageHandlingUnit(value) {
-  const digits = normalizeDigits(value);
-  if (!digits) return SSI_STORAGE_HU_PREFIX;
-  if (digits.startsWith(SSI_STORAGE_HU_PREFIX)) return digits.slice(0, SSI_STORAGE_HU_LENGTH);
-  const suffix = digits.length <= SSI_STORAGE_HU_SUFFIX_LENGTH
-    ? digits
-    : digits.slice(-SSI_STORAGE_HU_SUFFIX_LENGTH);
-  return SSI_STORAGE_HU_PREFIX + suffix;
-}
-
-function isCompleteSsiStorageHandlingUnit(value) {
-  const digits = normalizeDigits(value);
-  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length === SSI_STORAGE_HU_LENGTH;
-}
-
-function isIncompleteSsiStorageHandlingUnit(value) {
-  const digits = normalizeDigits(value);
-  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length < SSI_STORAGE_HU_LENGTH;
-}
-
 function applyStorageHandlingUnitDefaults(order) {
   if ((order?.orderType || "picking") !== "storage" || !Array.isArray(order.lines)) return;
   const useSsiHuPrefix = storageOrderUsesSsiHuPrefix(order);
@@ -1025,13 +1006,6 @@ function applyStorageHandlingUnitDefaults(order) {
       fromHandlingUnitEditable: true
     };
   });
-}
-
-function stripSsiStorageHandlingUnitPrefix(value) {
-  const text = String(value || "").trim();
-  const digits = normalizeDigits(text);
-  if (!digits.startsWith(SSI_STORAGE_HU_PREFIX)) return text;
-  return digits.slice(SSI_STORAGE_HU_PREFIX.length);
 }
 
 function formatHandlingUnitPositions(positions) {

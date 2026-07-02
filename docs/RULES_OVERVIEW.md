@@ -1,6 +1,6 @@
 # HLogistik Rules Overview
 
-Stand: 2026-07-02 08:10:00 +02:00
+Stand: 2026-07-02 11:23:22 +02:00
 
 ## Regelorte
 
@@ -10,7 +10,8 @@ Die fachlichen Serverregeln liegen in `server/rules/`:
 - `article-rules.mjs`: erlaubte Gebindearten, Standard-Gebinde und Gebindemengen-Regeln.
 - `warehouse-rules.mjs`: bekannte Lager `SSI`/`SI`, Default-Lager und Artikel-Datenbankdateien.
 - `storage-bin-rules.mjs`: SSI-Stellplatznormalisierung, inklusive H/R-Regeln, H3-O-Y-Direktplaetzen und Regalbereichslogik.
-- `order-rules.mjs`: Nach-Lagerplatz-/Kunden-Normalisierung, `9021-0OUT` gewinnt als Kunde sobald irgendeine Position diesen Nach-Lagerplatz enthaelt, `9021-0OUT -> SSI`-Auftragsnummer, Kundengruppen-Key, Bestellhinweis-Regeln, Auftrags-Fingerprint und Grenzwerte fuer manuelle Einlagerungs-Mehrfachanlage.
+- `storage-hu-rules.mjs`: SSI-HU-Prefix `34006381000`, Suffixlaenge `7`, Gesamtlange und serverseitige HU-Helfer fuer Einlagerungsauftraege.
+- `order-rules.mjs`: Nach-Lagerplatz-/Kunden-Normalisierung, `9021-0OUT` gewinnt als Kunde sobald irgendeine Position diesen Nach-Lagerplatz enthaelt, `9021-0OUT -> SSI`-Auftragsnummer, Kundengruppen-Key, Bestellhinweis-Regeln, Auftrags-Fingerprint, Grenzwerte fuer manuelle Einlagerungs-Mehrfachanlage und manueller Positionspraefix `M`.
 - `export-rules.mjs`: reine Export-Vollstaendigkeitsregel, ob relevante Positionen abgehakt sind.
 
 Weitere regelnahe Listen:
@@ -21,6 +22,8 @@ Weitere regelnahe Listen:
 - `server/original-archive.mjs`: sichere Originaldatei-Archivierung nach erfolgreichem PDF-Export, inklusive Importordner-Schutz, Archivkollisionen und Rename-/Copy-Fallback.
 - `service-worker.js`: klassische Browser-App-Shell-Liste fuer Offline-Cache. Diese Liste bleibt wegen alter Tablet-/Service-Worker-Kompatibilitaet manuell synchronisiert.
 - `order-hint-rules.js`: klassisches Browser-/Test-Helferskript fuer Bestellhinweis-Erkennung und Anhaengen an die importierte Auftragsnummer.
+- `shared/storage-hu-rules.js`: klassisches Browser-Regelskript fuer SSI-HU-Prefix, Suffixlaenge, Gesamtlange und HU-Helfer in Desktop und Tablet.
+- `shared/manual-storage-rules.js`: klassisches Browser-Regelskript fuer manuelle Einlagerungsanzahl und Positionspraefix `M` in Desktop und Tablet.
 
 ## Bewusst nicht extern konfigurierbar
 
@@ -28,8 +31,8 @@ Weitere regelnahe Listen:
 - SSI-Stellplatznormalisierung ist keine JSON-Konfiguration, sondern getestete Logik.
 - Exportlogik fuer Bestandsbuchungsfehler bleibt unveraendert: CR-002 ist bewusst aktiv.
 - SQLite-Reparatur, echte Authentifizierung und produktive Datenmigrationen gehoeren nicht zu diesen Regeldateien.
-- Browser-Duplikate fuer HU-/Tablet-Legacy-Konstanten bleiben vorerst bestehen und werden nicht ueber ES-Module geladen.
-- Der Browser spiegelt den Grenzwert fuer `Anzahl Positionen` bewusst als klassisches Script-Konstantenpaar, damit `tablet-legacy.js` ohne ES-Module lauffaehig bleibt. Fuehrende Regelquelle ist `server/rules/order-rules.mjs`.
+- Browser-Duplikate fuer HU- und manuelle Einlagerungs-Konstanten sind in klassische `shared/*.js`-Skripte gebuendelt, damit `tablet-legacy.js` ohne ES-Module lauffaehig bleibt.
+- Browser-/Tablet-Storage-Keys bleiben bewusst in den jeweiligen Laufzeitdateien, weil sie Offline-Datenkompatibilitaet und bestehende LocalStorage-Namen sichern.
 - Tablet-Ausstiegsregeln fuer manuelle Einlagerung nutzen bestehende Felder (`manualStorageDraft`, `localDraft`, `acceptedBy`, `exportedAt`) und fuehren keine neuen Statuswerte ein.
 - Bestellhinweis-Erkennung bleibt klassisches JavaScript statt JSON, weil Labelsuche, Normalisierung, Kandidaten-Ablehnung und Doppelanhang-Logik Reihenfolge und Regex benoetigen.
 - Manuelle Einlagerungs-Stueckzahl wird weiterhin in den bestehenden Positionsfeldern gespeichert: `actualQty` ist die Stueckzahl, `targetQty` bleibt fuer manuelle Positionen leer. Neue manuelle Stellplaetze starten leer und werden nicht aus dem Artikelstamm vorbelegt.
@@ -47,6 +50,10 @@ Bei neuen App-Seiten immer beide Listen pruefen:
 - `service-worker.js`
 
 Bei neuen statischen Dateien zusaetzlich `server/config/static-files.mjs` aktualisieren.
+
+Bei Aenderungen an SSI-HU-Regeln `server/rules/storage-hu-rules.mjs`, `shared/storage-hu-rules.js`, `index.html`, `tablet.html`, `service-worker.js`, `manifest.webmanifest` und `server/config/static-files.mjs` gemeinsam pruefen.
+
+Bei Aenderungen an manueller Einlagerungsanzahl oder Positionspraefix `server/rules/order-rules.mjs`, `shared/manual-storage-rules.js`, `index.html`, `tablet.html`, `service-worker.js`, `manifest.webmanifest` und `server/config/static-files.mjs` gemeinsam pruefen.
 
 Bei Aenderungen an der Bestellhinweis-Erkennung `order-hint-rules.js`, `index.html`, `service-worker.js`, `manifest.webmanifest` und die Parser-Fixtures in `scripts/qa-api-matrix.mjs` gemeinsam pruefen.
 

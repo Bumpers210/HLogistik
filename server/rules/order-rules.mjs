@@ -3,6 +3,7 @@ export const SSI_ORDER_NUMBER = "SSI";
 export const MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT = 1;
 export const MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN = 1;
 export const MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX = 100;
+export const MANUAL_STORAGE_POSITION_PREFIX = "M";
 export const ORDER_HINT_MAX_LENGTH = 80;
 
 const ORDER_HINT_LABEL_PATTERN = /\bbestell\s*-?\s*hinweis\b\s*[:#-]?\s*/i;

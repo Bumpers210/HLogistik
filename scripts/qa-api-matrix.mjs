@@ -2,6 +2,7 @@ import { normalizeSsiStorageBin } from "../server/helpers.mjs";
 import {
   destinationCustomerNameForLines,
   MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX,
+  MANUAL_STORAGE_POSITION_PREFIX,
   normalizeManualStoragePositionCreateCount,
 } from "../server/rules/order-rules.mjs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -47,6 +48,7 @@ async function run() {
   check("manual storage count default is 1", normalizeManualStoragePositionCreateCount("").value === 1, JSON.stringify(normalizeManualStoragePositionCreateCount("")));
   check("manual storage invalid count rejected", normalizeManualStoragePositionCreateCount("0").ok === false, JSON.stringify(normalizeManualStoragePositionCreateCount("0")));
   check("manual storage max count accepted", normalizeManualStoragePositionCreateCount(String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX)).ok === true, String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX));
+  check("manual storage position prefix remains M", MANUAL_STORAGE_POSITION_PREFIX === "M", MANUAL_STORAGE_POSITION_PREFIX);
 
   const orderHintSameLine = await parsePickingTextFixture(pickingTextFixture("Bestellhinweis: Service Ecke"));
   check(
@@ -436,7 +438,7 @@ async function run() {
     });
   }
 
-  for (const path of ["/", "/order-hint-rules.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
+  for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
     const response = await request(path);
     check(`static ${path}`, response.status === 200, `${response.status}`);
   }
@@ -1603,6 +1605,10 @@ async function createAppParserContext() {
 
   const orderHintRulesCode = await readFile(new URL("../order-hint-rules.js", import.meta.url), "utf8");
   vm.runInContext(orderHintRulesCode, context, { filename: "order-hint-rules.js" });
+  const storageHuRulesCode = await readFile(new URL("../shared/storage-hu-rules.js", import.meta.url), "utf8");
+  vm.runInContext(storageHuRulesCode, context, { filename: "shared/storage-hu-rules.js" });
+  const manualStorageRulesCode = await readFile(new URL("../shared/manual-storage-rules.js", import.meta.url), "utf8");
+  vm.runInContext(manualStorageRulesCode, context, { filename: "shared/manual-storage-rules.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
   vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });

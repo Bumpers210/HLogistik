@@ -9,12 +9,14 @@ var ORDER_LIST_REFRESH_MS = 30000;
 var CONNECTION_CHECK_MS = 30000;
 var CONNECTION_CHECK_TIMEOUT_MS = 5000;
 var AUTO_SAVE_MS = 2500;
-var SSI_STORAGE_HU_PREFIX = "34006381000";
-var SSI_STORAGE_HU_SUFFIX_LENGTH = 7;
-var SSI_STORAGE_HU_LENGTH = SSI_STORAGE_HU_PREFIX.length + SSI_STORAGE_HU_SUFFIX_LENGTH;
-var MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT = 1;
-var MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN = 1;
-var MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX = 100;
+var STORAGE_HU_RULES = window.HLogistikStorageHuRules;
+var MANUAL_STORAGE_RULES = window.HLogistikManualStorageRules;
+var SSI_STORAGE_HU_PREFIX = STORAGE_HU_RULES.prefix;
+var SSI_STORAGE_HU_SUFFIX_LENGTH = STORAGE_HU_RULES.suffixLength;
+var SSI_STORAGE_HU_LENGTH = STORAGE_HU_RULES.length;
+var MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT = MANUAL_STORAGE_RULES.positionCreateCountDefault;
+var MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN = MANUAL_STORAGE_RULES.positionCreateCountMin;
+var MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX = MANUAL_STORAGE_RULES.positionCreateCountMax;
 
 var elements = {};
 var currentOrder = null;
@@ -1386,13 +1388,7 @@ function storageOrderPutDedupeKey(orderId) {
 }
 
 function nextManualStoragePosition(lines) {
-  var numbers = [];
-  var source = Array.isArray(lines) ? lines : [];
-  for (var index = 0; index < source.length; index += 1) {
-    var value = String(source[index].warehouseOrder || "");
-    if (/^M\d+$/i.test(value)) numbers.push(Number(value.replace(/\D/g, "")));
-  }
-  return "M" + ((numbers.length ? Math.max.apply(null, numbers) : 0) + 1);
+  return MANUAL_STORAGE_RULES.nextPositionName(lines);
 }
 
 function createLineId() {
@@ -1729,23 +1725,15 @@ function usesSsiStorageHuPrefix() {
 }
 
 function normalizeSsiStorageHandlingUnit(value) {
-  var digits = normalizeDigits(value);
-  if (!digits) return SSI_STORAGE_HU_PREFIX;
-  if (digits.indexOf(SSI_STORAGE_HU_PREFIX) === 0) return digits.slice(0, SSI_STORAGE_HU_LENGTH);
-  var suffix = digits.length <= SSI_STORAGE_HU_SUFFIX_LENGTH
-    ? digits
-    : digits.slice(digits.length - SSI_STORAGE_HU_SUFFIX_LENGTH);
-  return SSI_STORAGE_HU_PREFIX + suffix;
+  return STORAGE_HU_RULES.normalizeHandlingUnit(value);
 }
 
 function isCompleteSsiStorageHandlingUnit(value) {
-  var digits = normalizeDigits(value);
-  return digits.indexOf(SSI_STORAGE_HU_PREFIX) === 0 && digits.length === SSI_STORAGE_HU_LENGTH;
+  return STORAGE_HU_RULES.isComplete(value);
 }
 
 function isIncompleteSsiStorageHandlingUnit(value) {
-  var digits = normalizeDigits(value);
-  return digits.indexOf(SSI_STORAGE_HU_PREFIX) === 0 && digits.length < SSI_STORAGE_HU_LENGTH;
+  return STORAGE_HU_RULES.isIncomplete(value);
 }
 
 function isMissingOrIncompleteHandlingUnit(value) {

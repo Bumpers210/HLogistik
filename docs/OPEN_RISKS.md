@@ -1,10 +1,10 @@
 # HLogistik Open Risks
 
-Stand: 2026-07-02 08:10:00 +02:00
+Stand: 2026-07-02 11:23:22 +02:00
 
 ## Aktueller Stand nach Stabilisierung
 
-Keine neuen offenen P0/P1-Risiken aus dem sortierten Stabilitaetsstand. Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung und Artikelstamm-Buchungsexport sind in der QA-Matrix abgedeckt. Der aktuelle Clientstand ist `app.js?v=20260702-1`, Service Worker/Manifest `1.5.151`.
+Keine neuen offenen P0/P1-Risiken aus dem sortierten Stabilitaetsstand. Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung und Artikelstamm-Buchungsexport sind in der QA-Matrix abgedeckt. Der aktuelle Clientstand ist `app.js?v=20260702-2`, Service Worker/Manifest `1.5.152`.
 
 Weiter offen bleiben nur bewusst dokumentierte Betriebsentscheidungen: CR-002, automatische SQLite-Wiederherstellung, Passwort-Fallback und echtes Authentifizierungskonzept.
 
@@ -16,7 +16,7 @@ Kein neues offenes Produktivrisiko aus der technischen Umstellung. Der Import wa
 
 Restempfehlung:
 
-Mindestens zwei problematische Original-PDFs und ein bisher funktionierendes PDF manuell im Browser importieren. Die CLI-Umgebung hat keine lokale OCR-Engine; die echte OCR-Qualitaet muss deshalb im Browserpfad validiert werden. Nach Deployment Browser hart neu laden bzw. Service Worker aktualisieren, damit `app.js?v=20260702-1` und Cache `1.5.151` aktiv sind.
+Mindestens zwei problematische Original-PDFs und ein bisher funktionierendes PDF manuell im Browser importieren. Die CLI-Umgebung hat keine lokale OCR-Engine; die echte OCR-Qualitaet muss deshalb im Browserpfad validiert werden. Nach Deployment Browser hart neu laden bzw. Service Worker aktualisieren, damit `app.js?v=20260702-2` und Cache `1.5.152` aktiv sind.
 
 ## Aktueller Lauf - PDF-Import Roh-Stellplatz
 
@@ -32,7 +32,7 @@ Kein neues offenes Produktivrisiko aus dem Fix. Der Import bricht bei 0 Position
 
 Restempfehlung:
 
-Nach Deployment Browser hart neu laden bzw. Service-Worker aktualisieren, damit `app.js?v=20260702-1` und Cache `1.5.151` aktiv sind. Fuer echte OCR-Qualitaet bleibt RISK-005 relevant.
+Nach Deployment Browser hart neu laden bzw. Service-Worker aktualisieren, damit `app.js?v=20260702-2` und Cache `1.5.152` aktiv sind. Fuer echte OCR-Qualitaet bleibt RISK-005 relevant.
 
 ## Aktueller Lauf - Artikelstamm Buchungsexport
 
@@ -118,9 +118,9 @@ Soll HLogistik ausserhalb eines kontrollierten LANs erreichbar sein, muss ein ec
 
 Prioritaet: P3
 
-Serverseitige Regeln sind ausgelagert. Einige Browser-/Tablet-Legacy-Konstanten, besonders HU-Prefix und Service-Worker-App-Shell, bleiben bewusst klassisch im Frontend dupliziert, damit alte Tablets keine ES-Modul- oder Service-Worker-Kompatibilitaetsprobleme bekommen.
+Serverseitige Regeln sind ausgelagert. HU- und manuelle Einlagerungs-Konstanten sind jetzt in klassischen Browser-Regelskripten gebuendelt. Weiter bewusst lokal bleiben Storage-Keys und die Service-Worker-App-Shell, damit alte Tablets keine ES-Modul-, LocalStorage- oder Service-Worker-Kompatibilitaetsprobleme bekommen.
 
-Empfehlung: Bei spaeterer Modernisierung ein klassisches Browser-Regelbundle mit Regressionstests fuer Desktop und Tablet planen.
+Empfehlung: Bei spaeterer Modernisierung Storage-Key- und App-Shell-Listen nur mit Regressionstests fuer Desktop, Tablet und Offline-Datenkompatibilitaet weiter vereinheitlichen.
 
 ## RISK-009 - `archive-path.txt` ist reserviert, aber nicht aktiv
 

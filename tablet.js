@@ -9,12 +9,14 @@ const ORDER_LIST_REFRESH_MS = 30000;
 const CONNECTION_CHECK_MS = 30000;
 const CONNECTION_CHECK_TIMEOUT_MS = 5000;
 const AUTO_SAVE_MS = 10000;
-const SSI_STORAGE_HU_PREFIX = "34006381000";
-const SSI_STORAGE_HU_SUFFIX_LENGTH = 7;
-const SSI_STORAGE_HU_LENGTH = SSI_STORAGE_HU_PREFIX.length + SSI_STORAGE_HU_SUFFIX_LENGTH;
-const MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT = 1;
-const MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN = 1;
-const MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX = 100;
+const STORAGE_HU_RULES = window.HLogistikStorageHuRules;
+const MANUAL_STORAGE_RULES = window.HLogistikManualStorageRules;
+const SSI_STORAGE_HU_PREFIX = STORAGE_HU_RULES.prefix;
+const SSI_STORAGE_HU_SUFFIX_LENGTH = STORAGE_HU_RULES.suffixLength;
+const SSI_STORAGE_HU_LENGTH = STORAGE_HU_RULES.length;
+const MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT = MANUAL_STORAGE_RULES.positionCreateCountDefault;
+const MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN = MANUAL_STORAGE_RULES.positionCreateCountMin;
+const MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX = MANUAL_STORAGE_RULES.positionCreateCountMax;
 
 const elements = {};
 let currentOrder = null;
@@ -1209,12 +1211,7 @@ function storageOrderPutDedupeKey(orderId) {
 }
 
 function nextManualStoragePosition(lines) {
-  const numbers = (Array.isArray(lines) ? lines : [])
-    .map((line) => String(line.warehouseOrder || ""))
-    .filter((value) => /^M\d+$/i.test(value))
-    .map((value) => Number(value.replace(/\D/g, "")))
-    .filter((value) => Number.isInteger(value) && value > 0);
-  return `M${(numbers.length ? Math.max(...numbers) : 0) + 1}`;
+  return MANUAL_STORAGE_RULES.nextPositionName(lines);
 }
 
 function createLineId() {
@@ -1622,23 +1619,15 @@ function usesSsiStorageHuPrefix() {
 }
 
 function normalizeSsiStorageHandlingUnit(value) {
-  const digits = normalizeDigits(value);
-  if (!digits) return SSI_STORAGE_HU_PREFIX;
-  if (digits.startsWith(SSI_STORAGE_HU_PREFIX)) return digits.slice(0, SSI_STORAGE_HU_LENGTH);
-  const suffix = digits.length <= SSI_STORAGE_HU_SUFFIX_LENGTH
-    ? digits
-    : digits.slice(-SSI_STORAGE_HU_SUFFIX_LENGTH);
-  return SSI_STORAGE_HU_PREFIX + suffix;
+  return STORAGE_HU_RULES.normalizeHandlingUnit(value);
 }
 
 function isCompleteSsiStorageHandlingUnit(value) {
-  const digits = normalizeDigits(value);
-  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length === SSI_STORAGE_HU_LENGTH;
+  return STORAGE_HU_RULES.isComplete(value);
 }
 
 function isIncompleteSsiStorageHandlingUnit(value) {
-  const digits = normalizeDigits(value);
-  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length < SSI_STORAGE_HU_LENGTH;
+  return STORAGE_HU_RULES.isIncomplete(value);
 }
 
 function isMissingOrIncompleteHandlingUnit(value) {

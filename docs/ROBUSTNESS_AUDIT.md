@@ -1,11 +1,11 @@
 # HLogistik Robustness Audit
 
-Stand: 2026-07-02 08:10:00 +02:00
+Stand: 2026-07-02 11:23:22 +02:00
 
 ## Aktueller Stabilitaetsstand
 
-- Aktueller Clientstand: `app.js?v=20260702-1`.
-- Aktuelle Service-Worker-/Manifest-Version: `1.5.151`.
+- Aktueller Clientstand: `app.js?v=20260702-2`.
+- Aktuelle Service-Worker-/Manifest-Version: `1.5.152`.
 - Die QA-Matrix deckt Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung, Buchungsexport, CR-002 und QA-Artefaktfreiheit ab.
 - Laufzeitdaten, lokale Pfaddateien und QA-Artefakte sind nicht Teil des Commit-Scopes.
 - Die verbindliche Testbasis liegt in `docs/TEST_BASELINE.md`; PowerShell ist die Hauptshell fuer QA-Befehle.
@@ -26,7 +26,7 @@ Robustheitsgewinn:
 
 - Fehlorientierte oder qualitativ schwache OCR-Laeufe werden nicht mehr still mit besseren Seiten/Zeilen anderer Kandidaten vermischt.
 - Die Diagnose zeigt Kandidaten, Scores, Skalen, DPI, Rotation und Roh-/Finalwerte pro importierter Position.
-- Cache-Bump auf den aktuellen Clientstand `app.js?v=20260702-1` und Service Worker `1.5.151` verhindert, dass bekannte Clients alte Importlogik behalten.
+- Cache-Bump auf den aktuellen Clientstand `app.js?v=20260702-2` und Service Worker `1.5.152` verhindert, dass bekannte Clients alte Importlogik behalten.
 
 Validierung:
 
@@ -159,7 +159,7 @@ Geprueft und verbessert:
 - Separates Loeschen serverseitig angelegter offener manueller Einlagerungen.
 - Abbrechen reiner lokaler Offline-Entwuerfe inklusive Sync-Queue- und Cache-Bereinigung.
 - Offline-Listenrendering bei leerem Cache, damit geloeschte lokale Eintraege nicht als `[Cache]` sichtbar bleiben.
-- Tablet-Assets und Service Worker sind im aktuellen Stand ueber Manifest/Service Worker `1.5.151` auszuliefern.
+- Tablet-Assets und Service Worker sind im aktuellen Stand ueber Manifest/Service Worker `1.5.152` auszuliefern.
 
 Ergebnis:
 
@@ -190,7 +190,7 @@ Validierung:
 
 - QA-Matrix erweitert: zwei Auftraege gleicher Kundengruppe werden gemeinsam uebernommen; Details und Summaries werden geliefert; getrennte Updates bleiben getrennt.
 - Browser-Smoke online und offline gegen `tmp/tablet-offline-group-qa/` auf Port `4175`.
-- Aktuelle Cache-/Manifest-Version: `1.5.151`.
+- Aktuelle Cache-/Manifest-Version: `1.5.152`.
 
 ## Manuelle Einlagerung
 
@@ -295,7 +295,7 @@ Der Offline-Navigationsfallback ist fuer bekannte App-Seiten konsistenter:
 - `/auswertungen.html` -> `/auswertungen.html`
 - unbekannte Pfade -> `/index.html`
 
-Aktuelle Cache- und Manifest-Version: `1.5.151`.
+Aktuelle Cache- und Manifest-Version: `1.5.152`.
 
 ## UI-Robustheit
 
