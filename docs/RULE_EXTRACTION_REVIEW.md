@@ -24,7 +24,7 @@ Ausgefuehrt vor der Analyse:
 - `npm.cmd run lint`
 - `node --check` fuer `server.mjs`, zentrale `server/*.mjs`, `tablet.js`, `tablet-legacy.js`, `offline-store.js`, `service-worker.js`, `scripts/qa-api-matrix.mjs`, `server/rules/*.mjs`, `server/config/*.mjs`, `shared/*.mjs`
 - isolierte QA-Kopie: `tmp/rule-extraction-review-qa-20260623-093550/`
-- `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa`
+- PowerShell-QA-Matrix mit `$env:QA_BASE_URL = "http://127.0.0.1:4175"` und `npm.cmd run test:qa`
 
 Ergebnis:
 
@@ -146,7 +146,7 @@ Mindestens ausfuehren:
 
 - `npm.cmd run lint`
 - `node --check` fuer alle geaenderten JS/MJS-Dateien
-- `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa`
+- PowerShell-QA-Matrix mit `$env:QA_BASE_URL = "http://127.0.0.1:4175"` und `npm.cmd run test:qa`
 - Browser-Smoke Desktop Import/Export
 - Browser-Smoke Tablet: Auftrag uebernehmen, Position abhaken, direkt PDF exportieren
 - Offline-Smoke Tablet: gemeinsam uebernommene Auftraege wechseln und getrennt speichern

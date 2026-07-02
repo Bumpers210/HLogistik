@@ -1,6 +1,24 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-02 08:10:00 +02:00
+Stand: 2026-07-02 08:40:00 +02:00
+
+## 2026-07-02 - Testbasis verbindlich gemacht
+
+Ausgangsproblem:
+
+QA-Befehle, isolierte QA-Kopie, Live-Port-Schutz und manuelle Smoke-Pflichten waren ueber mehrere Dokumente verteilt. Teilweise standen noch Bash-Beispiele statt PowerShell-kompatibler Befehle.
+
+Umgesetzt:
+
+- Neue verbindliche Testbasis `docs/TEST_BASELINE.md`.
+- PowerShell-Skript `scripts/start-qa-copy.ps1` fuer isolierte QA-Kopie auf Port `4175`.
+- Syntaxcheck-Skript `scripts/check-syntax.mjs` und npm-Scripts `check:syntax`/`check:precommit`.
+- QA-Matrix-Schutz erweitert: PowerShell-Hinweis bei Live-Port-Sperre, Pfadschutz fuer `exportDir`/`importDir`/`archiveDir` ausserhalb der QA-Kopie und Artefaktsuche auch fuer `QA-*.xlsx`/`QA-*.csv`.
+- README, manueller QA-Plan, Robustheitsaudit und offene Risiken auf die neue Testbasis verwiesen.
+
+Validierung:
+
+- Reine QA-Infrastruktur- und Dokumentationsaenderung; keine fachliche App-Logik geaendert.
 
 ## 2026-07-02 - Projektdokumentation synchronisiert
 

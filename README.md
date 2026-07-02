@@ -145,18 +145,28 @@ Einlagerungs-PDFs koennen eine saubere PDF-Textschicht direkt nutzen; unsichere 
 
 ## Entwicklung und QA
 
-```bash
-npm run lint
-npm run test:qa
+```powershell
+npm.cmd run lint
+npm.cmd run check:syntax
 ```
 
-Schreibende QA-Laeufe muessen gegen eine isolierte Kopie laufen, typischerweise mit:
+Schreibende QA-Laeufe muessen gegen eine isolierte Kopie laufen. Empfohlener Start:
 
-```bash
-QA_BASE_URL=http://127.0.0.1:4175 npm run test:qa
+```powershell
+.\scripts\start-qa-copy.ps1
+```
+
+In einem zweiten PowerShell-Fenster:
+
+```powershell
+$env:QA_BASE_URL = "http://127.0.0.1:4175"
+npm.cmd run test:qa
+Remove-Item Env:\QA_BASE_URL -ErrorAction SilentlyContinue
 ```
 
 Automatisierte QA-Exporte duerfen keine dauerhaften PDF/XLSX/CSV/HTML-Artefakte hinterlassen. Produktive Exporte ohne QA-Header erzeugen weiterhin Dateien im Exportziel.
+
+Die verbindliche Testbasis steht in `docs/TEST_BASELINE.md`.
 
 ## Projektstruktur
 

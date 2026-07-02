@@ -8,6 +8,8 @@ Keine neuen offenen P0/P1-Risiken aus dem sortierten Stabilitaetsstand. Import, 
 
 Weiter offen bleiben nur bewusst dokumentierte Betriebsentscheidungen: CR-002, automatische SQLite-Wiederherstellung, Passwort-Fallback und echtes Authentifizierungskonzept.
 
+Die Testbasis ist verbindlich in `docs/TEST_BASELINE.md` beschrieben. Die normale QA-Matrix muss gegen eine isolierte Kopie auf Port `4175` laufen; Live-Port `4174` ist fuer Schreibtests gesperrt.
+
 ## Aktueller Lauf - PDF-Import OCR-Kandidatenbewertung
 
 Kein neues offenes Produktivrisiko aus der technischen Umstellung. Der Import waehlt jetzt den besten kompletten OCR-Kandidaten aus Skala und Rotation und bricht bei zu schwacher Qualitaet ab, bevor ein Auftragszustand entsteht.
@@ -133,7 +135,7 @@ Soll `archive-path.txt` wie `import-path.txt` und `export-path.txt` aktiv unters
 ## Erledigt in diesem Lauf
 
 - RISK-004: Service-Worker-Offline-Fallback fuer Desktop-Unterseiten vereinheitlicht.
-- RISK-006: API-Matrix als `scripts/qa-api-matrix.mjs` und `npm run test:qa` versioniert.
+- RISK-006: API-Matrix als `scripts/qa-api-matrix.mjs` und npm-Script `test:qa` versioniert.
 - Regel-Refactoring: Server-Regeln in `server/rules/`, statische Allowlist in `server/config/static-files.mjs`, App-Seiten in `shared/app-pages.mjs` dokumentiert.
 
 ## Aktueller Lauf - QA-Exportartefakte

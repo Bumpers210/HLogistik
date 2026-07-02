@@ -8,6 +8,7 @@ Stand: 2026-07-02 08:10:00 +02:00
 - Aktuelle Service-Worker-/Manifest-Version: `1.5.151`.
 - Die QA-Matrix deckt Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung, Buchungsexport, CR-002 und QA-Artefaktfreiheit ab.
 - Laufzeitdaten, lokale Pfaddateien und QA-Artefakte sind nicht Teil des Commit-Scopes.
+- Die verbindliche Testbasis liegt in `docs/TEST_BASELINE.md`; PowerShell ist die Hauptshell fuer QA-Befehle.
 
 ## PDF-Import OCR-Kandidatenbewertung
 
@@ -168,7 +169,7 @@ Validierung:
 
 - `npm.cmd run lint`
 - `node --check tablet-legacy.js`, `tablet.js`, `scripts\qa-api-matrix.mjs`, `service-worker.js`
-- `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` mit 42/42 Checks
+- PowerShell-QA-Matrix gegen `http://127.0.0.1:4175` mit 42/42 Checks
 - Headless-Chrome-CDP-Smoke gegen `tmp/tablet-manual-storage-postfix-qa-20260623-081813/`
 
 ## Tablet Offline-Auftragsgruppen
@@ -215,7 +216,7 @@ Verhalten:
 
 Validierung:
 
-- Jede Refactoring-Stufe wurde mit `npm.cmd run lint`, `node --check` fuer die geaenderten Dateien und `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` geprueft.
+- Jede Refactoring-Stufe wurde mit `npm.cmd run lint`, `node --check` fuer die geaenderten Dateien und der PowerShell-QA-Matrix gegen `http://127.0.0.1:4175` geprueft.
 - Die finale QA-Matrix bestand mit 24/24 Checks.
 - CR-002 wurde gezielt gegengeprueft: Ein abgehakter Auftrag mit Bestandsbuchungsfehler wurde weiterhin exportiert und der Fehler blieb protokolliert.
 
@@ -241,7 +242,7 @@ Geprueft:
 
 Ergebnis:
 
-`npm run test:qa` gegen die isolierte Kopie bestand mit 21/21 Checks.
+`npm.cmd run test:qa` gegen die isolierte Kopie bestand mit 21/21 Checks.
 
 ## Datenintegritaet
 

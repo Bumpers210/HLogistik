@@ -5,15 +5,31 @@ Stand: 2026-07-02 08:10:00 +02:00
 ## Vorbereitung
 
 1. Vor schreibenden Tests eine isolierte Kopie erstellen.
-2. Server in der Kopie starten, z. B. auf Port `4175`.
-3. `QA_BASE_URL=http://127.0.0.1:4175 npm run test:qa` ausfuehren.
+2. Server in der Kopie auf Port `4175` starten, bevorzugt mit `.\scripts\start-qa-copy.ps1`.
+3. QA-Matrix mit PowerShell ausfuehren:
+
+   ```powershell
+   $env:QA_BASE_URL = "http://127.0.0.1:4175"
+   npm.cmd run test:qa
+   Remove-Item Env:\QA_BASE_URL -ErrorAction SilentlyContinue
+   ```
+
 4. Fuer Live-Server nur bewusst testen: `QA_ALLOW_LIVE=1` setzen, da Testdaten geschrieben werden.
+5. Verbindliche Testbasis: `docs/TEST_BASELINE.md`.
 
 ## Automatisierte QA-Matrix
 
 Skript: `scripts/qa-api-matrix.mjs`
 
-NPM-Befehl: `npm run test:qa`
+NPM-Script: `test:qa`
+
+PowerShell-Befehl:
+
+```powershell
+$env:QA_BASE_URL = "http://127.0.0.1:4175"
+npm.cmd run test:qa
+Remove-Item Env:\QA_BASE_URL -ErrorAction SilentlyContinue
+```
 
 Geprueft werden:
 
@@ -241,9 +257,16 @@ Das Rollenmodell schuetzt LAN-Workflows gegen Fehlbedienung. Es ist keine echte 
 ## QA-Exportartefakte
 
 1. Isolierte QA-Kopie auf Port 4175 starten.
-2. `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` ausfuehren.
+2. QA-Matrix mit PowerShell ausfuehren:
+
+   ```powershell
+   $env:QA_BASE_URL = "http://127.0.0.1:4175"
+   npm.cmd run test:qa
+   Remove-Item Env:\QA_BASE_URL -ErrorAction SilentlyContinue
+   ```
+
 3. Pruefen, dass CR-002, Tablet-Direktexport, Einlagerabschluss, Archivierung und manuelle Einlagerung fachlich gruen bleiben.
-4. Pruefen, dass die Matrix den Check `QA export tests leave no durable PDF/HTML artifacts` meldet.
+4. Pruefen, dass die Matrix den Check `QA export tests leave no durable PDF/XLSX/CSV/HTML artifacts` meldet.
 5. Im konfigurierten Exportziel, Import-/Archiv-Testordner und in `Exporte/` nach `QA-*.pdf`, `QA-*.xlsx`, `QA-*.csv` und `QA-*.html` des aktuellen Laufes suchen.
 6. Einen normalen Benutzerexport ohne QA-Header in einer isolierten Kopie testen und bestaetigen, dass weiterhin eine PDF-Datei erzeugt wird.
 

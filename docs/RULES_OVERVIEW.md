@@ -65,7 +65,7 @@ Bei Aenderungen am Kommissionier-PDF-Import `app.js`, `index.html`, `service-wor
 - `npm.cmd run lint`
 - `node --check server.mjs`
 - `node --check` fuer geaenderte `server/**/*.mjs`, `shared/*.mjs` und `scripts/*.mjs`
-- `QA_BASE_URL=http://127.0.0.1:4175 npm.cmd run test:qa` gegen eine isolierte QA-Kopie
+- PowerShell-QA-Matrix mit `$env:QA_BASE_URL = "http://127.0.0.1:4175"` und `npm.cmd run test:qa` gegen eine isolierte QA-Kopie
 
 Manuell pruefen:
 

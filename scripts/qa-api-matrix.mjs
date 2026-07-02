@@ -30,6 +30,8 @@ let parserUuidCounter = 0;
 await run();
 
 async function run() {
+  await guardAgainstUnsafeQaServerContext();
+
   const appSource = await readFile(new URL("../app.js", import.meta.url), "utf8");
   check("ssi H3 O-Y shorthand normalizes to direct H3 bin", normalizeSsiStorageBin("H3T1") === "002-H3-T1", normalizeSsiStorageBin("H3T1"));
   check("ssi H3 O-Y shorthand accepts hyphen", normalizeSsiStorageBin("H3-T1") === "002-H3-T1", normalizeSsiStorageBin("H3-T1"));
@@ -1213,7 +1215,7 @@ async function run() {
 
   const exportArtifacts = await findQaExportArtifacts();
   check(
-    "QA export tests leave no durable PDF/HTML artifacts",
+    "QA export tests leave no durable PDF/XLSX/CSV/HTML artifacts",
     exportArtifacts.length === 0,
     JSON.stringify(exportArtifacts)
   );
@@ -1523,7 +1525,7 @@ async function findQaExportArtifacts() {
   const dirs = await qaArtifactSearchDirs();
   const artifacts = [];
   const suffixPattern = escapeRegExp(suffix);
-  const artifactPattern = new RegExp(`^QA-.*${suffixPattern}.*\\.(pdf|html)$`, "i");
+  const artifactPattern = new RegExp(`^QA-.*${suffixPattern}.*\\.(pdf|xlsx|csv|html)$`, "i");
 
   for (const dir of dirs) {
     let entries = [];
@@ -2019,6 +2021,46 @@ function guardAgainstAccidentalLiveWrites() {
   if (!isDefaultServerPort || ALLOW_LIVE) return;
   throw new Error(
     "QA-Matrix schreibt Testartikel und Testbuchungen. Bitte gegen eine isolierte Kopie starten " +
-    "(z. B. QA_BASE_URL=http://127.0.0.1:4175 npm run test:qa) oder bewusst QA_ALLOW_LIVE=1 setzen."
+    "(PowerShell: $env:QA_BASE_URL = \"http://127.0.0.1:4175\"; npm.cmd run test:qa) " +
+    "oder bewusst QA_ALLOW_LIVE=1 setzen."
   );
+}
+
+async function guardAgainstUnsafeQaServerContext() {
+  if (ALLOW_LIVE) return;
+
+  const health = await request("/api/health");
+  if (health.status !== 200 || !health.body?.ok) {
+    throw new Error(`QA-Server nicht erreichbar oder /api/health ungueltig: ${health.status} ${JSON.stringify(health.body)}`);
+  }
+
+  const root = repoRootDir();
+  const tmpRoot = path.join(root, "tmp");
+  const rootIsQaWorkspace = isQaWorkspaceRoot(root);
+  const unsafeDirs = ["exportDir", "importDir", "archiveDir"]
+    .map((key) => ({ key, value: String(health.body?.[key] || "").trim() }))
+    .filter((entry) => {
+      if (!entry.value || !isPathInside(entry.value, root)) return true;
+      return !rootIsQaWorkspace && !isPathInside(entry.value, tmpRoot);
+    });
+
+  if (unsafeDirs.length) {
+    throw new Error(
+      "QA_BASE_URL zeigt nicht auf eine isolierte QA-Kopie unter tmp/ oder auf eine gestartete QA-Workspace-Kopie. " +
+      `Unsichere Pfade: ${unsafeDirs.map((entry) => `${entry.key}=${entry.value}`).join(", ")}`
+    );
+  }
+}
+
+function isQaWorkspaceRoot(rootPath) {
+  const base = path.basename(path.resolve(rootPath)).toLowerCase();
+  const parent = path.basename(path.dirname(path.resolve(rootPath))).toLowerCase();
+  return parent === "tmp" && /^qa-workspace-\d{8}-\d{6}$/.test(base);
+}
+
+function isPathInside(candidatePath, parentPath) {
+  const candidate = path.resolve(candidatePath);
+  const parent = path.resolve(parentPath);
+  const relative = path.relative(parent, candidate);
+  return relative === "" || Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
