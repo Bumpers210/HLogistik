@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260702-4";
+const CLIENT_ASSET_VERSION = "20260703-1";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 6;
 const OCR_PRECISE_RENDER_SCALE = 7.5;
@@ -4862,30 +4862,12 @@ function setTopControlsCollapsed(collapsed) {
 }
 
 function getPickingLines(importOrder) {
-  if (state.orderType === "storage") return [...state.lines];
-  return [...state.lines].sort((left, right) => compareStorageBins(left, right, importOrder));
+  return window.HLogistikStateHelpers.getPickingLines(state.lines, state.orderType, importOrder);
 }
 
+// eslint-disable-next-line no-unused-vars
 function compareStorageBins(left, right, importOrder) {
-  const leftLoadingSlip = left.lineType === "loading-slip";
-  const rightLoadingSlip = right.lineType === "loading-slip";
-  if (leftLoadingSlip && rightLoadingSlip) return 0;
-  if (leftLoadingSlip && !rightLoadingSlip) return 1;
-  if (!leftLoadingSlip && rightLoadingSlip) return -1;
-
-  const leftBin = String(left.fromBin || "").trim();
-  const rightBin = String(right.fromBin || "").trim();
-
-  if (!leftBin && rightBin) return 1;
-  if (leftBin && !rightBin) return -1;
-
-  const byBin = leftBin.localeCompare(rightBin, "de", {
-    numeric: true,
-    sensitivity: "base"
-  });
-  if (byBin !== 0) return byBin;
-
-  return (importOrder.get(left.id) ?? 0) - (importOrder.get(right.id) ?? 0);
+  return window.HLogistikStateHelpers.compareStorageBins(left, right, importOrder);
 }
 
 function syncFields() {
@@ -5941,8 +5923,7 @@ function exportCsv() {
 }
 
 function isQuantityChanged(line) {
-  if (line?.manual === true && !String(line?.targetQty || "").trim()) return false;
-  return String(line?.actualQty || "").trim() !== String(line?.targetQty || "").trim();
+  return window.HLogistikStateHelpers.isQuantityChanged(line);
 }
 
 async function exportPdf() {

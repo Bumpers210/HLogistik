@@ -1,6 +1,6 @@
 # HLogistik Rules Overview
 
-Stand: 2026-07-02 15:12:59 +02:00
+Stand: 2026-07-03 07:20:23 +02:00
 
 ## Regelorte
 
@@ -24,6 +24,7 @@ Weitere regelnahe Listen:
 - `order-hint-rules.js`: klassisches Browser-/Test-Helferskript fuer Bestellhinweis-Erkennung und Anhaengen an die importierte Auftragsnummer.
 - `app-import-line-helpers.js`: klassisches Browser-Helferskript fuer reine Import-/Zeilennormalisierung, Mengen-/Einheitenlesung und automatische Positionsnotizen.
 - `app-import-diagnostics.js`: klassisches Browser-Helferskript fuer Import-/OCR-Diagnoseausgaben, Kandidaten-Diagnoseformatierung und Positionsdiagnose ohne DOM-, OCR- oder State-Seiteneffekte.
+- `app-state-helpers.js`: klassisches Browser-Helferskript fuer kleine reine Line-/State-Helfer wie Positionssortierung und Mengenabweichung.
 - `shared/storage-hu-rules.js`: klassisches Browser-Regelskript fuer SSI-HU-Prefix, Suffixlaenge, Gesamtlange und HU-Helfer in Desktop und Tablet.
 - `shared/manual-storage-rules.js`: klassisches Browser-Regelskript fuer manuelle Einlagerungsanzahl und Positionspraefix `M` in Desktop und Tablet.
 
@@ -36,6 +37,7 @@ Weitere regelnahe Listen:
 - Browser-Duplikate fuer HU- und manuelle Einlagerungs-Konstanten sind in klassische `shared/*.js`-Skripte gebuendelt, damit `tablet-legacy.js` ohne ES-Module lauffaehig bleibt.
 - Reine Desktop-Import-Zeilenhelfer liegen in `app-import-line-helpers.js`; `app.js` behaelt Kompatibilitaets-Wrapper, damit bestehende Aufrufe und der QA-Harness stabil bleiben.
 - Reine Import-Diagnosehelfer liegen in `app-import-diagnostics.js`; fachliche Parser, OCR-Kandidatenauswahl und Import-State-Mutation bleiben bewusst in `app.js`.
+- Kleine reine Line-/State-Helfer liegen in `app-state-helpers.js`; `render()`, `updateCounts()`, Exportpfade und State-Mutation bleiben bewusst in `app.js`.
 - Browser-/Tablet-Storage-Keys bleiben bewusst in den jeweiligen Laufzeitdateien, weil sie Offline-Datenkompatibilitaet und bestehende LocalStorage-Namen sichern.
 - Tablet-Ausstiegsregeln fuer manuelle Einlagerung nutzen bestehende Felder (`manualStorageDraft`, `localDraft`, `acceptedBy`, `exportedAt`) und fuehren keine neuen Statuswerte ein.
 - Bestellhinweis-Erkennung bleibt klassisches JavaScript statt JSON, weil Labelsuche, Normalisierung, Kandidaten-Ablehnung und Doppelanhang-Logik Reihenfolge und Regex benoetigen.
@@ -64,6 +66,8 @@ Bei Aenderungen an der Bestellhinweis-Erkennung `order-hint-rules.js`, `index.ht
 Bei Aenderungen an reinen Import-Zeilenhelfern `app-import-line-helpers.js`, `app.js`, `index.html`, `service-worker.js`, `manifest.webmanifest`, `server/config/static-files.mjs` und den VM-Harness in `scripts/qa-api-matrix.mjs` gemeinsam pruefen.
 
 Bei Aenderungen an Import-Diagnosehelfern `app-import-diagnostics.js`, `app.js`, `index.html`, `service-worker.js`, `manifest.webmanifest`, `server/config/static-files.mjs` und den VM-Harness in `scripts/qa-api-matrix.mjs` gemeinsam pruefen.
+
+Bei Aenderungen an State-/Line-Helfern `app-state-helpers.js`, `app.js`, `index.html`, `service-worker.js`, `manifest.webmanifest`, `server/config/static-files.mjs` und den VM-Harness in `scripts/qa-api-matrix.mjs` gemeinsam pruefen.
 
 Bei Aenderungen an Originaldatei-Archivierung `server/original-archive.mjs`, `server/orders.mjs`, `server.mjs`, `app.js` und die Archiv-Fixtures in `scripts/qa-api-matrix.mjs` gemeinsam pruefen. Aktive Konfiguration:
 

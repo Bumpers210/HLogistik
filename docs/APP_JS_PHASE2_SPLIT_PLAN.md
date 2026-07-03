@@ -1,6 +1,6 @@
 # APP_JS Phase 2 Split Plan
 
-Stand: 2026-07-02 15:12:59 +02:00
+Stand: 2026-07-03 07:20:23 +02:00
 
 ## Kurzfazit
 
@@ -250,13 +250,52 @@ Abbruchkriterien:
 - Nach-Lagerplatz, Kunde, Bestellhinweis oder Ladeliste weichen ab.
 - Mengen werden durch den Extract neu angepasst oder anders korrigiert.
 
-### Schritt 2E: Spaeterer Extract
+### Schritt 2E: Kleiner State-/Line-Extract
 
-Extract der Einlagerungsparser und kleiner State-Helfer.
+Extract kleiner reiner Line-/State-Helfer nach `app-state-helpers.js`.
 
 Ziel:
 
-- Einlagerungs-Textparser von UI-/State-Code trennen und danach kleine reine State-Helfer isolieren.
+- UI-/State-Grenze vorbereiten, ohne `render()`, `updateCounts()`, Exportpfade, Parser oder Import-State-Mutation zu verschieben.
+
+Betroffene Funktionen:
+
+- `compareStorageBins`
+- `getPickingLines`
+- `isQuantityChanged`
+
+Neue Datei:
+
+- `app-state-helpers.js`
+
+Abhaengigkeiten:
+
+- Nur uebergebene Parameter.
+- Keine DOM-, Server-, Storage-, OCR-, Canvas-, Export- oder globale State-Mutation.
+
+Risiko:
+
+- Niedrig bis mittel. Die Funktionen sind klein, beeinflussen aber Positionssortierung und die Zaehler fuer korrigierte Mengen.
+
+Benoetigte Tests:
+
+- QA-Matrix inklusive Kommissionier-PDF-Import-Smokes.
+- Browser-Smoke Desktop fuer `/`.
+- Pruefung, dass Positionssortierung und erledigt/offen/korrigiert-Zaehler unveraendert bleiben.
+
+Abbruchkriterien:
+
+- Positionssortierung aendert sich.
+- Erledigt/offen/korrigiert-Zaehler aendern sich.
+- Importpositionen, Mengen, Nach-Lagerplatz oder Ladelisten aendern sich.
+
+### Schritt 2F: Spaeterer Extract
+
+Extract der Einlagerungsparser.
+
+Ziel:
+
+- Einlagerungs-Textparser von UI-/State-Code trennen.
 
 Betroffene Funktionen:
 
@@ -268,7 +307,6 @@ Betroffene Funktionen:
 - `storageLooksLikeBin`
 - `storageLooksLikeHu`
 - `storageLooksLikeQuantity`
-- `getPickingLines`
 - `pendingLineCount`
 - `completedLineCount`
 - `correctedLineCount`
@@ -277,12 +315,12 @@ Betroffene Funktionen:
 Neue Dateien:
 
 - `app-storage-parser.js`
-- spaeter optional `app-state-helpers.js`
 
 Abhaengigkeiten:
 
 - `shared/storage-hu-rules.js`
 - `shared/manual-storage-rules.js`
+- `app-state-helpers.js`
 - bestehende Server-/Browser-Regeln fuer HU nur lesend
 
 Risiko:
@@ -301,7 +339,7 @@ Abbruchkriterien:
 - HU/LE-Felder werden vor Freigabe nicht mehr bearbeitbar.
 - Manuelle Einlagerungspositionen oder Mengen unterscheiden sich.
 
-### Schritt 2F: Bewusst noch nicht anfassen
+### Schritt 2G: Bewusst noch nicht anfassen
 
 In dieser Phase nicht extrahieren:
 

@@ -1,6 +1,24 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-02 15:12:59 +02:00
+Stand: 2026-07-03 07:20:23 +02:00
+
+## 2026-07-03 - Wartbarkeit Phase 2D-1: State-/Line-Helfer ausgelagert
+
+Ausgangsproblem:
+
+Kleine reine Line-/State-Helfer lagen weiter direkt in `app.js`, obwohl sie keine DOM-, OCR-, Parser-, Export-, Tablet-, Offline- oder Serverlogik benoetigen.
+
+Umgesetzt:
+
+- Neues klassisches Browser-Skript `app-state-helpers.js` mit Namespace `window.HLogistikStateHelpers`.
+- `compareStorageBins`, `getPickingLines` und `isQuantityChanged` ausgelagert.
+- Die bisherigen Funktionsnamen bleiben in `app.js` als duenne Wrapper erhalten.
+- Neues Skript in `index.html`, `server/config/static-files.mjs`, `service-worker.js` und `scripts/qa-api-matrix.mjs` eingebunden.
+- Asset-Version `app.js?v=20260703-1`, neues Helper-Skript `app-state-helpers.js?v=20260703-1`, Service-Worker-/Manifest-Version `1.5.155`.
+
+Validierung:
+
+- Mechanische Wartbarkeitsaenderung ohne Parser-Extract, ohne `render()`-Auslagerung und ohne Aenderung an OCR-/Import-Hauptpipeline, Export-, Tablet-/Offline-, Datenbank- oder CR-002-Ablauf.
 
 ## 2026-07-02 - Wartbarkeit Phase 2C: Import-Diagnosehelfer ausgelagert
 

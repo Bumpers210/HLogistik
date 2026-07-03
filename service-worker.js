@@ -1,5 +1,5 @@
 // Bump CACHE_VERSION whenever static files change (keep in sync with "version" in manifest.webmanifest).
-const CACHE_VERSION = "1.5.154";
+const CACHE_VERSION = "1.5.155";
 const CACHE_NAME = `hlogistik-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -15,6 +15,7 @@ const APP_SHELL = [
   "/shared/manual-storage-rules.js",
   "/app-import-line-helpers.js",
   "/app-import-diagnostics.js",
+  "/app-state-helpers.js",
   "/app.js",
   "/tablet.js",
   "/tablet-legacy.js",
