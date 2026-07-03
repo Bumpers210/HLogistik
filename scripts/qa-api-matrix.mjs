@@ -439,7 +439,7 @@ async function run() {
     });
   }
 
-  for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/app-import-line-helpers.js", "/app-import-diagnostics.js", "/app-state-helpers.js", "/app-ui-helpers.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
+  for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/app-import-line-helpers.js", "/app-import-diagnostics.js", "/app-state-helpers.js", "/app-ui-helpers.js", "/app-picking-parser.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
     const response = await request(path);
     check(`static ${path}`, response.status === 200, `${response.status}`);
   }
@@ -1618,6 +1618,8 @@ async function createAppParserContext() {
   vm.runInContext(stateHelpersCode, context, { filename: "app-state-helpers.js" });
   const uiHelpersCode = await readFile(new URL("../app-ui-helpers.js", import.meta.url), "utf8");
   vm.runInContext(uiHelpersCode, context, { filename: "app-ui-helpers.js" });
+  const pickingParserCode = await readFile(new URL("../app-picking-parser.js", import.meta.url), "utf8");
+  vm.runInContext(pickingParserCode, context, { filename: "app-picking-parser.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
   vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });

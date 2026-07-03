@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260703-2";
+const CLIENT_ASSET_VERSION = "20260703-3";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 6;
 const OCR_PRECISE_RENDER_SCALE = 7.5;
@@ -2316,75 +2316,31 @@ function bestellscheinCustomerName(text, explicitCustomerName = "") {
   return explicit || "Bestellschein";
 }
 
-function appendLoadingSlipLines(lines, loadingSlipLines) {
-  if (!Array.isArray(lines)) return lines;
-  const additions = (Array.isArray(loadingSlipLines) ? loadingSlipLines : [])
-    .filter((line) => line?.lineType === "loading-slip" && String(line.barcode || "").trim());
-  if (!additions.length) return lines;
+function loadingSlipParserDependencies() {
+  return {
+    collectBestellscheinRows,
+    isBestellscheinRowStart,
+    createLine,
+    setAutoPositionNote,
+    normalizeUnit,
+    normalizeQuantity
+  };
+}
 
-  const result = [...lines];
-  additions.forEach((loadingSlipLine) => {
-    const barcode = String(loadingSlipLine.barcode || "").trim();
-    const exists = result.some((line) => line.lineType === "loading-slip" && String(line.barcode || "").trim() === barcode);
-    if (!exists) result.push(loadingSlipLine);
-  });
-  return result;
+function appendLoadingSlipLines(lines, loadingSlipLines) {
+  return window.HLogistikPickingParser.appendLoadingSlipLines(lines, loadingSlipLines);
 }
 
 function countLoadingSlipLines(lines) {
-  return (Array.isArray(lines) ? lines : [])
-    .filter((line) => line?.lineType === "loading-slip" && String(line.barcode || "").trim())
-    .length;
+  return window.HLogistikPickingParser.countLoadingSlipLines(lines);
 }
 
 function appendLoadingSlipLinesToParsed(parsed, loadingSlipLines) {
-  if (!parsed || !Array.isArray(parsed.lines)) return parsed;
-  const lines = appendLoadingSlipLines(parsed.lines, loadingSlipLines);
-  return lines === parsed.lines ? parsed : { ...parsed, lines };
+  return window.HLogistikPickingParser.appendLoadingSlipLinesToParsed(parsed, loadingSlipLines);
 }
 
 function collectLoadingSlipLinesFromOcrCandidates(candidates) {
-  const seen = new Set();
-  const lines = [];
-  const diagnostics = [];
-
-  (Array.isArray(candidates) ? candidates : []).forEach((candidate) => {
-    const sourceLines = String(candidate?.text || "")
-      .replace(/\r/g, "\n")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const parsedLines = parseLoadingSlipLines(sourceLines);
-    const added = [];
-
-    parsedLines.forEach((line) => {
-      const barcode = String(line?.barcode || "").trim();
-      if (!barcode || seen.has(barcode)) return;
-      seen.add(barcode);
-      lines.push(line);
-      added.push(barcode);
-    });
-
-    const audit = auditLoadingSlipImport(sourceLines, parsedLines);
-    if (audit.expected || parsedLines.length) {
-      diagnostics.push({
-        label: candidate?.label || "",
-        scale: candidate?.scale || "",
-        dpi: candidate?.dpi || "",
-        rotation: Number(candidate?.rotation || 0),
-        score: Number(candidate?.score || 0),
-        expected: audit.expected,
-        parsed: parsedLines.length,
-        added
-      });
-    }
-  });
-
-  return {
-    lines,
-    diagnostics,
-    expected: diagnostics.reduce((maximum, entry) => Math.max(maximum, Number(entry.expected || 0)), 0)
-  };
+  return window.HLogistikPickingParser.collectLoadingSlipLinesFromOcrCandidates(candidates, loadingSlipParserDependencies());
 }
 
 function mergeServerLoadingSlipLines(order, serverOrder) {
@@ -2417,260 +2373,83 @@ function mergeServerLoadingSlipLines(order, serverOrder) {
 }
 
 function parseLoadingSlipLines(lines) {
-  const blocks = loadingSlipBlocksFrom(lines);
-  const seen = new Set();
-
-  return blocks
-    .map(parseLoadingSlipBlock)
-    .filter(Boolean)
-    .filter((line) => {
-      const barcode = String(line.barcode || "").trim();
-      if (!barcode || seen.has(barcode)) return false;
-      seen.add(barcode);
-      return true;
-    });
+  return window.HLogistikPickingParser.parseLoadingSlipLines(lines, loadingSlipParserDependencies());
 }
 
 function auditLoadingSlipImport(lines, parsedLines = []) {
-  const blocks = loadingSlipBlocksFrom(lines);
-  if (!blocks.length) {
-    return {
-      expected: 0,
-      attached: countLoadingSlipLines(parsedLines),
-      issues: []
-    };
-  }
-
-  const parsedBlocks = blocks.map((block, index) => {
-    const line = parseLoadingSlipBlock(block);
-    return {
-      index: index + 1,
-      barcode: String(line?.barcode || extractLoadingSlipHeaderBarcode(block) || "").trim(),
-      parsed: Boolean(line)
-    };
-  });
-
-  const attached = countLoadingSlipLines(parsedLines);
-  const issues = [];
-  const missing = parsedBlocks.filter((entry) => !entry.parsed || !entry.barcode);
-  const duplicates = duplicateLoadingSlipBarcodes(parsedBlocks);
-
-  if (missing.length) {
-    issues.push(`${missing.length} Ladeliste(n) erkannt, aber Barcode/Position konnte nicht eindeutig gelesen werden (${formatLoadingSlipIndexes(missing)}).`);
-  }
-
-  if (duplicates.length) {
-    issues.push(`Ladelisten-Barcode mehrfach erkannt: ${duplicates.slice(0, 3).join(", ")}.`);
-  }
-
-  if (attached !== blocks.length) {
-    issues.push(`${blocks.length} Ladeliste(n) erkannt, aber ${attached} Barcode-Position(en) erzeugt.`);
-  }
-
-  return {
-    expected: blocks.length,
-    attached,
-    issues
-  };
+  return window.HLogistikPickingParser.auditLoadingSlipImport(lines, parsedLines, loadingSlipParserDependencies());
 }
 
+// eslint-disable-next-line no-unused-vars
 function duplicateLoadingSlipBarcodes(entries) {
-  const counts = new Map();
-  entries.forEach((entry) => {
-    const barcode = String(entry.barcode || "").trim();
-    if (!barcode) return;
-    counts.set(barcode, (counts.get(barcode) || 0) + 1);
-  });
-  return [...counts.entries()]
-    .filter(([, count]) => count > 1)
-    .map(([barcode]) => barcode);
+  return window.HLogistikPickingParser.duplicateLoadingSlipBarcodes(entries);
 }
 
+// eslint-disable-next-line no-unused-vars
 function formatLoadingSlipIndexes(entries) {
-  return entries
-    .slice(0, 5)
-    .map((entry) => `Ladeliste ${entry.index}`)
-    .join(", ");
+  return window.HLogistikPickingParser.formatLoadingSlipIndexes(entries);
 }
 
+// eslint-disable-next-line no-unused-vars
 function parseLoadingSlipBlock(lines) {
-  if (!isLikelyLoadingSlip(lines)) return null;
-
-  const rows = collectBestellscheinRows(lines);
-  const row = rows[0] || parseStackedLoadingSlipRow(lines) || parseCompactLoadingSlipRow(lines);
-  if (!row) return null;
-
-  const barcode = extractLoadingSlipHeaderBarcode(lines) || row.fromHandlingUnit || "";
-  if (!barcode) return null;
-
-  return createLine({
-    lineType: "loading-slip",
-    warehouseOrder: "Ladeschein",
-    barcode,
-    product: row.product || "",
-    description: row.description || "Ladeschein",
-    targetQty: row.targetQty || "",
-    actualQty: row.targetQty || "",
-    unit: row.unit || "",
-    autoPositionNotes: setAutoPositionNote({}, "loadingSlip", rows.length > 1 ? `Ladeschein mit ${rows.length} Positionen` : ""),
-    fromHandlingUnit: "",
-    fromHandlingUnitEditable: false,
-    fromBin: "",
-    toBin: ""
-  });
+  return window.HLogistikPickingParser.parseLoadingSlipBlock(lines, loadingSlipParserDependencies());
 }
 
+// eslint-disable-next-line no-unused-vars
 function loadingSlipBlocksFrom(lines) {
-  const sourceLines = Array.isArray(lines) ? lines : [];
-  const blocks = [];
-  let current = null;
-  let currentHasRows = false;
-  let currentHasHeaderBarcode = false;
-
-  sourceLines.forEach((line) => {
-    const isStart = isLoadingSlipStartLine(line);
-    const isHeaderBarcode = isLoadingSlipHeaderBarcodeLine(line);
-    const isRow = isBestellscheinRowStart(line) || /^\d{6,8}\b/.test(String(line || "").trim());
-    const startsHeaderOnlySlip = !current && isHeaderBarcode;
-    const startsNestedSlip = current && isHeaderBarcode && (currentHasRows || currentHasHeaderBarcode);
-
-    if (isStart || startsHeaderOnlySlip || startsNestedSlip) {
-      if (current?.length) blocks.push(current);
-      current = [line];
-      currentHasRows = isRow;
-      currentHasHeaderBarcode = isHeaderBarcode;
-      return;
-    }
-
-    if (!current) return;
-    current.push(line);
-    if (isRow) currentHasRows = true;
-    if (isHeaderBarcode) currentHasHeaderBarcode = true;
-  });
-
-  if (current?.length) blocks.push(current);
-  return blocks;
+  return window.HLogistikPickingParser.loadingSlipBlocksFrom(lines, loadingSlipParserDependencies());
 }
 
 function isLoadingSlipStartLine(line) {
-  return /lad[ce](?:schein|liste)|lade(?:schein|liste)/i.test(String(line || ""));
+  return window.HLogistikPickingParser.isLoadingSlipStartLine(line);
 }
 
 function isLoadingSlipHeaderBarcodeLine(line) {
-  return /\b(?:Nummer|Numm(?:e|c)r|Nr\.?)\s*[:.-]?\s*[A-Z]\s*\d[\d\s./-]{5,}\d\b/i.test(String(line || ""));
+  return window.HLogistikPickingParser.isLoadingSlipHeaderBarcodeLine(line);
 }
 
 function linesBeforeLoadingSlip(lines) {
-  const sourceLines = Array.isArray(lines) ? lines : [];
-  const startIndex = sourceLines.findIndex(isLoadingSlipStartLine);
-  return startIndex === -1 ? sourceLines : sourceLines.slice(0, startIndex);
+  return window.HLogistikPickingParser.linesBeforeLoadingSlip(lines);
 }
 
+// eslint-disable-next-line no-unused-vars
 function isLikelyLoadingSlip(lines) {
-  const sourceLines = Array.isArray(lines) ? lines : String(lines || "").replace(/\r/g, "\n").split("\n");
-  const source = sourceLines.join("\n");
-  const hasLoadingSlipMarker = /lad[ce](?:schein|liste)|lade(?:schein|liste)|bestellschein|entnahmeanweisungen/i.test(source);
-  const hasHeaderBarcode = sourceLines.some(isLoadingSlipHeaderBarcodeLine);
-  return (hasLoadingSlipMarker || hasHeaderBarcode) && (
-    collectBestellscheinRows(lines).length > 0 || Boolean(parseStackedLoadingSlipRow(lines)) || Boolean(parseCompactLoadingSlipRow(lines))
-  );
+  return window.HLogistikPickingParser.isLikelyLoadingSlip(lines, loadingSlipParserDependencies());
 }
 
+// eslint-disable-next-line no-unused-vars
 function parseStackedLoadingSlipRow(lines) {
-  const normalized = normalizeLoadingSlipText(Array.isArray(lines) ? lines.join(" ") : String(lines || ""));
-  if (!/lad[ce](?:schein|liste)|lade(?:schein|liste)/i.test(normalized)) return null;
-
-  const rowMatch = normalized.match(/\b(\d{6,8})\b\s+(.+?)\s+(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:[,.]\d+)?)\s*(St(?:ü|ue|u|ii|i)ck|STK?|PC|PCS|KG|G|KAR|PCK|PAK|VE|PAL)\b/i);
-  if (!rowMatch) return null;
-
-  const description = cleanLoadingSlipDescription(rowMatch[2]);
-  const targetQty = normalizeLoadingSlipQuantity(rowMatch[3]);
-  if (!description || !targetQty) return null;
-
-  return {
-    fromHandlingUnit: extractLoadingSlipHeaderBarcode(lines),
-    fromBin: "",
-    product: rowMatch[1],
-    description,
-    targetQty,
-    unit: normalizeUnit(rowMatch[4]),
-    toBin: ""
-  };
+  return window.HLogistikPickingParser.parseStackedLoadingSlipRow(lines, loadingSlipParserDependencies());
 }
 
+// eslint-disable-next-line no-unused-vars
 function parseCompactLoadingSlipRow(lines) {
-  const sourceLines = Array.isArray(lines) ? lines : String(lines || "").replace(/\r/g, "\n").split("\n");
-  for (const line of sourceLines) {
-    const normalized = normalizeLoadingSlipText(line);
-    const rowMatch = normalized.match(/^(\d{6,8})\b\s+(.+?)\s+(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:[,.]\d+)?)\s*(St(?:Ã¼|ue|u|ii|i)ck|STK?|PC|PCS|KG|G|KAR|PCK|PAK|VE|PAL)\b/i);
-    if (!rowMatch) continue;
-
-    const description = cleanLoadingSlipDescription(rowMatch[2]);
-    const targetQty = normalizeLoadingSlipQuantity(rowMatch[3]);
-    if (!description || !targetQty) continue;
-
-    return {
-      fromHandlingUnit: "",
-      fromBin: "",
-      product: rowMatch[1],
-      description,
-      targetQty,
-      unit: normalizeUnit(rowMatch[4]),
-      toBin: ""
-    };
-  }
-
-  return null;
+  return window.HLogistikPickingParser.parseCompactLoadingSlipRow(lines, loadingSlipParserDependencies());
 }
 
+// eslint-disable-next-line no-unused-vars
 function normalizeLoadingSlipText(value) {
-  return String(value || "")
-    .replace(/[|[\]{}]/g, " ")
-    .replace(/\bArtikeI\b/g, "Artikel")
-    .replace(/\bBezeichnunq\b/g, "Bezeichnung")
-    .replace(/\s+/g, " ")
-    .trim();
+  return window.HLogistikPickingParser.normalizeLoadingSlipText(value);
 }
 
+// eslint-disable-next-line no-unused-vars
 function cleanLoadingSlipDescription(value) {
-  return String(value || "")
-    .replace(/\b(?:Menge|Verpackung|Artikel|Bezeichnung)\b/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return window.HLogistikPickingParser.cleanLoadingSlipDescription(value);
 }
 
+// eslint-disable-next-line no-unused-vars
 function normalizeLoadingSlipQuantity(value) {
-  const raw = String(value || "").trim();
-  const withoutDecimalZeros = raw.replace(/,\s*0+$/, "");
-  if (/^\d{1,3}(?:[.\s]\d{3})+$/.test(withoutDecimalZeros)) {
-    return withoutDecimalZeros.replace(/\s+/g, ".");
-  }
-  return normalizeQuantity(raw);
+  return window.HLogistikPickingParser.normalizeLoadingSlipQuantity(value, loadingSlipParserDependencies());
 }
 
+// eslint-disable-next-line no-unused-vars
 function extractLoadingSlipHeaderBarcode(lines) {
-  const sourceLines = Array.isArray(lines) ? lines : [];
-  const firstRowIndex = sourceLines.findIndex((line) => /^\d{6,8}\b/.test(String(line || "").trim()));
-  const headerText = (firstRowIndex === -1 ? sourceLines.slice(0, 20) : sourceLines.slice(0, firstRowIndex)).join(" ");
-  const sourceText = headerText || sourceLines.slice(0, 20).join(" ");
-  const numberMatch = sourceText.match(/\b(?:Nummer|Numm(?:e|c)r|Nr\.?)\s*[:.-]?\s*([A-Z]\s*\d[\d\s./-]{5,}\d)\b/i);
-  if (numberMatch) return cleanLoadingSlipBarcode(numberMatch[1]);
-
-  const candidates = [...sourceText.matchAll(/\b[A-Z]\s*\d[\d\s./-]{5,}\d\b|\b[A-Z0-9]{8,24}\b/g)]
-    .map((match) => match[0])
-    .map(cleanLoadingSlipBarcode)
-    .filter((value) => /\d/.test(value))
-    .filter((value) => !/^\d{6,8}$/.test(value))
-    .filter((value) => !/^(?:20\d{6}|19\d{6})$/.test(value));
-  return candidates.find((value) => value.length >= 12) || candidates[0] || "";
+  return window.HLogistikPickingParser.extractLoadingSlipHeaderBarcode(lines);
 }
 
+// eslint-disable-next-line no-unused-vars
 function cleanLoadingSlipBarcode(value) {
-  return String(value || "")
-    .replace(/\s+/g, "")
-    .replace(/[|]/g, "/")
-    .replace(/[^A-Z0-9/.-]/gi, "")
-    .toUpperCase();
+  return window.HLogistikPickingParser.cleanLoadingSlipBarcode(value);
 }
 
 function isWarehouseLikeText(text) {

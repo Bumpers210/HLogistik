@@ -6,6 +6,7 @@ export const PUBLIC_STATIC_FILES = new Set([
   "/app.js",
   "/app-import-diagnostics.js",
   "/app-import-line-helpers.js",
+  "/app-picking-parser.js",
   "/app-state-helpers.js",
   "/app-ui-helpers.js",
   "/order-hint-rules.js",
