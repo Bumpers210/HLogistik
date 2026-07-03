@@ -338,6 +338,154 @@
     return normalizeQuantity(raw, dependencies);
   }
 
+  function parseBestellscheinRowStrict(chunk, dependencies) {
+    var fullText = normalizeBestellscheinText(chunk);
+    var headerText = bestellscheinHeaderText(fullText);
+    var rowMatch = headerText.match(/^(\d{6,8})\s+(.+?)\s+(\d{1,4}(?:[,.]\d{3})*|\d+(?:[,.]\d+)?)\s*(ST|Stk|Stueck|StÃ¼ck|PC|PCS)\b/i);
+    if (!rowMatch) return null;
+
+    var product = rowMatch[1];
+    var description = cleanBestellscheinDescription(rowMatch[2]);
+    var targetQty = normalizeQuantity(rowMatch[3], dependencies);
+    var unit = normalizeUnit(rowMatch[4], dependencies);
+    var fromBin = extractBestellscheinBin(fullText);
+    var fromHandlingUnit = extractBestellscheinFirstBarcode(fullText, product, dependencies);
+
+    if (!description || !targetQty) return null;
+
+    return {
+      fromHandlingUnit: fromHandlingUnit,
+      fromBin: fromBin,
+      product: product,
+      description: description,
+      targetQty: targetQty,
+      unit: unit,
+      toBin: ""
+    };
+  }
+
+  function parseBestellscheinRow(chunk, dependencies) {
+    var fullText = normalizeBestellscheinText(chunk);
+    var normalized = bestellscheinHeaderText(fullText);
+    var rowMatch = normalized.match(/^(\d{7})\s+(.+?)\s+(\d{1,4}(?:[,.]\d{3})*|\d+(?:[,.]\d+)?)\s*(ST|Stk|Stueck|StÃ¼ck|PC|PCS)\b/i);
+    if (!rowMatch) return null;
+
+    var product = rowMatch[1];
+    var description = cleanBestellscheinDescription(rowMatch[2]);
+    var targetQty = normalizeQuantity(rowMatch[3], dependencies);
+    var unit = normalizeUnit(rowMatch[4], dependencies);
+    var fromBin = extractBestellscheinBin(fullText);
+    var fromHandlingUnit = extractBestellscheinFirstBarcode(fullText, product, dependencies);
+
+    if (!description || !targetQty) return null;
+
+    return {
+      fromHandlingUnit: fromHandlingUnit,
+      fromBin: fromBin,
+      product: product,
+      description: description,
+      targetQty: targetQty,
+      unit: unit,
+      toBin: ""
+    };
+  }
+
+  function parseBestellscheinRowFallback(chunk, looseQuantity, dependencies) {
+    var normalized = normalizeBestellscheinText(chunk);
+    var headerText = bestellscheinHeaderText(normalized);
+    var headerMatch = headerText.match(/^(\d{6,8})\s+(.+?)$/i);
+    if (!headerMatch) return null;
+
+    var product = headerMatch[1];
+    var quantityFromDescription = splitTrailingBestellscheinQuantity(headerMatch[2]);
+    var targetQty = quantityFromDescription.quantity || (looseQuantity && looseQuantity.quantity) || "";
+    var description = cleanBestellscheinDescription(quantityFromDescription.description || headerMatch[2]);
+    if (!description || !targetQty) return null;
+
+    return {
+      fromHandlingUnit: extractBestellscheinFirstBarcode(normalized, product, dependencies),
+      fromBin: extractBestellscheinBin(normalized),
+      product: product,
+      description: description,
+      targetQty: normalizeQuantity(targetQty, dependencies),
+      unit: normalizeUnit(quantityFromDescription.unit || (looseQuantity && looseQuantity.unit) || "ST", dependencies),
+      toBin: ""
+    };
+  }
+
+  function bestellscheinHeaderText(value) {
+    return String(value || "")
+      .split(/\bLagerp?l?atz\s*[:.]?/i)[0]
+      .trim();
+  }
+
+  function splitTrailingBestellscheinQuantity(value) {
+    var source = String(value || "").trim();
+    var match = source.match(/^(.+?\D)\s+(\d{1,4}(?:[,.]\d+)?)$/);
+    if (!match) return { description: source, quantity: "", unit: "" };
+
+    return {
+      description: match[1].trim(),
+      quantity: match[2],
+      unit: "ST"
+    };
+  }
+
+  function normalizeBestellscheinText(value) {
+    return String(value || "")
+      .replace(/[|[\]{}]/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/\b(\d+)8T\b/gi, "$1 ST")
+      .replace(/\b5T\b/gi, "ST")
+      .replace(/\bS7\b/gi, "ST")
+      .trim();
+  }
+
+  function cleanBestellscheinDescription(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .replace(/\bLagerp?l?atz\b.*$/i, "")
+      .trim();
+  }
+
+  function extractBestellscheinBin() {
+    return "";
+  }
+
+  function extractBestellscheinFirstBarcode(value, product, dependencies) {
+    var afterBin = String(value || "").match(/Lagerp?l?atz\s*[:.]?\s*\d{2,4}\s*\/\s*\d{7}\D+(.+)$/i);
+    var source = String(value || "");
+    var productIndex = source.indexOf(String(product || ""));
+    var searchText = afterBin ? afterBin[1] : source.slice(productIndex === -1 ? 0 : productIndex + String(product || "").length);
+
+    var candidates = Array.from(searchText.matchAll(/\b\d{8,12}\b/g))
+      .map(function (match) {
+        return { value: match[0], index: match.index || 0 };
+      })
+      .filter(function (candidate) {
+        return candidate.value !== product;
+      })
+      .filter(function (candidate) {
+        return !isBestellscheinOrderColumnNumber(searchText, candidate);
+      });
+
+    var likely = candidates.find(function (candidate) {
+      return isLikelyHandlingUnit(candidate.value, dependencies);
+    });
+    return (likely && likely.value) || (candidates[0] && candidates[0].value) || "";
+  }
+
+  function isBestellscheinOrderColumnNumber(text, candidate) {
+    var afterNumber = String(text || "").slice(candidate.index + candidate.value.length, candidate.index + candidate.value.length + 8);
+    return /^\s+[A-Z]{2}\b/.test(afterNumber);
+  }
+
+  function isLikelyHandlingUnit(value, dependencies) {
+    return dependency(dependencies, "isLikelyHandlingUnit", function (source) {
+      return /^3\d{7,11}$/.test(String(source || ""));
+    })(value);
+  }
+
   function normalizeUnit(unit, dependencies) {
     return dependency(dependencies, "normalizeUnit", function (value) { return value; })(unit);
   }
@@ -403,6 +551,16 @@
     normalizeLoadingSlipText: normalizeLoadingSlipText,
     cleanLoadingSlipDescription: cleanLoadingSlipDescription,
     normalizeLoadingSlipQuantity: normalizeLoadingSlipQuantity,
+    parseBestellscheinRowStrict: parseBestellscheinRowStrict,
+    parseBestellscheinRow: parseBestellscheinRow,
+    parseBestellscheinRowFallback: parseBestellscheinRowFallback,
+    bestellscheinHeaderText: bestellscheinHeaderText,
+    splitTrailingBestellscheinQuantity: splitTrailingBestellscheinQuantity,
+    normalizeBestellscheinText: normalizeBestellscheinText,
+    cleanBestellscheinDescription: cleanBestellscheinDescription,
+    extractBestellscheinBin: extractBestellscheinBin,
+    extractBestellscheinFirstBarcode: extractBestellscheinFirstBarcode,
+    isBestellscheinOrderColumnNumber: isBestellscheinOrderColumnNumber,
     extractLoadingSlipHeaderBarcode: extractLoadingSlipHeaderBarcode,
     cleanLoadingSlipBarcode: cleanLoadingSlipBarcode
   };

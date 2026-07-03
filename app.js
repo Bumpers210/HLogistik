@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260703-3";
+const CLIENT_ASSET_VERSION = "20260703-4";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 6;
 const OCR_PRECISE_RENDER_SCALE = 7.5;
@@ -2609,97 +2609,38 @@ function isBestellscheinRowStart(line) {
   return /[A-Za-zÃ„Ã–ÃœÃ¤Ã¶Ã¼]/.test(rest) || /\b\d{1,4}(?:[,.]\d+)?\s*(?:ST|Stk|Stueck|StÃ¼ck|PC|PCS)\b/i.test(rest);
 }
 
-function parseBestellscheinRowStrict(chunk) {
-  const fullText = normalizeBestellscheinText(chunk);
-  const headerText = bestellscheinHeaderText(fullText);
-  const rowMatch = headerText.match(/^(\d{6,8})\s+(.+?)\s+(\d{1,4}(?:[,.]\d{3})*|\d+(?:[,.]\d+)?)\s*(ST|Stk|Stueck|StÃ¼ck|PC|PCS)\b/i);
-  if (!rowMatch) return null;
-
-  const product = rowMatch[1];
-  const description = cleanBestellscheinDescription(rowMatch[2]);
-  const targetQty = normalizeQuantity(rowMatch[3]);
-  const unit = normalizeUnit(rowMatch[4]);
-  const fromBin = extractBestellscheinBin(fullText);
-  const fromHandlingUnit = extractBestellscheinFirstBarcode(fullText, product);
-
-  if (!description || !targetQty) return null;
-
+function bestellscheinRowParserDependencies() {
   return {
-    fromHandlingUnit,
-    fromBin,
-    product,
-    description,
-    targetQty,
-    unit,
-    toBin: ""
+    normalizeQuantity,
+    normalizeUnit,
+    isLikelyHandlingUnit,
+    bestellscheinHeaderText,
+    splitTrailingBestellscheinQuantity,
+    cleanBestellscheinDescription,
+    extractBestellscheinBin,
+    extractBestellscheinFirstBarcode,
+    isBestellscheinOrderColumnNumber
   };
+}
+
+function parseBestellscheinRowStrict(chunk) {
+  return window.HLogistikPickingParser.parseBestellscheinRowStrict(chunk, bestellscheinRowParserDependencies());
 }
 
 function parseBestellscheinRow(chunk) {
-  const fullText = normalizeBestellscheinText(chunk);
-  const normalized = bestellscheinHeaderText(fullText);
-  const rowMatch = normalized.match(/^(\d{7})\s+(.+?)\s+(\d{1,4}(?:[,.]\d{3})*|\d+(?:[,.]\d+)?)\s*(ST|Stk|Stueck|Stück|PC|PCS)\b/i);
-  if (!rowMatch) return null;
-
-  const product = rowMatch[1];
-  const description = cleanBestellscheinDescription(rowMatch[2]);
-  const targetQty = normalizeQuantity(rowMatch[3]);
-  const unit = normalizeUnit(rowMatch[4]);
-  const fromBin = extractBestellscheinBin(fullText);
-  const fromHandlingUnit = extractBestellscheinFirstBarcode(fullText, product);
-
-  if (!description || !targetQty) return null;
-
-  return {
-    fromHandlingUnit,
-    fromBin,
-    product,
-    description,
-    targetQty,
-    unit,
-    toBin: ""
-  };
+  return window.HLogistikPickingParser.parseBestellscheinRow(chunk, bestellscheinRowParserDependencies());
 }
 
 function parseBestellscheinRowFallback(chunk, looseQuantity = null) {
-  const normalized = normalizeBestellscheinText(chunk);
-  const headerText = bestellscheinHeaderText(normalized);
-  const headerMatch = headerText.match(/^(\d{6,8})\s+(.+?)$/i);
-  if (!headerMatch) return null;
-
-  const product = headerMatch[1];
-  const quantityFromDescription = splitTrailingBestellscheinQuantity(headerMatch[2]);
-  const targetQty = quantityFromDescription.quantity || looseQuantity?.quantity || "";
-  const description = cleanBestellscheinDescription(quantityFromDescription.description || headerMatch[2]);
-  if (!description || !targetQty) return null;
-
-  return {
-    fromHandlingUnit: extractBestellscheinFirstBarcode(normalized, product),
-    fromBin: extractBestellscheinBin(normalized),
-    product,
-    description,
-    targetQty: normalizeQuantity(targetQty),
-    unit: normalizeUnit(quantityFromDescription.unit || looseQuantity?.unit || "ST"),
-    toBin: ""
-  };
+  return window.HLogistikPickingParser.parseBestellscheinRowFallback(chunk, looseQuantity, bestellscheinRowParserDependencies());
 }
 
 function bestellscheinHeaderText(value) {
-  return String(value || "")
-    .split(/\bLagerp?l?atz\s*[:.]?/i)[0]
-    .trim();
+  return window.HLogistikPickingParser.bestellscheinHeaderText(value);
 }
 
 function splitTrailingBestellscheinQuantity(value) {
-  const source = String(value || "").trim();
-  const match = source.match(/^(.+?\D)\s+(\d{1,4}(?:[,.]\d+)?)$/);
-  if (!match) return { description: source, quantity: "", unit: "" };
-
-  return {
-    description: match[1].trim(),
-    quantity: match[2],
-    unit: "ST"
-  };
+  return window.HLogistikPickingParser.splitTrailingBestellscheinQuantity(value);
 }
 
 function extractLooseBestellscheinQuantities(chunks) {
@@ -2712,43 +2653,23 @@ function extractLooseBestellscheinQuantities(chunks) {
 }
 
 function normalizeBestellscheinText(value) {
-  return String(value || "")
-    .replace(/[|[\]{}]/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/\b(\d+)8T\b/gi, "$1 ST")
-    .replace(/\b5T\b/gi, "ST")
-    .replace(/\bS7\b/gi, "ST")
-    .trim();
+  return window.HLogistikPickingParser.normalizeBestellscheinText(value);
 }
 
 function cleanBestellscheinDescription(value) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .replace(/\bLagerp?l?atz\b.*$/i, "")
-    .trim();
+  return window.HLogistikPickingParser.cleanBestellscheinDescription(value);
 }
 
 function extractBestellscheinBin() {
-  return "";
+  return window.HLogistikPickingParser.extractBestellscheinBin();
 }
 
 function extractBestellscheinFirstBarcode(value, product) {
-  const afterBin = String(value || "").match(/Lagerp?l?atz\s*[:.]?\s*\d{2,4}\s*\/\s*\d{7}\D+(.+)$/i);
-  const source = String(value || "");
-  const productIndex = source.indexOf(String(product || ""));
-  const searchText = afterBin ? afterBin[1] : source.slice(productIndex === -1 ? 0 : productIndex + String(product || "").length);
-
-  const candidates = [...searchText.matchAll(/\b\d{8,12}\b/g)]
-    .map((match) => ({ value: match[0], index: match.index || 0 }))
-    .filter((candidate) => candidate.value !== product)
-    .filter((candidate) => !isBestellscheinOrderColumnNumber(searchText, candidate));
-
-  return candidates.find((candidate) => isLikelyHandlingUnit(candidate.value))?.value || candidates[0]?.value || "";
+  return window.HLogistikPickingParser.extractBestellscheinFirstBarcode(value, product, bestellscheinRowParserDependencies());
 }
 
 function isBestellscheinOrderColumnNumber(text, candidate) {
-  const afterNumber = String(text || "").slice(candidate.index + candidate.value.length, candidate.index + candidate.value.length + 8);
-  return /^\s+[A-Z]{2}\b/.test(afterNumber);
+  return window.HLogistikPickingParser.isBestellscheinOrderColumnNumber(text, candidate);
 }
 
 function isLikelyHandlingUnit(value) {
