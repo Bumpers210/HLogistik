@@ -1,6 +1,24 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-03 07:20:23 +02:00
+Stand: 2026-07-03 07:42:22 +02:00
+
+## 2026-07-03 - Wartbarkeit Phase 2D-2: UI-/SVG-Helfer ausgelagert
+
+Ausgangsproblem:
+
+Kleine reine UI-String-/SVG-Helfer fuer die Ladelisten-/Barcode-Darstellung lagen weiter direkt in `app.js`, obwohl sie keine DOM-, Parser-, OCR-, Export-, Tablet-, Offline- oder Serverlogik benoetigen.
+
+Umgesetzt:
+
+- Neues klassisches Browser-Skript `app-ui-helpers.js` mit Namespace `window.HLogistikUiHelpers`.
+- `escapeSvgText`, `escapeHtmlAttribute` und `code128Svg` ausgelagert.
+- Die bisherigen Funktionsnamen bleiben in `app.js` als duenne Wrapper erhalten.
+- Neues Skript in `index.html`, `server/config/static-files.mjs`, `service-worker.js` und `scripts/qa-api-matrix.mjs` eingebunden.
+- Asset-Version `app.js?v=20260703-2`, neues Helper-Skript `app-ui-helpers.js?v=20260703-2`, Service-Worker-/Manifest-Version `1.5.156`.
+
+Validierung:
+
+- Mechanische Wartbarkeitsaenderung ohne Parser-Extract, ohne `render()`- oder `renderLoadingSlipLine()`-Auslagerung und ohne Aenderung an OCR-/Import-Hauptpipeline, Export-, Tablet-/Offline-, Datenbank- oder CR-002-Ablauf.
 
 ## 2026-07-03 - Wartbarkeit Phase 2D-1: State-/Line-Helfer ausgelagert
 

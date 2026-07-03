@@ -1,6 +1,6 @@
 # APP_JS Phase 2 Split Plan
 
-Stand: 2026-07-03 07:20:23 +02:00
+Stand: 2026-07-03 07:42:22 +02:00
 
 ## Kurzfazit
 
@@ -80,7 +80,7 @@ Begruendung:
   - Kleine reine State-Helfer ohne Serverzugriff, z. B. Zaehler, Payload-Vorbereitung, Feldnormalisierung.
   - Namespace: `window.HLogistikStateHelpers`.
 - `app-ui-helpers.js`
-  - Kleine UI-Formatierungs- und DOM-Helfer, aber nicht `render` selbst.
+  - Kleine reine UI-String-/SVG-Helfer, aber keine DOM-Renderer und nicht `render` selbst.
   - Namespace: `window.HLogistikUiHelpers`.
 
 ### Noetige Einbindungen bei spaeterer Umsetzung
@@ -289,7 +289,46 @@ Abbruchkriterien:
 - Erledigt/offen/korrigiert-Zaehler aendern sich.
 - Importpositionen, Mengen, Nach-Lagerplatz oder Ladelisten aendern sich.
 
-### Schritt 2F: Spaeterer Extract
+### Schritt 2F: Kleiner UI-/SVG-Extract
+
+Extract kleiner reiner UI-String-/SVG-Helfer nach `app-ui-helpers.js`.
+
+Ziel:
+
+- UI-Grenze vorbereiten, ohne `render()`, `renderLoadingSlipLine()`, DOM-Erzeugung, Parser oder Import-State-Mutation zu verschieben.
+
+Betroffene Funktionen:
+
+- `escapeSvgText`
+- `escapeHtmlAttribute`
+- `code128Svg`
+
+Neue Datei:
+
+- `app-ui-helpers.js`
+
+Abhaengigkeiten:
+
+- Nur uebergebene Parameter.
+- Keine DOM-, Server-, Storage-, OCR-, Canvas-, Export- oder globale State-Mutation.
+
+Risiko:
+
+- Niedrig bis mittel. Die Funktionen sind klein, beeinflussen aber die Ladelisten-/Barcode-Darstellung.
+
+Benoetigte Tests:
+
+- QA-Matrix inklusive Ladelisten-Fixture.
+- Browser-Smoke Desktop fuer `/`.
+- Pruefung, dass Script-Reihenfolge und direkter Asset-Abruf fuer `app-ui-helpers.js` funktionieren.
+
+Abbruchkriterien:
+
+- Barcode-/Ladelistenanzeige aendert sich.
+- `render()` oder `renderLoadingSlipLine()` muesste verschoben werden.
+- Importpositionen, Mengen, Nach-Lagerplatz oder Ladelisten aendern sich.
+
+### Schritt 2G: Spaeterer Extract
 
 Extract der Einlagerungsparser.
 
@@ -339,7 +378,7 @@ Abbruchkriterien:
 - HU/LE-Felder werden vor Freigabe nicht mehr bearbeitbar.
 - Manuelle Einlagerungspositionen oder Mengen unterscheiden sich.
 
-### Schritt 2G: Bewusst noch nicht anfassen
+### Schritt 2H: Bewusst noch nicht anfassen
 
 In dieser Phase nicht extrahieren:
 
