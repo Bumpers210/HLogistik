@@ -1,6 +1,7 @@
 import { getDb } from "./db.mjs";
-import { normalizeWarehouse } from "./helpers.mjs";
+import { httpError, normalizeWarehouse } from "./helpers.mjs";
 import { readArticlesSync } from "./articles.mjs";
+import { normalizeOptionalWarehouse } from "./rules/warehouse-rules.mjs";
 
 // ── Auswertungen / Reporting ────────────────────────────────────────────────
 // Alle Berichte sind read-only und basieren auf dem Bewegungs-Ledger
@@ -10,6 +11,15 @@ import { readArticlesSync } from "./articles.mjs";
 // zeitraumgebunden); alle übrigen Kennzahlen sind auf den Zeitraum gefiltert.
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+export const BOOKING_EXPORT_COLUMNS = Object.freeze([
+  "Buchungsrichtung",
+  "Datum/Uhrzeit",
+  "Lager",
+  "Stellplatz",
+  "HU/LE-Nummer",
+  "Menge",
+  "Referenz",
+]);
 
 function addDays(isoDate, days) {
   const date = new Date(`${isoDate}T00:00:00.000Z`);
@@ -28,12 +38,141 @@ export function dateBounds(from, to) {
   return { fromDate, toDate, toExclusiveDate: addDays(toDate, 1) };
 }
 
+export function bookingExportDateBounds(from, to) {
+  const fromDate = String(from || "").trim();
+  const toDate = String(to || "").trim();
+  if (!isValidIsoDate(fromDate) || !isValidIsoDate(toDate)) {
+    throw httpError(400, "Zeitraum ist ungueltig. Bitte Von und Bis als Datum waehlen.");
+  }
+  if (fromDate > toDate) {
+    throw httpError(400, "Zeitraum ist ungueltig. Von darf nicht nach Bis liegen.");
+  }
+  return { fromDate, toDate, toExclusiveDate: addDays(toDate, 1) };
+}
+
+function isValidIsoDate(value) {
+  if (!DATE_RE.test(String(value || ""))) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
 function articleNameMap(warehouse) {
   return new Map(readArticlesSync(warehouse).map((article) => [article.materialnummer, article]));
 }
 
 // ── 1. Artikelbewegungen ──────────────────────────────────────────────────────
 // Pro Artikel: Entnahmen (Σ Warenausgang), Zugänge (Σ Wareneingang), aktueller Bestand.
+
+export function readBookingExport({ warehouse = "", from = "", to = "" } = {}) {
+  const warehouseFilter = normalizeOptionalWarehouse(warehouse);
+  const { fromDate, toDate, toExclusiveDate } = bookingExportDateBounds(from, to);
+  const movementBaseSql = `SELECT bewegungsart, erstellt_am, lager, lagerplatz, le_nummer, menge_stueck, referenz, materialnummer, id
+       FROM lagerbewegung
+       WHERE erstellt_am >= ? AND erstellt_am < ?`;
+  const orderSql = ` ORDER BY erstellt_am ASC, lager ASC, lagerplatz COLLATE NOCASE ASC,
+              COALESCE(referenz, '') COLLATE NOCASE ASC, id ASC`;
+  const movementRows = warehouseFilter
+    ? getDb().prepare(`${movementBaseSql} AND lager = ?${orderSql}`).all(fromDate, toExclusiveDate, warehouseFilter)
+    : getDb().prepare(`${movementBaseSql}${orderSql}`).all(fromDate, toExclusiveDate);
+  const errorRows = readBookingExportErrorRows({ warehouseFilter, fromDate, toExclusiveDate });
+  const items = [
+    ...movementRows.map((row) => bookingExportSortRow(bookingExportRow(row), row, 0)),
+    ...errorRows.map((row) => bookingExportSortRow(bookingExportErrorRow(row), row, 1))
+  ]
+    .sort(compareBookingExportRows)
+    .map(({ item }) => item);
+
+  return {
+    from: fromDate,
+    to: toDate,
+    warehouse: warehouseFilter,
+    fileName: `buchungen-${fromDate}-bis-${toDate}.xlsx`,
+    columns: BOOKING_EXPORT_COLUMNS,
+    items,
+  };
+}
+
+function readBookingExportErrorRows({ warehouseFilter, fromDate, toExclusiveDate }) {
+  const baseSql = `SELECT fehler.id, fehler.lager, fehler.auftrag_id,
+              COALESCE(NULLIF(fehler.auftragsnummer, ''), NULLIF(auftraege.auftragsnummer, '')) AS auftragsnummer,
+              fehler.position, fehler.lagerauftrag, fehler.materialnummer,
+              fehler.lagerplatz, fehler.le_nummer, fehler.menge, fehler.fehler,
+              fehler.exportiert_pdf_datei, fehler.erstellt_am
+       FROM bestandsbuchung_fehler AS fehler
+       LEFT JOIN auftraege ON auftraege.id = fehler.auftrag_id
+       WHERE fehler.erstellt_am >= ? AND fehler.erstellt_am < ?`;
+  const orderSql = ` ORDER BY fehler.erstellt_am ASC, fehler.lager ASC, fehler.lagerplatz COLLATE NOCASE ASC,
+              COALESCE(NULLIF(fehler.auftragsnummer, ''), NULLIF(auftraege.auftragsnummer, ''), '') COLLATE NOCASE ASC,
+              fehler.position ASC, fehler.id ASC`;
+  return warehouseFilter
+    ? getDb().prepare(`${baseSql} AND fehler.lager = ?${orderSql}`).all(fromDate, toExclusiveDate, warehouseFilter)
+    : getDb().prepare(`${baseSql}${orderSql}`).all(fromDate, toExclusiveDate);
+}
+
+function bookingExportRow(row) {
+  return {
+    buchungsrichtung: bookingDirection(row.bewegungsart),
+    datumUhrzeit: String(row.erstellt_am || ""),
+    lager: String(row.lager || ""),
+    stellplatz: String(row.lagerplatz || ""),
+    huLeNummer: String(row.le_nummer || ""),
+    menge: Number(row.menge_stueck || 0),
+    referenz: String(row.referenz || row.materialnummer || ""),
+  };
+}
+
+function bookingExportErrorRow(row) {
+  return {
+    buchungsrichtung: "AUS",
+    datumUhrzeit: String(row.erstellt_am || ""),
+    lager: String(row.lager || ""),
+    stellplatz: String(row.lagerplatz || ""),
+    huLeNummer: String(row.le_nummer || ""),
+    menge: bookingExportQuantity(row.menge),
+    referenz: bookingErrorReference(row),
+  };
+}
+
+function bookingExportQuantity(value) {
+  const number = Number(String(value || "").replace(",", "."));
+  return Number.isFinite(number) ? number : 0;
+}
+
+function bookingErrorReference(row) {
+  const orderNumber = String(row.auftragsnummer || "").trim();
+  if (orderNumber) return `Kommissionierung ${orderNumber}`;
+  const orderId = String(row.auftrag_id || "").trim();
+  if (orderId) return `Kommissionierung ${orderId}`;
+  return String(row.exportiert_pdf_datei || row.materialnummer || "");
+}
+
+function bookingExportSortRow(item, row, sourceOrder) {
+  return {
+    item,
+    erstelltAm: String(row.erstellt_am || ""),
+    lager: String(row.lager || ""),
+    lagerplatz: String(row.lagerplatz || ""),
+    referenz: item.referenz,
+    sourceOrder,
+    id: String(row.id || "")
+  };
+}
+
+function compareBookingExportRows(a, b) {
+  return a.erstelltAm.localeCompare(b.erstelltAm)
+    || a.lager.localeCompare(b.lager)
+    || a.lagerplatz.localeCompare(b.lagerplatz)
+    || a.referenz.localeCompare(b.referenz)
+    || a.sourceOrder - b.sourceOrder
+    || a.id.localeCompare(b.id);
+}
+
+function bookingDirection(value) {
+  const text = String(value || "").trim();
+  if (text === "Wareneingang") return "EIN";
+  if (text === "Warenausgang") return "AUS";
+  return "";
+}
 
 export function readArticleMovements({ warehouse = "SSI", from = "", to = "" } = {}) {
   const lager = normalizeWarehouse(warehouse);

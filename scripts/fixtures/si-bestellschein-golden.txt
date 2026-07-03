@@ -1,0 +1,18 @@
+Bestellschein Nr.: 60210
+Auslagerung: SI-Testmandant
+Bestellhinweis:
+QA Vergleich
+Datum: 03.07.2026
+Entnahmeanweisungen: von 012 ( SI-Testmandant ) an 421 ( Zielbereich QA )
+1000094 1/2 Testpalette 80x60 cm 20 ST
+Lagerplatz: QA/1000094
+HU: 31366755
+1076846 Header start beginning 77/35 M 7 Stk
+Lagerplatz: QA/1076846
+HU: 30684317
+1063588 Testgranulat neutral 3 PC
+Lagerplatz: QA/1063588
+HU: 30684318
+1234567 Fallbacknaher Testartikel 12
+Lagerplatz: QA/1234567
+HU: 30684319

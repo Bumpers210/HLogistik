@@ -7,10 +7,10 @@
     <title>Artikelstamm</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260619-1">
+    <link rel="stylesheet" href="styles.css?v=20260625-1">
     <script src="shared-ui.js?v=20260619-2" defer></script>
     <script src="xlsx.full.min.js" defer></script>
-    <script src="artikel.js?v=20260619-2" defer></script>
+    <script src="artikel.js?v=20260625-1" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -62,6 +62,17 @@
           </label>
           <a id="exportLink" class="secondary-button link-button" href="/api/articles/export">CSV exportieren</a>
           <button id="resetArticleDataButton" class="danger-button" type="button">Artikelstamm löschen</button>
+        </div>
+        <div class="booking-export-controls" aria-label="Buchungen exportieren">
+          <label>
+            Von
+            <input id="bookingExportFromInput" type="date">
+          </label>
+          <label>
+            Bis
+            <input id="bookingExportToInput" type="date">
+          </label>
+          <button id="bookingExportButton" class="secondary-button" type="button">Buchungen exportieren</button>
         </div>
         <p id="articleStatus" class="export-status" role="status">Artikel werden geladen...</p>
       </section>

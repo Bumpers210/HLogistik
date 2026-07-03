@@ -1,6 +1,58 @@
 # HLogistik Open Risks
 
-Stand: 2026-06-22 13:35:44 +02:00
+Stand: 2026-07-02 11:23:22 +02:00
+
+## Aktueller Stand nach Stabilisierung
+
+Keine neuen offenen P0/P1-Risiken aus dem sortierten Stabilitaetsstand. Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung und Artikelstamm-Buchungsexport sind in der QA-Matrix abgedeckt. Der aktuelle Clientstand ist `app.js?v=20260702-2`, Service Worker/Manifest `1.5.152`.
+
+Weiter offen bleiben nur bewusst dokumentierte Betriebsentscheidungen: CR-002, automatische SQLite-Wiederherstellung, Passwort-Fallback und echtes Authentifizierungskonzept.
+
+Die Testbasis ist verbindlich in `docs/TEST_BASELINE.md` beschrieben. Die normale QA-Matrix muss gegen eine isolierte Kopie auf Port `4175` laufen; Live-Port `4174` ist fuer Schreibtests gesperrt.
+
+## Aktueller Lauf - PDF-Import OCR-Kandidatenbewertung
+
+Kein neues offenes Produktivrisiko aus der technischen Umstellung. Der Import waehlt jetzt den besten kompletten OCR-Kandidaten aus Skala und Rotation und bricht bei zu schwacher Qualitaet ab, bevor ein Auftragszustand entsteht.
+
+Restempfehlung:
+
+Mindestens zwei problematische Original-PDFs und ein bisher funktionierendes PDF manuell im Browser importieren. Die CLI-Umgebung hat keine lokale OCR-Engine; die echte OCR-Qualitaet muss deshalb im Browserpfad validiert werden. Nach Deployment Browser hart neu laden bzw. Service Worker aktualisieren, damit `app.js?v=20260702-2` und Cache `1.5.152` aktiv sind.
+
+## Aktueller Lauf - PDF-Import Roh-Stellplatz
+
+Kein neues offenes Produktivrisiko aus dem Lauf. Es wurde keine automatische Stellplatzkorrektur eingebaut; der Rohimport wird jetzt diagnostiziert und per QA-Matrix abgesichert.
+
+Restempfehlung:
+
+Vor einer spaeteren Stellplatzregel-Validierung weitere echte Referenz-PDFs stichprobenartig pruefen. Die neue Diagnose muss bei jeder Abweichung zeigen, ob der Fehler aus der OCR-/Spaltenlogik oder aus einer nachgelagerten Anreicherung stammt.
+
+## Aktueller Lauf - PDF-Import Lageraufgabe-Scan
+
+Kein neues offenes Produktivrisiko aus dem Fix. Der Import bricht bei 0 Positionen jetzt sauber ab, statt einen halbfertigen Auftragszustand zu erzeugen.
+
+Restempfehlung:
+
+Nach Deployment Browser hart neu laden bzw. Service-Worker aktualisieren, damit `app.js?v=20260702-2` und Cache `1.5.152` aktiv sind. Fuer echte OCR-Qualitaet bleibt RISK-005 relevant.
+
+## Aktueller Lauf - Artikelstamm Buchungsexport
+
+Kein neues offenes Produktivrisiko aus der Erweiterung. Der Endpunkt ist read-only, validiert den Zeitraum und erzeugt keine serverseitige Exportdatei.
+
+Restempfehlung:
+
+Nach Deployment den Server neu starten, damit der neue API-Endpunkt aktiv wird. Danach `artikel.html` einmal hart neu laden oder den Service-Worker-Cache aktualisieren, damit die neue Oberflaeche sicher geladen ist.
+
+## Aktueller Lauf - Tablet-Kommissionierexport
+
+Keine neuen offenen Risiken aus dem Fix. Der Tablet-PDF-Export ist weiterhin ein Online-Servervorgang. Wenn Server oder Netzwerk nicht erreichbar sind, wird der Export bewusst nicht gestartet; offene Aenderungen bleiben lokal speicherbar bzw. synchronisierbar.
+
+## Aktueller Lauf - PDF-Import Bestellhinweis
+
+Keine neuen offenen Risiken aus dem Fix. Der Import bleibt heuristisch, aber die neue Bestellhinweis-Erkennung ist labelbasiert und in der QA-Matrix abgesichert. Fuer echte Scan-/OCR-Qualitaet bleibt RISK-005 relevant.
+
+## Aktueller Lauf - Tablet manuelle Einlagerung verlassen/abbrechen/loeschen
+
+Keine neuen offenen Risiken aus dem Fix. Serverseitig angelegte offene manuelle Einlagerungen werden geloescht; reine Offline-Entwuerfe werden lokal abgebrochen. Wenn ein serverseitiger Auftrag offline geloescht wird, bleibt die bestehende Sync-Queue-Logik verantwortlich fuer die spaetere Server-Loeschung.
 
 ## Aktueller Lauf - Tablet Offline-Auftragsgruppen
 
@@ -48,7 +100,7 @@ Empfehlung: Passwort dauerhaft per Umgebung setzen und spaeter den Fallback entf
 
 Prioritaet: P2
 
-Der PDF-/OCR-Import enthaelt viele Heuristiken fuer echte Auftragsdokumente. Die API- und UI-Smokes pruefen Stabilitaet, ersetzen aber keine regelmaessige Stichprobe mit echten Kunden-PDFs.
+Der PDF-/OCR-Import enthaelt viele Heuristiken fuer echte Auftragsdokumente. Die API- und UI-Smokes pruefen Stabilitaet, ersetzen aber keine regelmaessige Stichprobe mit echten Kunden-PDFs. Fuer Kommissionier-PDFs werden Von-Lagerplaetze jetzt bewusst nicht mehr automatisch korrigiert; OCR-Rohwerte muessen bei auffaelligen Scans fachlich geprueft oder manuell bearbeitet werden.
 
 Empfehlung: Eine kleine Sammlung anonymisierter Referenz-PDFs aufbauen und Import-Erwartungen als technische Regressionstests ablegen.
 
@@ -66,12 +118,62 @@ Soll HLogistik ausserhalb eines kontrollierten LANs erreichbar sein, muss ein ec
 
 Prioritaet: P3
 
-Serverseitige Regeln sind ausgelagert. Einige Browser-/Tablet-Legacy-Konstanten, besonders HU-Prefix und Service-Worker-App-Shell, bleiben bewusst klassisch im Frontend dupliziert, damit alte Tablets keine ES-Modul- oder Service-Worker-Kompatibilitaetsprobleme bekommen.
+Serverseitige Regeln sind ausgelagert. HU- und manuelle Einlagerungs-Konstanten sind jetzt in klassischen Browser-Regelskripten gebuendelt. Weiter bewusst lokal bleiben Storage-Keys und die Service-Worker-App-Shell, damit alte Tablets keine ES-Modul-, LocalStorage- oder Service-Worker-Kompatibilitaetsprobleme bekommen.
 
-Empfehlung: Bei spaeterer Modernisierung ein klassisches Browser-Regelbundle mit Regressionstests fuer Desktop und Tablet planen.
+Empfehlung: Bei spaeterer Modernisierung Storage-Key- und App-Shell-Listen nur mit Regressionstests fuer Desktop, Tablet und Offline-Datenkompatibilitaet weiter vereinheitlichen.
+
+## RISK-009 - `archive-path.txt` ist reserviert, aber nicht aktiv
+
+Prioritaet: P3
+
+`archive-path.txt` ist als lokale Pfaddatei in `.gitignore` beruecksichtigt. Der aktuelle Serverstand liest fuer den Archivordner aber nur `HLOGISTIK_ARCHIVE_DIR`; ohne Umgebungsvariable wird `<Importordner>/Archiv` verwendet.
+
+Betreiberentscheidung:
+
+Soll `archive-path.txt` wie `import-path.txt` und `export-path.txt` aktiv unterstuetzt werden, ist dafuer eine kleine Serveraenderung mit QA-Test noetig. Bis dahin muss fuer abweichende Archivordner `HLOGISTIK_ARCHIVE_DIR` gesetzt werden.
 
 ## Erledigt in diesem Lauf
 
 - RISK-004: Service-Worker-Offline-Fallback fuer Desktop-Unterseiten vereinheitlicht.
-- RISK-006: API-Matrix als `scripts/qa-api-matrix.mjs` und `npm run test:qa` versioniert.
+- RISK-006: API-Matrix als `scripts/qa-api-matrix.mjs` und npm-Script `test:qa` versioniert.
 - Regel-Refactoring: Server-Regeln in `server/rules/`, statische Allowlist in `server/config/static-files.mjs`, App-Seiten in `shared/app-pages.mjs` dokumentiert.
+
+## Aktueller Lauf - QA-Exportartefakte
+
+Kein neues offenes Produktivrisiko aus dem Fix. QA-Exports werden nur bei lokalem Request, QA-Auftrag und explizitem Header verworfen. Normale Benutzerexporte bleiben aktiv.
+
+Restempfehlung:
+
+Regelmaessig pruefen, dass QA-Laeufe weiterhin gegen eine isolierte Kopie auf Port 4175 laufen. Der Schutz gegen versehentliche Live-Schreibtests bleibt wichtig, weil die QA-Matrix weiterhin Auftraege und Buchungen erzeugt.
+
+## Aktueller Lauf - manuelle Einlagerungsfelder
+
+Kein neues offenes Produktivrisiko aus dem Fix. Die Stueckzahl ist jetzt beim manuellen Anlegen explizit und wird fachlich validiert. Neue Stellplatzfelder starten leer; vorhandene gespeicherte Stellplaetze bleiben erhalten.
+
+Restempfehlung:
+
+Auf echten Tablets nach Cache-Update einmal pruefen, dass die neue Tablet-Version geladen wurde und dass mehrere Positionen derselben Artikelnummer getrennt bearbeitbare Stellplaetze behalten.
+
+## Aktueller Lauf - Tablet-PDF-Export
+
+Kein neues offenes Produktivrisiko aus dem Fix. Der Auftrag wird erst nach serverseitig bestaetigter PDF-Erstellung lokal aufgeraeumt, und der Server markiert den Auftrag nur bei vorhandener, nicht leerer PDF als exportiert.
+
+Restempfehlung:
+
+Auf dem echten Tablet nach Cache-Update einen Einlagerabschluss testen. Wenn das Exportziel ein Netzlaufwerk ist, sollte zusaetzlich ein isolierter Fehlerfall mit nicht erreichbarem Exportziel geprueft werden.
+
+## Aktueller Lauf - Originaldatei-Archivierung
+
+Kein neues kritisches Produktivrisiko aus dem Fix. Die Archivierung ist nachgelagert: PDF-Export und Auftragsabschluss bleiben erfolgreich, auch wenn das Verschieben der Originaldatei fehlschlaegt.
+
+Restempfehlung:
+
+Den gewuenschten Importordner betrieblich festlegen und entweder `HLOGISTIK_IMPORT_DIR` oder `import-path.txt` setzen. Ohne Konfiguration nutzt der Server den Exportordner als Importordner, damit keine beliebigen Benutzerpfade akzeptiert werden.
+
+## Aktueller Lauf - Kundenregel 9021-0OUT
+
+Kein neues offenes Risiko aus dem Fix. `9021-0OUT` wird als Kunde gesetzt, sobald irgendeine Position diesen Nach-Lagerplatz enthaelt. Abweichende Nach-Lagerplaetze bleiben positionsbezogen als Zusatzbemerkung sichtbar.
+
+Restempfehlung:
+
+Einen echten Mischauftrag mit `9021-0OUT` an spaeterer Position nach hartem Browser-Reload importieren und gegen den PDF-Ausdruck pruefen.

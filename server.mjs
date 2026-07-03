@@ -49,6 +49,7 @@ import {
   deleteStorageForMaterial,
 } from "./server/storage.mjs";
 import {
+  readBookingExport,
   readArticleMovements,
   readTopArticles,
   readSlowArticles,
@@ -60,15 +61,25 @@ import {
   upsertOrder,
   deleteOrder,
   markOrderExported,
+  markOrderOriginalArchive,
   migrateOrdersFromJson,
   normalizeOrder,
   orderSummary,
 } from "./server/orders.mjs";
 import { exportPdf } from "./server/export.mjs";
+import { archiveOriginalImportFile, resolveOriginalImportFile } from "./server/original-archive.mjs";
 import { isPublicStaticFile, staticCacheHeaders } from "./server/config/static-files.mjs";
 import { ROLE_PERMISSIONS, hasGroupPermission } from "./server/rules/permission-rules.mjs";
 import { WAREHOUSES } from "./server/rules/warehouse-rules.mjs";
 import { validateOrderCompletionForExport } from "./server/rules/export-rules.mjs";
+import {
+  SSI_STORAGE_HU_PREFIX,
+  SSI_STORAGE_HU_SUFFIX_LENGTH,
+  normalizeSsiStorageHandlingUnit,
+  isCompleteSsiStorageHandlingUnit,
+  isIncompleteSsiStorageHandlingUnit,
+  stripSsiStorageHandlingUnitPrefix,
+} from "./server/rules/storage-hu-rules.mjs";
 import {
   MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX,
   isReusableOrderNumber,
@@ -82,6 +93,8 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(root, "data");
 const defaultExportDir = path.join(root, "Exporte");
 const exportDir = readExportDir();
+const importDir = readImportDir(exportDir);
+const archiveDir = readArchiveDir(importDir);
 const tempDir = path.join(root, "tmp");
 const legacyOrdersFile = path.join(dataDir, "orders.json");
 const legacyArticlesFile = path.join(dataDir, "articles.json");
@@ -95,9 +108,6 @@ const localHostname = readLocalHostname();
 const maxBodyBytes = 2 * 1024 * 1024;
 const configuredArticleDeletePassword = String(globalThis.process?.env?.ARTICLE_DELETE_PASSWORD || "");
 const articleDeletePassword = configuredArticleDeletePassword || "HLogistik2026!";
-const SSI_STORAGE_HU_PREFIX = "34006381000";
-const SSI_STORAGE_HU_SUFFIX_LENGTH = 7;
-const SSI_STORAGE_HU_LENGTH = SSI_STORAGE_HU_PREFIX.length + SSI_STORAGE_HU_SUFFIX_LENGTH;
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
@@ -194,7 +204,7 @@ async function route(request, response) {
 
   // Health
   if (pathname === "/api/health") {
-    sendJson(response, 200, { ok: true, host: hostname(), localHostname: localHostname || null, port, exportDir, warehouse, warehouses: WAREHOUSES, localAddresses: localAddresses() });
+    sendJson(response, 200, { ok: true, host: hostname(), localHostname: localHostname || null, port, exportDir, importDir, archiveDir, warehouse, warehouses: WAREHOUSES, localAddresses: localAddresses() });
     return;
   }
 
@@ -247,6 +257,16 @@ async function route(request, response) {
     const from = url.searchParams.get("from") || "";
     const to = url.searchParams.get("to") || "";
     sendJson(response, 200, { ok: true, ...readLocationUsage({ warehouse, from, to }) });
+    return;
+  }
+
+  // Articles — booking export data (read-only; XLSX is created in the browser)
+  if (pathname === "/api/articles/bookings/export" && request.method === "GET") {
+    requireGroup(request, ROLE_PERMISSIONS.articleMutation);
+    const from = url.searchParams.get("from") || "";
+    const to = url.searchParams.get("to") || "";
+    const warehouseFilter = url.searchParams.get("warehouse") || "";
+    sendJson(response, 200, { ok: true, ...readBookingExport({ warehouse: warehouseFilter, from, to }) });
     return;
   }
 
@@ -447,6 +467,7 @@ async function route(request, response) {
       sendJson(response, 400, { ok: false, error: lineValidation });
       return;
     }
+    applyOriginalImportFileMetadata(order, existing || {});
     const duplicate = findDuplicateOrder(order);
     if (duplicate) {
       sendJson(response, 409, { ok: false, error: `Auftrag ${duplicate.orderNumber || duplicate.id} wurde bereits eingelesen` });
@@ -533,6 +554,7 @@ async function route(request, response) {
     }
     preserveClosedOrderStatus(order, existing);
     preserveAcceptedOrderStatus(order, existing);
+    applyOriginalImportFileMetadata(order, existing);
     if (existing.id && isTabletRequest(request)) {
       const tabletBlocked = tabletMutationBlocker(existing, requestOrderUserName(body, order));
       if (tabletBlocked) return sendAcceptedOrderBlock(response, tabletBlocked);
@@ -577,6 +599,7 @@ async function route(request, response) {
       normalizeStorageOrderBinsForExport(order);
     }
     preserveAcceptedOrderStatus(order, savedOrder || {});
+    applyOriginalImportFileMetadata(order, savedOrder || {});
     if (savedOrder?.id && isTabletRequest(request)) {
       const tabletBlocked = tabletMutationBlocker(savedOrder, requestOrderUserName(body, order));
       if (tabletBlocked) return sendAcceptedOrderBlock(response, tabletBlocked);
@@ -590,7 +613,10 @@ async function route(request, response) {
     const storageArticles = orderType === "storage" && !savedOrder?.exportedAt
       ? await ensureStorageOrderArticles(order, stockWarehouse)
       : { created: [], updated: [] };
-    const result = await exportPdf(order, exportDir, tempDir, requestOrigin(request), defaultExportDir);
+    const discardExport = isQaDiscardExportRequest(request, order);
+    const result = await exportPdf(order, exportDir, tempDir, requestOrigin(request), defaultExportDir, {
+      discard: discardExport
+    });
     const stockIssue = orderType === "picking" && !savedOrder?.exportedAt
       ? bookPickingOrderIssues(order, stockWarehouse)
       : { booked: 0, errors: [] };
@@ -599,7 +625,14 @@ async function route(request, response) {
       : { booked: 0, movements: [], locations: [] };
     const stockIssueErrorLog = logPickingIssueErrors(order, stockIssue, result, stockWarehouse);
     const exportedAt = markOrderExported(order.id, result);
-    sendJson(response, 200, { ok: true, exportedAt, stockWarehouse, stockIssue, stockReceipt, storageArticles, stockIssueErrorLog, ...result });
+    const archiveOriginal = await archiveOriginalImportFile(order, { importDir, archiveDir });
+    if (archiveOriginal.archived || archiveOriginal.error) {
+      markOrderOriginalArchive(order.id, archiveOriginal);
+    }
+    if (archiveOriginal.error) {
+      console.warn(`Originaldatei fuer Auftrag ${order.orderNumber || order.id} nicht archiviert: ${archiveOriginal.error}`);
+    }
+    sendJson(response, 200, { ok: true, exportedAt, stockWarehouse, stockIssue, stockReceipt, storageArticles, stockIssueErrorLog, archiveOriginal, ...result });
     return;
   }
 
@@ -675,8 +708,12 @@ function validateStorageNumericFields(order) {
     const position = line.warehouseOrder || index + 1;
     const materialnummer = String(line.product || "").trim();
     const handlingUnit = String(line.fromHandlingUnit || "").trim();
+    const quantity = readInteger(storageLineQuantity(line));
     if (materialnummer && !/^\d+$/.test(materialnummer)) return `Pos. ${position}: Artikelnummer darf nur Zahlen enthalten`;
     if (handlingUnit && !/^\d+$/.test(handlingUnit)) return `Pos. ${position}: HU darf nur Zahlen enthalten`;
+    if (line.manual === true && (!Number.isInteger(quantity) || quantity <= 0)) {
+      return `Pos. ${position}: Stückzahl muss eine positive ganze Zahl sein`;
+    }
   }
   return "";
 }
@@ -954,30 +991,6 @@ function normalizeHandlingUnitLookup(value) {
     .replace(/[^A-Z0-9]/g, "");
 }
 
-function normalizeDigits(value) {
-  return String(value || "").replace(/\D/g, "");
-}
-
-function normalizeSsiStorageHandlingUnit(value) {
-  const digits = normalizeDigits(value);
-  if (!digits) return SSI_STORAGE_HU_PREFIX;
-  if (digits.startsWith(SSI_STORAGE_HU_PREFIX)) return digits.slice(0, SSI_STORAGE_HU_LENGTH);
-  const suffix = digits.length <= SSI_STORAGE_HU_SUFFIX_LENGTH
-    ? digits
-    : digits.slice(-SSI_STORAGE_HU_SUFFIX_LENGTH);
-  return SSI_STORAGE_HU_PREFIX + suffix;
-}
-
-function isCompleteSsiStorageHandlingUnit(value) {
-  const digits = normalizeDigits(value);
-  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length === SSI_STORAGE_HU_LENGTH;
-}
-
-function isIncompleteSsiStorageHandlingUnit(value) {
-  const digits = normalizeDigits(value);
-  return digits.startsWith(SSI_STORAGE_HU_PREFIX) && digits.length < SSI_STORAGE_HU_LENGTH;
-}
-
 function applyStorageHandlingUnitDefaults(order) {
   if ((order?.orderType || "picking") !== "storage" || !Array.isArray(order.lines)) return;
   const useSsiHuPrefix = storageOrderUsesSsiHuPrefix(order);
@@ -993,13 +1006,6 @@ function applyStorageHandlingUnitDefaults(order) {
       fromHandlingUnitEditable: true
     };
   });
-}
-
-function stripSsiStorageHandlingUnitPrefix(value) {
-  const text = String(value || "").trim();
-  const digits = normalizeDigits(text);
-  if (!digits.startsWith(SSI_STORAGE_HU_PREFIX)) return text;
-  return digits.slice(SSI_STORAGE_HU_PREFIX.length);
 }
 
 function formatHandlingUnitPositions(positions) {
@@ -1051,6 +1057,26 @@ function preserveAcceptedOrderStatus(order, existing) {
   if (!existing || !existing.id || !existing.acceptedBy) return;
   order.acceptedBy = existing.acceptedBy;
   order.acceptedAt = existing.acceptedAt || order.acceptedAt;
+}
+
+function applyOriginalImportFileMetadata(order, existing = {}) {
+  const fileName = String(order.originalFileName || existing.originalFileName || "").trim();
+  order.originalArchivedAt = String(existing.originalArchivedAt || "");
+  order.originalArchivePath = String(existing.originalArchivePath || "");
+  order.originalArchiveError = String(existing.originalArchiveError || "");
+
+  if (!fileName) {
+    order.originalFileName = "";
+    order.originalFilePath = "";
+    return;
+  }
+
+  const resolved = resolveOriginalImportFile(fileName, importDir);
+  if (!resolved.ok) {
+    throw httpError(400, resolved.error || "Originaldateiname ist ungueltig.");
+  }
+  order.originalFileName = resolved.fileName;
+  order.originalFilePath = resolved.filePath;
 }
 
 function requestOrderUserName(body, order = {}) {
@@ -1375,6 +1401,32 @@ function requestOrigin(request) {
   return `${protocol}://${host}`;
 }
 
+function isQaDiscardExportRequest(request, order) {
+  return isTruthyHeader(request.headers["x-qa-discard-export"]) && isLoopbackRequest(request) && isQaOrder(order);
+}
+
+function isTruthyHeader(value) {
+  const text = String(value || "").trim().toLowerCase();
+  return text === "1" || text === "true" || text === "yes";
+}
+
+function isLoopbackRequest(request) {
+  const remoteAddress = String(request.socket?.remoteAddress || "");
+  return remoteAddress === "127.0.0.1" || remoteAddress === "::1" || remoteAddress === "::ffff:127.0.0.1";
+}
+
+function isQaOrder(order) {
+  const values = [
+    order?.orderNumber,
+    order?.customerName,
+    order?.customerGroupKey,
+    ...(Array.isArray(order?.lines)
+      ? order.lines.flatMap((line) => [line.product, line.description, line.fromHandlingUnit, line.fromBin])
+      : [])
+  ];
+  return values.some((value) => /^QA[-_]/i.test(String(value || "").trim()));
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 function localAddresses() {
@@ -1416,6 +1468,26 @@ function readExportDir() {
     .map((line) => line.trim())
     .find((line) => line && !line.startsWith("#"));
   return raw ? path.resolve(raw) : path.join(root, "Exporte");
+}
+
+function readImportDir(fallbackDir) {
+  const fromEnv = String(globalThis.process?.env?.HLOGISTIK_IMPORT_DIR || "").trim();
+  if (fromEnv) return path.resolve(fromEnv);
+
+  const configFile = path.join(root, "import-path.txt");
+  if (!existsSync(configFile)) return fallbackDir;
+
+  const raw = readFileSync(configFile, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith("#"));
+  return raw ? path.resolve(raw) : fallbackDir;
+}
+
+function readArchiveDir(importDirectory) {
+  const fromEnv = String(globalThis.process?.env?.HLOGISTIK_ARCHIVE_DIR || "").trim();
+  if (fromEnv) return path.resolve(fromEnv);
+  return path.join(importDirectory, "Archiv");
 }
 
 function sanitizeHostname(value) {

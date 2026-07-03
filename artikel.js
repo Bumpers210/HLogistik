@@ -37,6 +37,9 @@ function bindElements() {
     "newArticleButton",
     "csvInput",
     "exportLink",
+    "bookingExportFromInput",
+    "bookingExportToInput",
+    "bookingExportButton",
     "resetArticleDataButton",
     "articleStatus",
     "articleCount",
@@ -71,6 +74,7 @@ function bindEvents() {
   elements.includeInactiveInput.addEventListener("change", loadArticles);
   elements.newArticleButton.addEventListener("click", () => { selectArticle(null); openEditor(); });
   elements.csvInput.addEventListener("change", importArticleFile);
+  elements.bookingExportButton.addEventListener("click", exportBookings);
   elements.resetArticleDataButton.addEventListener("click", resetArticleMasterData);
   elements.articleForm.addEventListener("submit", saveArticle);
   elements.deactivateButton.addEventListener("click", deactivateSelectedArticle);
@@ -101,6 +105,7 @@ function bindEvents() {
 async function initialize() {
   if (!enforceArticleAccess()) return;
   applyWarehouseSelection();
+  setDefaultBookingExportDates();
   updateExportLink();
   selectArticle(null);
   try {
@@ -176,6 +181,113 @@ function applyWarehouseSelection() {
 function updateExportLink() {
   if (!elements.exportLink) return;
   elements.exportLink.href = `/api/articles/export?warehouse=${encodeURIComponent(currentWarehouse())}`;
+}
+
+function setDefaultBookingExportDates() {
+  const today = new Date();
+  const from = new Date(today.getFullYear(), today.getMonth(), 1);
+  if (elements.bookingExportFromInput && !elements.bookingExportFromInput.value) {
+    elements.bookingExportFromInput.value = formatDateInputValue(from);
+  }
+  if (elements.bookingExportToInput && !elements.bookingExportToInput.value) {
+    elements.bookingExportToInput.value = formatDateInputValue(today);
+  }
+}
+
+async function exportBookings() {
+  const range = readBookingExportRange();
+  if (!range.ok) {
+    setStatus(range.error, "error");
+    return;
+  }
+  if (!window.XLSX?.utils || !window.XLSX?.writeFile) {
+    setStatus("Excel-Export ist nicht verfuegbar. Seite neu laden.", "error");
+    return;
+  }
+
+  try {
+    elements.bookingExportButton.disabled = true;
+    setStatus("Buchungen werden exportiert...");
+    const params = new URLSearchParams({ from: range.from, to: range.to });
+    const result = await apiJson(`/api/articles/bookings/export?${params}`);
+    writeBookingsWorkbook(result);
+    setStatus(`Buchungsexport erstellt: ${HLogistikUi.formatNumber(result.items?.length || 0)} Buchung(en).`, "ok");
+  } catch (error) {
+    setStatus(`Buchungen konnten nicht exportiert werden: ${error.message}`, "error");
+  } finally {
+    elements.bookingExportButton.disabled = false;
+  }
+}
+
+function readBookingExportRange() {
+  const from = String(elements.bookingExportFromInput?.value || "").trim();
+  const to = String(elements.bookingExportToInput?.value || "").trim();
+  if (!isDateInputValue(from) || !isDateInputValue(to)) {
+    return { ok: false, error: "Bitte Zeitraum mit Von und Bis waehlen." };
+  }
+  if (from > to) {
+    return { ok: false, error: "Zeitraum ist ungueltig: Von darf nicht nach Bis liegen." };
+  }
+  return { ok: true, from, to };
+}
+
+function writeBookingsWorkbook(result) {
+  const columns = Array.isArray(result?.columns) && result.columns.length
+    ? result.columns
+    : ["Buchungsrichtung", "Datum/Uhrzeit", "Lager", "Stellplatz", "HU/LE-Nummer", "Menge", "Referenz"];
+  const rows = (Array.isArray(result?.items) ? result.items : []).map((item) => [
+    item.buchungsrichtung || "",
+    formatBookingDateTime(item.datumUhrzeit),
+    item.lager || "",
+    item.stellplatz || "",
+    item.huLeNummer || "",
+    Number(item.menge || 0),
+    item.referenz || ""
+  ]);
+  const worksheet = window.XLSX.utils.aoa_to_sheet([columns, ...rows]);
+  worksheet["!cols"] = [
+    { wch: 18 },
+    { wch: 20 },
+    { wch: 8 },
+    { wch: 18 },
+    { wch: 22 },
+    { wch: 12 },
+    { wch: 34 }
+  ];
+  const workbook = window.XLSX.utils.book_new();
+  window.XLSX.utils.book_append_sheet(workbook, worksheet, "Buchungen");
+  window.XLSX.writeFile(workbook, safeBookingExportFileName(result?.fileName));
+}
+
+function safeBookingExportFileName(fileName) {
+  const fallback = `buchungen-${elements.bookingExportFromInput.value}-bis-${elements.bookingExportToInput.value}.xlsx`;
+  const cleaned = String(fileName || fallback).replace(/[\\/:*?"<>|]+/g, "-").trim();
+  return cleaned.toLowerCase().endsWith(".xlsx") ? cleaned : `${cleaned}.xlsx`;
+}
+
+function formatDateInputValue(date) {
+  return [
+    String(date.getFullYear()).padStart(4, "0"),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function isDateInputValue(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function formatBookingDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "");
+  return new Intl.DateTimeFormat("de-DE", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).format(date);
 }
 
 function renderArticles() {

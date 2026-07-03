@@ -4,7 +4,8 @@ import { getDb } from "./db.mjs";
 import { createId } from "./helpers.mjs";
 import { normalizeOptionalWarehouse } from "./rules/warehouse-rules.mjs";
 import {
-  firstDestinationName,
+  appendOrderHintFromRawText,
+  destinationCustomerNameForLines,
   normalizeCustomerGroupKey,
   normalizeDestinationName,
   orderNumberForCustomer,
@@ -22,7 +23,8 @@ export function readOrders() {
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
               uebernommen_von, uebernommen_am,
               abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
-              exportiert_pdf_pfad, positionen, erstellt_am, aktualisiert_am
+              exportiert_pdf_pfad, original_dateiname, original_dateipfad, original_archiviert_am,
+              original_archiv_pfad, original_archiv_fehler, positionen, erstellt_am, aktualisiert_am
        FROM auftraege`
     )
     .all()
@@ -37,7 +39,8 @@ export function findOrder(id) {
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
               uebernommen_von, uebernommen_am,
               abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
-              exportiert_pdf_pfad, positionen, erstellt_am, aktualisiert_am
+              exportiert_pdf_pfad, original_dateiname, original_dateipfad, original_archiviert_am,
+              original_archiv_pfad, original_archiv_fehler, positionen, erstellt_am, aktualisiert_am
        FROM auftraege WHERE id = ?`
     )
     .get(id);
@@ -53,8 +56,9 @@ export function upsertOrder(order) {
           zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
           uebernommen_von, uebernommen_am,
           abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
-          exportiert_pdf_pfad, positionen, erstellt_am, aktualisiert_am)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          exportiert_pdf_pfad, original_dateiname, original_dateipfad, original_archiviert_am,
+          original_archiv_pfad, original_archiv_fehler, positionen, erstellt_am, aktualisiert_am)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET
          auftragsnummer = excluded.auftragsnummer,
          kundenname = excluded.kundenname,
@@ -79,6 +83,11 @@ export function upsertOrder(order) {
          exportiert_am = excluded.exportiert_am,
          exportiert_pdf_datei = excluded.exportiert_pdf_datei,
          exportiert_pdf_pfad = excluded.exportiert_pdf_pfad,
+         original_dateiname = excluded.original_dateiname,
+         original_dateipfad = excluded.original_dateipfad,
+         original_archiviert_am = excluded.original_archiviert_am,
+         original_archiv_pfad = excluded.original_archiv_pfad,
+         original_archiv_fehler = excluded.original_archiv_fehler,
          positionen = excluded.positionen,
          erstellt_am = excluded.erstellt_am,
          aktualisiert_am = excluded.aktualisiert_am`
@@ -108,6 +117,11 @@ export function upsertOrder(order) {
       order.exportedAt,
       order.exportedPdfFile,
       order.exportedPdfPath,
+      order.originalFileName,
+      order.originalFilePath,
+      order.originalArchivedAt,
+      order.originalArchivePath,
+      order.originalArchiveError,
       JSON.stringify(Array.isArray(order.lines) ? order.lines : []),
       order.createdAt,
       order.updatedAt
@@ -127,6 +141,23 @@ export function markOrderExported(id, exportResult) {
     )
     .run(exportedAt, exportResult.file || "", exportResult.path || "", exportedAt, id);
   return exportedAt;
+}
+
+export function markOrderOriginalArchive(id, archiveResult) {
+  const updatedAt = new Date().toISOString();
+  getDb()
+    .prepare(
+      `UPDATE auftraege
+       SET original_archiviert_am = ?, original_archiv_pfad = ?, original_archiv_fehler = ?, aktualisiert_am = ?
+       WHERE id = ?`
+    )
+    .run(
+      archiveResult.archivedAt || "",
+      archiveResult.archivePath || "",
+      archiveResult.error || "",
+      updatedAt,
+      id
+    );
 }
 
 export function findBlockingAcceptedOrder(userName, excludeId = "") {
@@ -176,9 +207,11 @@ export function normalizeOrder(order) {
   const orderType = String(order.orderType || "picking");
   const orderWarehouse = normalizeOrderWarehouse(order.orderWarehouse || order.pickingWarehouse || order.detectedWarehouse);
   const lines = normalizeOrderLines(Array.isArray(order.lines) ? order.lines : []);
-  const destinationCustomerName = orderType === "picking" ? firstDestinationName(lines) : "";
+  const destinationCustomerName = orderType === "picking" ? destinationCustomerNameForLines(lines) : "";
   const customerName = destinationCustomerName || String(order.customerName || "");
-  const orderNumber = orderNumberForCustomer(order.orderNumber, customerName);
+  const rawText = String(order.rawText || "");
+  const baseOrderNumber = orderNumberForCustomer(order.orderNumber, customerName);
+  const orderNumber = orderType === "picking" ? appendOrderHintFromRawText(baseOrderNumber, rawText) : baseOrderNumber;
   const explicitGroupKey = normalizeCustomerGroupKey(order.customerGroupKey || order.customerKey);
   return {
     id: order.id || "",
@@ -190,7 +223,7 @@ export function normalizeOrder(order) {
     euroPallets: String(order.euroPallets || ""),
     storageSpaces: String(order.storageSpaces || ""),
     orderNote: String(order.orderNote || ""),
-    rawText: String(order.rawText || ""),
+    rawText,
     collapseDone: Boolean(order.collapseDone),
     lines,
     orderType,
@@ -198,6 +231,11 @@ export function normalizeOrder(order) {
     exportedAt: String(order.exportedAt || ""),
     exportedPdfFile: String(order.exportedPdfFile || ""),
     exportedPdfPath: String(order.exportedPdfPath || ""),
+    originalFileName: String(order.originalFileName || ""),
+    originalFilePath: String(order.originalFilePath || ""),
+    originalArchivedAt: String(order.originalArchivedAt || ""),
+    originalArchivePath: String(order.originalArchivePath || ""),
+    originalArchiveError: String(order.originalArchiveError || ""),
     createdBy: String(order.createdBy || ""),
     lastEditedBy: String(order.lastEditedBy || ""),
     activeUser: String(order.activeUser || ""),
@@ -231,6 +269,9 @@ export function orderSummary(order) {
     completedAt: order.completedAt || "",
     orderWarehouse: order.orderWarehouse || "",
     exportedAt: order.exportedAt || "",
+    originalFileName: order.originalFileName || "",
+    originalArchivedAt: order.originalArchivedAt || "",
+    originalArchiveError: order.originalArchiveError || "",
     orderType: order.orderType || "picking",
     createdAt: order.createdAt || "",
     updatedAt: order.updatedAt || "",
@@ -271,6 +312,11 @@ function orderFromRow(row) {
     exportedAt: String(row.exportiert_am || ""),
     exportedPdfFile: String(row.exportiert_pdf_datei || ""),
     exportedPdfPath: String(row.exportiert_pdf_pfad || ""),
+    originalFileName: String(row.original_dateiname || ""),
+    originalFilePath: String(row.original_dateipfad || ""),
+    originalArchivedAt: String(row.original_archiviert_am || ""),
+    originalArchivePath: String(row.original_archiv_pfad || ""),
+    originalArchiveError: String(row.original_archiv_fehler || ""),
     lines,
     createdAt: String(row.erstellt_am || ""),
     updatedAt: String(row.aktualisiert_am || ""),

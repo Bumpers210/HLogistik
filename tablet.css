@@ -238,13 +238,21 @@ input[autocapitalize="characters"] {
 
 .tablet-action-row-danger {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .tablet-action-row-danger button {
-  flex: 1 1 0;
+  flex: 1 1 170px;
   width: auto;
+  min-width: 0;
   margin: 0;
+  padding: 0 10px;
+  white-space: normal;
+}
+
+.tablet-controls .danger-action-strong {
+  background: #7e2114;
 }
 
 .tablet-controls #manualStorageCustomerRow,

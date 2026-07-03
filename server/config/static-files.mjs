@@ -4,7 +4,15 @@ export const PUBLIC_STATIC_FILES = new Set([
   ...APP_PAGE_PATHS,
   "/recover-order.html",
   "/app.js",
+  "/app-import-diagnostics.js",
+  "/app-import-line-helpers.js",
+  "/app-picking-parser.js",
+  "/app-state-helpers.js",
+  "/app-ui-helpers.js",
+  "/order-hint-rules.js",
   "/shared-ui.js",
+  "/shared/storage-hu-rules.js",
+  "/shared/manual-storage-rules.js",
   "/artikel.js",
   "/xlsx.full.min.js",
   "/lager.js",
@@ -47,4 +55,3 @@ function fileExtension(requestPath) {
   const dotIndex = text.lastIndexOf(".");
   return dotIndex >= 0 ? text.slice(dotIndex).toLowerCase() : "";
 }
-

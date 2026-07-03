@@ -123,6 +123,11 @@ export function initializeDatabase() {
       exportiert_am TEXT NOT NULL DEFAULT '',
       exportiert_pdf_datei TEXT NOT NULL DEFAULT '',
       exportiert_pdf_pfad TEXT NOT NULL DEFAULT '',
+      original_dateiname TEXT NOT NULL DEFAULT '',
+      original_dateipfad TEXT NOT NULL DEFAULT '',
+      original_archiviert_am TEXT NOT NULL DEFAULT '',
+      original_archiv_pfad TEXT NOT NULL DEFAULT '',
+      original_archiv_fehler TEXT NOT NULL DEFAULT '',
       positionen TEXT NOT NULL DEFAULT '[]',
       erstellt_am TEXT NOT NULL DEFAULT '',
       aktualisiert_am TEXT NOT NULL DEFAULT ''
@@ -137,6 +142,11 @@ export function initializeDatabase() {
   ensureOrderColumn("auftrags_lager", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("uebernommen_von", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("uebernommen_am", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("original_dateiname", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("original_dateipfad", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("original_archiviert_am", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("original_archiv_pfad", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("original_archiv_fehler", "TEXT NOT NULL DEFAULT ''");
   migrateStorageWarehouseTables();
 }
 

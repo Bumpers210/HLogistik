@@ -1,6 +1,6 @@
 # HLogistik Functional Audit
 
-Stand: 2026-06-22 07:34:44 +02:00
+Stand: 2026-07-02 08:10:00 +02:00
 
 ## Grundlage
 
@@ -17,6 +17,12 @@ Dieser Audit wurde frisch aus dem aktuellen Arbeitsbaum erstellt. Alte Audit-, Q
 - Audit-Exportordner: `tmp/audit-workspace/Exporte`
 
 Der Arbeitsbaum war zu Beginn bereits uncommitted veraendert. Diese Aenderungen wurden als aktuelle Baseline behandelt und nicht zurueckgesetzt.
+
+Nachtrag 2026-07-02:
+
+- Der aktuelle Stabilitaetsstand enthaelt OCR-Kandidatenbewertung, Bestellhinweis-Import, Ladelisten-Anhang aus OCR-Nebenkandidaten, Originaldatei-Archivierung, Tablet-Direktexport ohne Reload, manuelle Einlagerung mit mehreren Positionen und Artikelstamm-Buchungsexport inklusive Buchungsfehlern.
+- `order-hint-rules.js` und `server/original-archive.mjs` sind aktive Code-Dateien.
+- Der aktuelle Clientstand ist `app.js?v=20260702-1`, Service Worker/Manifest `1.5.151`.
 
 ## Gepruefte Kernbereiche
 
@@ -51,11 +57,11 @@ Ergebnis nach Fix: Warenausgang normalisiert SSI-Stellplaetze jetzt konsistent w
 
 Geprueft wurden Auftragserstellung, 9021-0OUT-Kundenuebernahme, SSI-Auftragsnummer-Regel, Export-Sperre bei offenen Positionen und Loeschen nicht exportierter Auftraege.
 
-Ergebnis: Bei `toBin = 9021-0OUT` wird `customerName = 9021-0OUT` und `orderNumber = SSI` gesetzt. PDF-Export unvollstaendiger Auftraege wird mit einem klaren 400-Fehler blockiert. Nicht exportierte Auftraege koennen geloescht werden.
+Ergebnis: Sobald irgendeine Position `toBin = 9021-0OUT` enthaelt, wird `customerName = 9021-0OUT` und `orderNumber = SSI` gesetzt. Abweichende Nach-Lagerplaetze werden positionsbezogen als Zusatzbemerkung gehalten. PDF-Export unvollstaendiger Auftraege wird mit einem klaren 400-Fehler blockiert. Nicht exportierte Auftraege koennen geloescht werden.
 
 ### Einlagerung
 
-Geprueft wurden Validierungen im Codepfad fuer manuelle Einlagerungen und die bestehende SSI-HU-Regel. Die Regel bleibt: HU-Prefix `34006381000` wird nur fuer SSI-Kunden erzwungen, nicht allein anhand des Lagers.
+Geprueft wurden Validierungen im Codepfad fuer manuelle Einlagerungen und die bestehende SSI-HU-Regel. Die Regel bleibt: HU-Prefix `34006381000` wird nur fuer SSI-Kunden erzwungen, nicht allein anhand des Lagers. Manuelle Einlagerungen koennen mehrere Positionen gleicher Artikelnummer anlegen; neue Stellplatzfelder starten leer, `targetQty` bleibt leer und `actualQty` ist die erfasste Stueckzahl.
 
 ### Auswertungen
 
@@ -70,10 +76,14 @@ Ergebnis: Alle Report-Endpunkte liefern HTTP 200 und `ok: true`.
 
 ### Import / Export
 
-Geprueft wurden Export-Sperre bei offenen Positionen, PDF-Endpunkt vor Validierungsfehlern, Exportpfad in der Audit-Kopie und fehlende Exportdateien.
+Geprueft wurden Export-Sperre bei offenen Positionen, PDF-Endpunkt vor Validierungsfehlern, Exportpfad in der Audit-Kopie, fehlende Exportdateien, Originaldatei-Archivierung und QA-Artefaktfreiheit.
 
 CR-002 bleibt unveraendert: Der Kommissionierexport darf trotz Bestandsbuchungsfehlern abschliessen. Das ist aktuell bewusstes Uebergangsverhalten und wurde nicht behoben.
 
+Originaldateien werden nach erfolgreicher PDF-Erstellung und Exportstatus-Speicherung aus dem konfigurierten Importordner in den Archivordner verschoben. Archivfehler rollen die erzeugte PDF nicht zurueck.
+
+Der Artikelstamm-Buchungsexport liefert erfolgreiche Buchungen und Buchungsfehler read-only an den Browser; die XLSX-Datei wird clientseitig erzeugt.
+
 ## Gesamtstatus
 
-Die geprueften Kernworkflows sind nach den beiden Fixes in der Audit-Kopie stabil. Es bleiben offene Robustheits- und Betriebsrisiken, besonders bei korrupten SQLite-Dateien und Service-Worker-Offline-Fallbacks fuer einzelne Desktop-Unterseiten.
+Die geprueften Kernworkflows sind im aktuellen Stabilitaetsstand technisch gruen. Es bleiben offene Betriebsrisiken bei CR-002, automatischem SQLite-Restore, Passwort-Fallback und echtem Authentifizierungskonzept. Der Service-Worker-Fallback fuer bekannte Unterseiten ist umgesetzt.

@@ -1,30 +1,57 @@
 import { execFile } from "node:child_process";
-import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { escapeHtml, formatDate, sanitizeFileName, sanitizeFileNamePart, absoluteUrl } from "./helpers.mjs";
 
-export async function exportPdf(order, exportDir, tempDir, origin = "", copyDir = "") {
+export async function exportPdf(order, exportDir, tempDir, origin = "", copyDir = "", options = {}) {
+  const discard = options?.discard === true;
   const fileBase = pdfFileBase(order);
   const htmlPath = path.join(tempDir, `${fileBase}.html`);
-  const pdfPath = path.join(exportDir, `${fileBase}.pdf`);
-  await writeFile(htmlPath, printableHtml(order, `${fileBase}.pdf`), "utf8");
+  const pdfPath = path.join(discard ? tempDir : exportDir, `${fileBase}.pdf`);
+  await mkdir(tempDir, { recursive: true });
+  if (!discard) await mkdir(exportDir, { recursive: true });
 
-  const browser = findBrowser();
-  if (!browser) {
-    throw new Error("Kein Edge/Chrome gefunden. Bitte Microsoft Edge oder Chrome installieren.");
+  try {
+    await writeFile(htmlPath, printableHtml(order, `${fileBase}.pdf`), "utf8");
+
+    const browser = findBrowser();
+    if (!browser) {
+      throw new Error("Kein Edge/Chrome gefunden. Bitte Microsoft Edge oder Chrome installieren.");
+    }
+
+    await run(browser, ["--headless", "--disable-gpu", `--print-to-pdf=${pdfPath}`, pathToFileURL(htmlPath).href]);
+    await assertPdfCreated(pdfPath);
+    const copyPath = discard ? "" : await copyPdfToExportFolder(pdfPath, copyDir, `${fileBase}.pdf`);
+    if (copyPath) await assertPdfCreated(copyPath);
+
+    return {
+      file: `${fileBase}.pdf`,
+      path: discard ? "" : pdfPath,
+      copyPath,
+      url: discard ? "" : absoluteUrl(origin, `/exports/${encodeURIComponent(`${fileBase}.pdf`)}`),
+      ...(discard ? { discarded: true } : {})
+    };
+  } finally {
+    await safeUnlink(htmlPath);
+    if (discard) await safeUnlink(pdfPath);
   }
+}
 
-  await run(browser, ["--headless", "--disable-gpu", `--print-to-pdf=${pdfPath}`, pathToFileURL(htmlPath).href]);
-  const copyPath = await copyPdfToExportFolder(pdfPath, copyDir, `${fileBase}.pdf`);
-
-  return {
-    file: `${fileBase}.pdf`,
-    path: pdfPath,
-    copyPath,
-    url: absoluteUrl(origin, `/exports/${encodeURIComponent(`${fileBase}.pdf`)}`),
-  };
+async function assertPdfCreated(filePath) {
+  let fileStats;
+  try {
+    fileStats = await stat(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error("PDF wurde nicht erstellt. Auftrag wurde nicht als exportiert markiert.");
+    }
+    throw error;
+  }
+  if (!fileStats.isFile() || fileStats.size <= 0) {
+    throw new Error("PDF wurde leer erstellt. Auftrag wurde nicht als exportiert markiert.");
+  }
 }
 
 async function copyPdfToExportFolder(sourcePath, copyDir, fileName) {
@@ -34,6 +61,14 @@ async function copyPdfToExportFolder(sourcePath, copyDir, fileName) {
   await mkdir(copyDir, { recursive: true });
   await copyFile(sourcePath, targetPath);
   return targetPath;
+}
+
+async function safeUnlink(filePath) {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
 }
 
 function printableHtml(order, fileName) {
