@@ -34,6 +34,7 @@ async function run() {
   await guardAgainstUnsafeQaServerContext();
 
   const appSource = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const importDiagnosticsSource = await readFile(new URL("../app-import-diagnostics.js", import.meta.url), "utf8");
   check("ssi H3 O-Y shorthand normalizes to direct H3 bin", normalizeSsiStorageBin("H3T1") === "002-H3-T1", normalizeSsiStorageBin("H3T1"));
   check("ssi H3 O-Y shorthand accepts hyphen", normalizeSsiStorageBin("H3-T1") === "002-H3-T1", normalizeSsiStorageBin("H3-T1"));
   check("ssi H3 direct bin remains stable", normalizeSsiStorageBin("002-H3-T1") === "002-H3-T1", normalizeSsiStorageBin("002-H3-T1"));
@@ -287,7 +288,7 @@ async function run() {
   const pickingOcrReaderSource = extractFunctionSource(appSource, "async function readPickingPdfWithOcrCandidate");
   const pickingOcrCandidateSetSource = extractFunctionSource(appSource, "async function readPickingPdfOcrCandidateSet");
   const pickingOcrScoreSource = extractFunctionSource(appSource, "function scorePickingOcrCandidate");
-  const pickingDiagnosticsSource = extractFunctionSource(appSource, "function pickingImportDiagnostics");
+  const pickingDiagnosticsSource = extractFunctionSource(importDiagnosticsSource, "function pickingImportDiagnostics");
   const loadingSlipFallbackSource = extractFunctionSource(appSource, "async function readLoadingSlipOcrFallbackIfNeeded");
   const storageImportSource = extractFunctionSource(appSource, "async function chooseBestStorageImportText");
   const stockEnrichmentSource = extractFunctionSource(appSource, "async function applyStorageBinsFromArticleStock");
@@ -438,7 +439,7 @@ async function run() {
     });
   }
 
-  for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/app-import-line-helpers.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
+  for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/app-import-line-helpers.js", "/app-import-diagnostics.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
     const response = await request(path);
     check(`static ${path}`, response.status === 200, `${response.status}`);
   }
@@ -1611,6 +1612,8 @@ async function createAppParserContext() {
   vm.runInContext(manualStorageRulesCode, context, { filename: "shared/manual-storage-rules.js" });
   const importLineHelpersCode = await readFile(new URL("../app-import-line-helpers.js", import.meta.url), "utf8");
   vm.runInContext(importLineHelpersCode, context, { filename: "app-import-line-helpers.js" });
+  const importDiagnosticsCode = await readFile(new URL("../app-import-diagnostics.js", import.meta.url), "utf8");
+  vm.runInContext(importDiagnosticsCode, context, { filename: "app-import-diagnostics.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
   vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });

@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260702-3";
+const CLIENT_ASSET_VERSION = "20260702-4";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 6;
 const OCR_PRECISE_RENDER_SCALE = 7.5;
@@ -1311,14 +1311,7 @@ function isUsablePickingOcrSelection(selection) {
 }
 
 function pickingOcrCandidateDiagnostic(candidate) {
-  return {
-    label: candidate.label || "",
-    scale: candidate.scale || "",
-    dpi: candidate.dpi || "",
-    rotation: Number(candidate.rotation || 0),
-    score: Number(candidate.score || 0),
-    metrics: candidate.metrics || {}
-  };
+  return window.HLogistikImportDiagnostics.pickingOcrCandidateDiagnostic(candidate);
 }
 
 async function readPdfWithOcr(pdf, parseCandidate = parseOrderText, scoreCandidate = scoreOcrCandidate) {
@@ -1704,143 +1697,38 @@ function bestellscheinPageNotice(text, pdfPageCount) {
 }
 
 function pickingImportDiagnostics(text, parsed = {}, info = {}) {
-  const source = String(text || "");
-  const lines = source
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const loadingSlipLines = parseLoadingSlipLines(lines);
-  const pickingLines = loadingSlipLines.length ? linesBeforeLoadingSlip(lines) : lines;
-  const pickingSource = pickingLines.join("\n");
-  const warehouseLike = isWarehouseLikeText(pickingSource);
-  const loadingSlipAudit = auditLoadingSlipImport(lines, parsed.lines || []);
-  const loadingSlipExpected = Math.max(Number(info.loadingSlipExpected || 0), Number(loadingSlipAudit.expected || 0));
-
-  const parsedLineCount = Array.isArray(parsed.lines) ? parsed.lines.length : 0;
-  return {
-    source: info.source || "",
-    documentType: info.documentType || importDocumentType(source, parsed),
-    pdfPages: Number(info.pdfPages || 0),
-    ocrScale: info.ocrScale || "",
-    ocrDpi: info.ocrDpi || "",
-    ocrPreciseScale: info.ocrPreciseScale || "",
-    ocrPreciseDpi: info.ocrPreciseDpi || "",
-    ocrRotations: Array.isArray(info.ocrRotations) ? info.ocrRotations : [],
-    ocrScales: Array.isArray(info.ocrScales) ? info.ocrScales : [],
-    ocrDpis: Array.isArray(info.ocrDpis) ? info.ocrDpis : [],
-    ocrRotation: info.ocrRotation ?? "",
-    selectedCandidate: info.selectedCandidate || null,
-    ocrCandidates: Array.isArray(info.ocrCandidates) ? info.ocrCandidates : [],
-    ocrTimings: Array.isArray(info.ocrTimings) ? info.ocrTimings : [],
-    loadingSlipExpected,
-    loadingSlipAttached: loadingSlipAudit.attached,
-    loadingSlipIssues: loadingSlipAudit.issues,
-    loadingSlipCandidates: Array.isArray(info.loadingSlipCandidates) ? info.loadingSlipCandidates : [],
-    qualityScore: info.qualityScore ?? null,
-    minimumQualityScore: info.minimumQualityScore ?? PICKING_OCR_MINIMUM_SCORE,
-    qualityAccepted: info.qualityAccepted === true,
-    ocrError: info.ocrError || "",
-    binValidationApplied: info.binValidationApplied === true,
-    binCorrectionApplied: info.binCorrectionApplied === true,
-    binRuleNormalizationApplied: false,
-    textAvailable: Boolean(source.trim()),
-    textLength: source.length,
-    rawLineCount: lines.length,
-    pickingLineCount: pickingLines.length,
-    warehouseLike,
-    expectedWarehouseRows: warehouseLike ? countWarehouseCandidateRows(pickingLines) : 0,
-    expectedBestellscheinRows: countBestellscheinCandidateRows(pickingLines),
-    parsedLineCount,
-    discardedWarehouseRows: Math.max(0, (warehouseLike ? countWarehouseCandidateRows(pickingLines) : 0) - parsedLineCount),
-    orderNumberDetected: Boolean(String(parsed.orderNumber || "").trim()),
-    customerDetected: Boolean(String(parsed.customerName || "").trim())
-  };
+  return window.HLogistikImportDiagnostics.pickingImportDiagnostics(text, parsed, info, {
+    parseLoadingSlipLines,
+    linesBeforeLoadingSlip,
+    isWarehouseLikeText,
+    auditLoadingSlipImport,
+    importDocumentType,
+    countWarehouseCandidateRows,
+    countBestellscheinCandidateRows,
+    minimumQualityScore: PICKING_OCR_MINIMUM_SCORE
+  });
 }
 
 function logPickingImportDiagnostics(reason, diagnostics) {
-  console.warn("PDF-Import Diagnose", {
-    reason,
-    ...diagnostics
-  });
+  return window.HLogistikImportDiagnostics.logPickingImportDiagnostics(reason, diagnostics);
 }
 
 function pickingImportNoLinesMessage(text, diagnostics) {
-  if (!String(text || "").trim()) return "Keine lesbaren Inhalte gefunden.";
-  if (diagnostics?.warehouseLike) {
-    return "Text gelesen, aber keine Lageraufgaben-Position erkannt. Import abgebrochen.";
-  }
-  return "Text gelesen, aber keine Tabellenzeilen erkannt. Import abgebrochen.";
+  return window.HLogistikImportDiagnostics.pickingImportNoLinesMessage(text, diagnostics);
 }
 
 function buildPickingImportLineDiagnostics(rawLines, finalLines = rawLines) {
-  const sourceLines = Array.isArray(rawLines) ? rawLines : [];
-  const resultLines = Array.isArray(finalLines) ? finalLines : sourceLines;
-
-  return sourceLines.map((line, index) => {
-    const finalLine = resultLines[index] || line || {};
-    const rawFromBin = String(line?.fromBin || "").trim();
-    const finalFromBin = String(finalLine?.fromBin || "").trim();
-    const warehouseOrder = String(line?.warehouseOrder || finalLine?.warehouseOrder || "").trim();
-    const fromHandlingUnit = String(line?.fromHandlingUnit || finalLine?.fromHandlingUnit || "").trim();
-    const product = String(line?.product || finalLine?.product || "").trim();
-
-    return {
-      position: index + 1,
-      tableRowKey: [warehouseOrder, fromHandlingUnit, product].filter(Boolean).join(" | "),
-      warehouseOrder,
-      fromHandlingUnit,
-      product,
-      rawFromBin,
-      finalFromBin,
-      toBin: String(line?.toBin || finalLine?.toBin || "").trim(),
-      changed: rawFromBin !== finalFromBin,
-      reason: pickingImportBinDiagnosticReason(rawFromBin, finalFromBin)
-    };
-  });
+  return window.HLogistikImportDiagnostics.buildPickingImportLineDiagnostics(rawLines, finalLines);
 }
 
+// eslint-disable-next-line no-unused-vars
 function pickingImportBinDiagnosticReason(rawFromBin, finalFromBin) {
-  if (rawFromBin === finalFromBin) {
-    return rawFromBin
-      ? "Rohwert unveraendert uebernommen; keine Stellplatzvalidierung oder -korrektur angewendet."
-      : "Kein Rohwert aus Von-Lagerplatz erkannt; kein Stellplatz abgeleitet.";
-  }
-  if (!rawFromBin && finalFromBin) {
-    return "Finaler Stellplatz wurde gesetzt, obwohl kein Rohwert vorhanden war.";
-  }
-  if (rawFromBin && !finalFromBin) {
-    return "Finaler Stellplatz ist leer, Rohwert wurde nicht uebernommen.";
-  }
-  return "Finaler Stellplatz weicht vom Rohwert ab.";
+  return window.HLogistikImportDiagnostics.pickingImportBinDiagnosticReason(rawFromBin, finalFromBin);
 }
 
 function logPickingImportLineDiagnostics(diagnostics, importDiagnostics = {}) {
-  const positions = Array.isArray(diagnostics) ? diagnostics : [];
-  if (!positions.length) return;
-  console.info("PDF-Import Positionsdiagnose", {
-    source: importDiagnostics.source || "",
-    pdfPages: importDiagnostics.pdfPages || 0,
-    ocrScale: importDiagnostics.ocrScale || "",
-    ocrDpi: importDiagnostics.ocrDpi || "",
-    ocrPreciseScale: importDiagnostics.ocrPreciseScale || "",
-    ocrPreciseDpi: importDiagnostics.ocrPreciseDpi || "",
-    ocrRotations: importDiagnostics.ocrRotations || [],
-    ocrScales: importDiagnostics.ocrScales || [],
-    ocrDpis: importDiagnostics.ocrDpis || [],
-    ocrRotation: importDiagnostics.ocrRotation ?? "",
-    selectedCandidate: importDiagnostics.selectedCandidate || null,
-    ocrCandidates: importDiagnostics.ocrCandidates || [],
-    loadingSlipExpected: importDiagnostics.loadingSlipExpected ?? 0,
-    loadingSlipAttached: importDiagnostics.loadingSlipAttached ?? 0,
-    loadingSlipCandidates: importDiagnostics.loadingSlipCandidates || [],
-    qualityScore: importDiagnostics.qualityScore ?? null,
-    minimumQualityScore: importDiagnostics.minimumQualityScore ?? PICKING_OCR_MINIMUM_SCORE,
-    qualityAccepted: importDiagnostics.qualityAccepted === true,
-    binValidationApplied: false,
-    binCorrectionApplied: false,
-    note: "Keine Stellplatzvalidierung, keine Stellplatzkorrektur, kein Regelabgleich im PDF-Importpfad.",
-    positions
+  return window.HLogistikImportDiagnostics.logPickingImportLineDiagnostics(diagnostics, importDiagnostics, {
+    minimumQualityScore: PICKING_OCR_MINIMUM_SCORE
   });
 }
 

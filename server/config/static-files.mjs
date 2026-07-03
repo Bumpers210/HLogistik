@@ -4,6 +4,7 @@ export const PUBLIC_STATIC_FILES = new Set([
   ...APP_PAGE_PATHS,
   "/recover-order.html",
   "/app.js",
+  "/app-import-diagnostics.js",
   "/app-import-line-helpers.js",
   "/order-hint-rules.js",
   "/shared-ui.js",

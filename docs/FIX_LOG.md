@@ -1,6 +1,24 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-02 14:11:38 +02:00
+Stand: 2026-07-02 15:12:59 +02:00
+
+## 2026-07-02 - Wartbarkeit Phase 2C: Import-Diagnosehelfer ausgelagert
+
+Ausgangsproblem:
+
+Reine Import-/OCR-Diagnose- und Formatierungshelfer lagen weiter direkt in `app.js`, obwohl sie keine DOM-, Tesseract-, PDF.js-, Canvas-, Server- oder State-Mutation benoetigen.
+
+Umgesetzt:
+
+- Neues klassisches Browser-Skript `app-import-diagnostics.js` mit Namespace `window.HLogistikImportDiagnostics`.
+- `pickingImportDiagnostics`, `logPickingImportDiagnostics`, `pickingImportNoLinesMessage`, `buildPickingImportLineDiagnostics`, `pickingImportBinDiagnosticReason`, `logPickingImportLineDiagnostics` und `pickingOcrCandidateDiagnostic` ausgelagert.
+- Die bisherigen Funktionsnamen bleiben in `app.js` als duenne Wrapper erhalten und injizieren nur die bisherigen Parser-/Audit-Abhaengigkeiten.
+- Neues Skript in `index.html`, `server/config/static-files.mjs`, `service-worker.js` und `scripts/qa-api-matrix.mjs` eingebunden.
+- Asset-Version `app.js?v=20260702-4`, neues Helper-Skript `app-import-diagnostics.js?v=20260702-4`, Service-Worker-/Manifest-Version `1.5.154`.
+
+Validierung:
+
+- Mechanische Wartbarkeitsaenderung ohne Parser-Extract und ohne Aenderung an OCR-/Import-Hauptpipeline, Kandidatenauswahl, Export-, Tablet-/Offline-, Datenbank- oder CR-002-Ablauf.
 
 ## 2026-07-02 - Wartbarkeit Phase 2B: Import-Zeilenhelfer ausgelagert
 

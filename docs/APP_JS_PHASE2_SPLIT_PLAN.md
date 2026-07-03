@@ -1,6 +1,6 @@
 # APP_JS Phase 2 Split Plan
 
-Stand: 2026-07-02
+Stand: 2026-07-02 15:12:59 +02:00
 
 ## Kurzfazit
 
@@ -152,6 +152,50 @@ Abbruchkriterien:
 
 ### Schritt 2C: Naechster Extract
 
+Extract reiner Import-/OCR-Diagnosehelfer nach `app-import-diagnostics.js`.
+
+Ziel:
+
+- Diagnoseformatierung aus `app.js` loesen, ohne Parser, OCR-Hauptpipeline, Kandidatenauswahl oder Import-State-Mutation zu verschieben.
+
+Betroffene Funktionen:
+
+- `pickingImportDiagnostics`
+- `logPickingImportDiagnostics`
+- `pickingImportNoLinesMessage`
+- `buildPickingImportLineDiagnostics`
+- `pickingImportBinDiagnosticReason`
+- `logPickingImportLineDiagnostics`
+- `pickingOcrCandidateDiagnostic`
+
+Neue Datei:
+
+- `app-import-diagnostics.js`
+
+Abhaengigkeiten:
+
+- `app-import-line-helpers.js`
+- uebergebene Parser-/Audit-Helfer aus `app.js`
+- `console` fuer die bisherigen Diagnoseausgaben
+
+Risiko:
+
+- Niedrig bis mittel. Die Funktionen formatieren Diagnosewerte und Konsolenausgaben, duerfen aber keine Feldwerte, Scores oder Kandidaten veraendern.
+
+Benoetigte Tests:
+
+- QA-Matrix inklusive Importdiagnose, Positionsdiagnose, Ladelisten-Diagnose und Roh-/Final-Stellplatzdiagnose.
+- Browser-Smoke Desktop.
+- Pruefung, dass `PDF-Import Diagnose` und `PDF-Import Positionsdiagnose` weiterhin erscheinen.
+
+Abbruchkriterien:
+
+- QA-Harness kann `app.js` nicht mehr laden.
+- Diagnosefelder fehlen oder enthalten andere Werte.
+- OCR-Kandidatenbewertung, Importpositionen, Mengen, Nach-Lagerplatz oder Ladelisten aendern sich.
+
+### Schritt 2D: Spaeterer Extract
+
 Extract der reinen Kommissionier-Textparser nach `app-picking-parser.js`.
 
 Ziel:
@@ -187,6 +231,7 @@ Abhaengigkeiten:
 - `order-hint-rules.js`
 - `shared/storage-hu-rules.js`
 - `app-import-line-helpers.js`
+- `app-import-diagnostics.js`
 - `createLine` oder ein injizierter Line-Factory-Wrapper
 
 Risiko:
@@ -205,7 +250,7 @@ Abbruchkriterien:
 - Nach-Lagerplatz, Kunde, Bestellhinweis oder Ladeliste weichen ab.
 - Mengen werden durch den Extract neu angepasst oder anders korrigiert.
 
-### Schritt 2D: Spaeterer Extract
+### Schritt 2E: Spaeterer Extract
 
 Extract der Einlagerungsparser und kleiner State-Helfer.
 
@@ -256,7 +301,7 @@ Abbruchkriterien:
 - HU/LE-Felder werden vor Freigabe nicht mehr bearbeitbar.
 - Manuelle Einlagerungspositionen oder Mengen unterscheiden sich.
 
-### Schritt 2E: Bewusst noch nicht anfassen
+### Schritt 2F: Bewusst noch nicht anfassen
 
 In dieser Phase nicht extrahieren:
 
