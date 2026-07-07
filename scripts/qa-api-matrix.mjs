@@ -35,12 +35,26 @@ async function run() {
 
   const appSource = await readFile(new URL("../app.js", import.meta.url), "utf8");
   const importDiagnosticsSource = await readFile(new URL("../app-import-diagnostics.js", import.meta.url), "utf8");
+  const storageBinRulesSource = await readFile(new URL("../shared/storage-bin-rules.js", import.meta.url), "utf8");
   check("ssi H3 O-Y shorthand normalizes to direct H3 bin", normalizeSsiStorageBin("H3T1") === "002-H3-T1", normalizeSsiStorageBin("H3T1"));
   check("ssi H3 O-Y shorthand accepts hyphen", normalizeSsiStorageBin("H3-T1") === "002-H3-T1", normalizeSsiStorageBin("H3-T1"));
   check("ssi H3 direct bin remains stable", normalizeSsiStorageBin("002-H3-T1") === "002-H3-T1", normalizeSsiStorageBin("002-H3-T1"));
   check("ssi A shelf normalizes to H1", normalizeSsiStorageBin("AA8C3") === "002-H1-SAA8C3", normalizeSsiStorageBin("AA8C3"));
   check("ssi AT shelf normalizes to H1", normalizeSsiStorageBin("AT8A1") === "002-H1-SAT8A1", normalizeSsiStorageBin("AT8A1"));
   check("ssi AU shelf normalizes to H4", normalizeSsiStorageBin("AU8A1") === "002-H4-SAU8A1", normalizeSsiStorageBin("AU8A1"));
+  check(
+    "picking source-bin rule accepts valid H7 shelf without review",
+    (await pickingBinShapeFixture("002-H7-S12A3")).shape.status === "valid" &&
+      (await pickingBinShapeFixture("002-H7-S12A3")).review.fromBinReviewRequired === false,
+    JSON.stringify(await pickingBinShapeFixture("002-H7-S12A3"))
+  );
+  check(
+    "picking source-bin rule keeps OCR-suspicious H3 shelf under review",
+    (await pickingBinShapeFixture("002-H3-SOSA3")).shape.status === "suspicious" &&
+      (await pickingBinShapeFixture("002-H3-SOSA3")).shape.suggestedCandidates.includes("002-H3-SO5A3") &&
+      (await pickingBinShapeFixture("002-H3-SOSA3")).review.fromBinReviewRequired === true,
+    JSON.stringify(await pickingBinShapeFixture("002-H3-SOSA3"))
+  );
   check(
     "destination customer rule prefers 9021-0OUT from any line",
     destinationCustomerNameForLines([{ toBin: "9020-ANSBACH" }, { toBin: "9021-0OUT" }]) === "9021-0OUT",
@@ -110,6 +124,62 @@ async function run() {
       siBestellscheinOcrCandidate.parsed.customerName === "030 / 012 Hummel Logistik SI" &&
       siBestellscheinOcrCandidate.parsed.customerGroupKey === "030 012 HUMMEL LOGISTIK SI",
     JSON.stringify(siBestellscheinOcrCandidate)
+  );
+
+  const siBestellscheinOrientation = await siBestellscheinOrientationProbeFixture();
+  check(
+    "picking image-only SI Bestellschein orientation probe selects rotated page without source bin",
+    siBestellscheinOrientation.selectedOrientation === 90 &&
+      siBestellscheinOrientation.selectedCandidate?.siLike === true &&
+      siBestellscheinOrientation.selectedCandidate?.bestellscheinCompleteCount === 5 &&
+      siBestellscheinOrientation.pageNotice.includes("Bestellschein nennt 2 Seiten") &&
+      siBestellscheinOrientation.pageNotice.includes("PDF enthaelt 1 Seite"),
+    JSON.stringify(siBestellscheinOrientation)
+  );
+
+  const siBestellscheinTieBreak = await siBestellscheinOrientationTieBreakFixture();
+  check(
+    "picking image-only SI Bestellschein orientation tie-break uses parser quality",
+    siBestellscheinTieBreak.probeSelectedOrientation === "" &&
+      siBestellscheinTieBreak.selectedRotation === 180 &&
+      siBestellscheinTieBreak.selectedAccepted === true &&
+      siBestellscheinTieBreak.selectedLines === 2 &&
+      siBestellscheinTieBreak.selectedOrderNumber === "60390-Service Ecke" &&
+      siBestellscheinTieBreak.pageNotice.includes("Bestellschein nennt 2 Seiten"),
+    JSON.stringify(siBestellscheinTieBreak)
+  );
+
+  const siSystemBinUnique = await siSystemFromBinFillFixture("unique");
+  check(
+    "SI Bestellschein fills missing source bin from unique LE/HU system match",
+    siSystemBinUnique.patch.fromBin === "002-H7-S12A3" &&
+      siSystemBinUnique.patch.fromBinSystemLookupStatus === "applied" &&
+      siSystemBinUnique.patch.fromBinReviewRequired === false,
+    JSON.stringify(siSystemBinUnique)
+  );
+  const siSystemBinAmbiguous = await siSystemFromBinFillFixture("ambiguous");
+  check(
+    "SI Bestellschein keeps source bin empty and review open for ambiguous LE/HU system match",
+    !String(siSystemBinAmbiguous.patch.fromBin || "").trim() &&
+      siSystemBinAmbiguous.patch.fromBinSystemLookupStatus === "ambiguous" &&
+      siSystemBinAmbiguous.patch.fromBinReviewRequired === true,
+    JSON.stringify(siSystemBinAmbiguous)
+  );
+  const siSystemBinMissing = await siSystemFromBinFillFixture("missing");
+  check(
+    "SI Bestellschein keeps source bin empty and review open when LE/HU has no system match",
+    !String(siSystemBinMissing.patch.fromBin || "").trim() &&
+      siSystemBinMissing.patch.fromBinSystemLookupStatus === "no-match" &&
+      siSystemBinMissing.patch.fromBinReviewRequired === true,
+    JSON.stringify(siSystemBinMissing)
+  );
+  const siSystemBinKeepsValid = await siSystemFromBinFillFixture("valid-existing");
+  check(
+    "SI Bestellschein does not overwrite an already valid source bin",
+    !Object.prototype.hasOwnProperty.call(siSystemBinKeepsValid.patch, "fromBin") &&
+      siSystemBinKeepsValid.patch.fromBinSystemLookupStatus === "kept-existing" &&
+      siSystemBinKeepsValid.applied === false,
+    JSON.stringify(siSystemBinKeepsValid)
   );
 
   const pdfTextFastAccept = await pdfTextFastAcceptFixture();
@@ -228,6 +298,105 @@ async function run() {
     JSON.stringify(rawBinWarehouseImport.diagnostics)
   );
 
+  const diagnosticExpansion = await pickingDiagnosticExpansionFixture();
+  check(
+    "picking import diagnostics expose raw rows, parser path and field safety",
+    diagnosticExpansion.diagnostics.parserPath === "lageraufgabe-normal-or-columns" &&
+      diagnosticExpansion.diagnostics.expectedTableRows === 2 &&
+      diagnosticExpansion.diagnostics.importedPositionCount === 2 &&
+      diagnosticExpansion.diagnostics.positionFieldDiagnostics.length === 2 &&
+      diagnosticExpansion.diagnostics.positionFieldDiagnostics[0]?.rawSegment.includes("002-H3-SO4D1") &&
+      diagnosticExpansion.diagnostics.positionFieldDiagnostics[0]?.fieldSafety?.fromBin === "sicher" &&
+      diagnosticExpansion.diagnostics.loadingSlipDiagnostics.detectedInSecondaryCandidate === true &&
+      diagnosticExpansion.lineDiagnostics[0]?.parserPath === "lageraufgabe-normal-or-columns" &&
+      diagnosticExpansion.lineDiagnostics[0]?.fieldSafety?.product === "sicher" &&
+      !Object.prototype.hasOwnProperty.call(diagnosticExpansion.parsed.lines[0], "rawSegment") &&
+      !Object.prototype.hasOwnProperty.call(diagnosticExpansion.parsed.lines[0], "fieldSafety"),
+    JSON.stringify({
+      diagnostics: diagnosticExpansion.diagnostics,
+      lineDiagnostics: diagnosticExpansion.lineDiagnostics,
+      parsedLine: diagnosticExpansion.parsed.lines[0]
+    })
+  );
+
+  const suspiciousBinDiagnostic = await pickingSuspiciousBinDiagnosticFixture();
+  check(
+    "picking import diagnostics mark suspicious SSI source-bin shape without changing import value",
+    suspiciousBinDiagnostic.parsed.lines[0]?.product === "806713" &&
+      suspiciousBinDiagnostic.parsed.lines[0]?.fromBin === "002-H3-SOSA3" &&
+      !String(suspiciousBinDiagnostic.parsed.lines[0]?.binWarning || "").trim() &&
+      !Object.prototype.hasOwnProperty.call(suspiciousBinDiagnostic.parsed.lines[0], "fromBinSuggestedCandidates") &&
+      suspiciousBinDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinShapeStatus === "suspicious" &&
+      suspiciousBinDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinSuggestedCandidates.includes("002-H3-SO5A3") &&
+      suspiciousBinDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinReviewRequired === true &&
+      suspiciousBinDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinReviewBlocksRelease === true &&
+      suspiciousBinDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinReviewBlocksExport === true &&
+      suspiciousBinDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinManualCorrectionClearsWarning === true &&
+      suspiciousBinDiagnostic.diagnostics.importWarningReasons.includes("verdaechtiger-von-lagerplatz") &&
+      suspiciousBinDiagnostic.lineDiagnostics[0]?.fromBinShapeStatus === "suspicious" &&
+      suspiciousBinDiagnostic.lineDiagnostics[0]?.fromBinSuggestedCandidates.includes("002-H3-SO5A3") &&
+      suspiciousBinDiagnostic.lineDiagnostics[0]?.fromBinReviewRequired === true &&
+      suspiciousBinDiagnostic.lineDiagnostics[0]?.fromBinReviewBlocksRelease === true &&
+      suspiciousBinDiagnostic.lineDiagnostics[0]?.fromBinReviewBlocksExport === true &&
+      suspiciousBinDiagnostic.lineDiagnostics[0]?.fromBinManualCorrectionClearsWarning === true &&
+      suspiciousBinDiagnostic.lineDiagnostics[0]?.fieldSafety?.fromBin === "verdaechtig",
+    JSON.stringify(suspiciousBinDiagnostic)
+  );
+
+  const suspiciousReviewLines = appParserContext.__applyFromBinReviewWarnings(suspiciousBinDiagnostic.parsed.lines);
+  const correctedReviewLines = appParserContext.__applyFromBinReviewWarnings([
+    { ...suspiciousReviewLines[0], fromBin: "002-H3-SO9A3" }
+  ]);
+  const pickedSuspiciousReviewLines = suspiciousReviewLines.map((line) => ({ ...line, picked: true }));
+  const pickedCorrectedReviewLines = correctedReviewLines.map((line) => ({ ...line, picked: true }));
+  check(
+    "picking import marks suspicious source bin for manual review and keeps raw value",
+    suspiciousReviewLines[0]?.fromBin === "002-H3-SOSA3" &&
+      suspiciousReviewLines[0]?.fromBinReviewRequired === true &&
+      suspiciousReviewLines[0]?.fromBinReviewBlocksRelease === true &&
+      suspiciousReviewLines[0]?.fromBinReviewBlocksExport === true &&
+      suspiciousReviewLines[0]?.fromBinManualCorrectionClearsWarning === true &&
+      suspiciousReviewLines[0]?.binWarningType === "from-bin-review" &&
+      /OCR-unsicher: 002-H3-SOSA3/.test(suspiciousReviewLines[0]?.binWarning || "") &&
+      appParserContext.__orderExportCompletionMessage({ lines: pickedSuspiciousReviewLines }) === appParserContext.__fromBinReviewBlockMessage(),
+    JSON.stringify({
+      reviewLine: suspiciousReviewLines[0],
+      exportMessage: appParserContext.__orderExportCompletionMessage({ lines: pickedSuspiciousReviewLines })
+    })
+  );
+  check(
+    "manual source-bin correction clears OCR review warning without auto-changing import fields",
+    correctedReviewLines[0]?.fromBin === "002-H3-SO9A3" &&
+      correctedReviewLines[0]?.fromBinReviewRequired === false &&
+      !String(correctedReviewLines[0]?.binWarning || "").trim() &&
+      appParserContext.__orderExportCompletionMessage({ lines: pickedCorrectedReviewLines }) === "",
+    JSON.stringify({
+      correctedLine: correctedReviewLines[0],
+      exportMessage: appParserContext.__orderExportCompletionMessage({ lines: pickedCorrectedReviewLines })
+    })
+  );
+
+  const suspiciousBinRecheckDiagnostic = await pickingSuspiciousBinRecheckDiagnosticFixture();
+  check(
+    "picking import diagnostics expose cell recheck suggestion without auto-applying source bin",
+    suspiciousBinRecheckDiagnostic.parsed.lines[0]?.fromBin === "002-H3-SOSA3" &&
+      !Object.prototype.hasOwnProperty.call(suspiciousBinRecheckDiagnostic.parsed.lines[0], "fromBinRecheckSuggestion") &&
+      suspiciousBinRecheckDiagnostic.diagnostics.fromBinRechecks.length === 1 &&
+      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckAttempted === true &&
+      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckSuggestion === "002-H3-SO9A3" &&
+      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckAutoApplied === false &&
+      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckAttempted === true &&
+      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckSource === "word-bbox" &&
+      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckBestCandidate === "002-H3-SO9A3" &&
+      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckAutoApplied === false &&
+      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.fromBinRecheckSuggestion === "002-H3-SO9A3" &&
+      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.fromBinRecheckAutoApplied === false &&
+      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.fromBinVisualRecheckBestCandidate === "002-H3-SO9A3" &&
+      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.fromBinVisualRecheckAutoApplied === false &&
+      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.finalFromBin === "002-H3-SOSA3",
+    JSON.stringify(suspiciousBinRecheckDiagnostic)
+  );
+
   const ocrConfusedBinImport = await parseWarehouseOcrConfusedBinFixture();
   check(
     "picking import keeps OCR-confused SSI source bins unchanged",
@@ -294,7 +463,8 @@ async function run() {
   const stockEnrichmentSource = extractFunctionSource(appSource, "async function applyStorageBinsFromArticleStock");
   check(
     "picking PDF import keeps OCR scoring and permits SI Bestellschein PDF text",
-    pickingImportSource.includes("readPickingPdfWithOcrCandidate(pdf)") &&
+    pickingImportSource.includes("readPickingPdfWithOcrCandidate(pdf,") &&
+      pickingImportSource.includes("imageOnlyPdf") &&
       pickingImportSource.includes("isAcceptedSiBestellscheinImportCandidate") &&
       pickingImportSource.includes("isAcceptedPdfTextImportCandidate") &&
       pickingImportSource.includes("pdf-text") &&
@@ -312,10 +482,13 @@ async function run() {
       appSource.includes("PICKING_OCR_FAST_ACCEPT_SCORE") &&
       pickingOcrReaderSource.includes("createOcrWorker") &&
       pickingOcrReaderSource.includes("candidateMap") &&
+      pickingOcrReaderSource.includes("createPickingOcrBudget") &&
+      pickingOcrReaderSource.includes("shouldRunPickingRotationFallback") &&
       pickingOcrReaderSource.includes("worker.terminate") &&
       pickingOcrCandidateSetSource.includes("candidateMap") &&
       pickingOcrCandidateSetSource.includes("rotationCandidates") &&
       pickingOcrCandidateSetSource.includes("processedPages") &&
+      pickingOcrCandidateSetSource.includes("assertPickingOcrBudget") &&
       appSource.includes("pickingOcrCandidateDiagnostic"),
     `${pickingOcrReaderSource}\n${pickingOcrCandidateSetSource}`
   );
@@ -323,18 +496,38 @@ async function run() {
     "picking PDF import checks precise upright OCR before rotation fallback",
     pickingOcrReaderSource.includes("uprightResult") &&
       pickingOcrReaderSource.includes("rotations-fallback") &&
-      pickingOcrReaderSource.indexOf("uprightResult") < pickingOcrReaderSource.indexOf("fullResult") &&
-      pickingOcrReaderSource.indexOf("fullResult") < pickingOcrReaderSource.indexOf("rotations-fallback"),
+      pickingOcrReaderSource.includes("const preciseResult") &&
+      pickingOcrReaderSource.includes("shouldRunPickingRotationFallback") &&
+      pickingOcrReaderSource.includes("const fallbackRotations") &&
+      pickingOcrReaderSource.includes("const fullResult") &&
+      pickingOcrReaderSource.indexOf("const preciseResult") < pickingOcrReaderSource.indexOf("shouldRunPickingRotationFallback") &&
+      pickingOcrReaderSource.indexOf("shouldRunPickingRotationFallback") < pickingOcrReaderSource.indexOf("const fallbackRotations") &&
+      pickingOcrReaderSource.indexOf("const fallbackRotations") < pickingOcrReaderSource.indexOf("const fullResult"),
     pickingOcrReaderSource
   );
   check(
     "picking PDF import can scan rotations only for loading slips",
     loadingSlipFallbackSource.includes("shouldRunLoadingSlipOcrFallback") &&
       loadingSlipFallbackSource.includes("readPickingPdfOcrCandidateSet") &&
-      loadingSlipFallbackSource.includes("ladeliste-rotationen") &&
+      loadingSlipFallbackSource.includes("PICKING_OCR_LOADING_SLIP_ROTATIONS") &&
+      loadingSlipFallbackSource.includes("ladeliste-gezielt") &&
+      loadingSlipFallbackSource.includes("loadingSlipWarning") &&
       appSource.includes("collectLoadingSlipLinesFromOcrCandidates") &&
       appSource.includes("appendLoadingSlipLinesToParsed"),
     loadingSlipFallbackSource
+  );
+  check(
+    "picking PDF import has adaptive OCR budget diagnostics",
+    appSource.includes("PICKING_OCR_MAX_STEPS") &&
+      appSource.includes("PICKING_OCR_MAX_MS") &&
+      appSource.includes("ocrSkippedSteps") &&
+      appSource.includes("ocrBudget") &&
+      appSource.includes("budgetExceeded") &&
+      pickingDiagnosticsSource.includes("ocrStepCount") &&
+      pickingDiagnosticsSource.includes("ocrSkippedSteps") &&
+      pickingDiagnosticsSource.includes("ocrBudget") &&
+      pickingDiagnosticsSource.includes("ocrAbortReason"),
+    `${pickingOcrReaderSource}\n${pickingDiagnosticsSource}`
   );
   check(
     "storage PDF import accepts clean PDF text before OCR",
@@ -359,8 +552,68 @@ async function run() {
       pickingDiagnosticsSource.includes("loadingSlipCandidates") &&
       pickingDiagnosticsSource.includes("loadingSlipAttached") &&
       pickingDiagnosticsSource.includes("qualityScore") &&
-      pickingDiagnosticsSource.includes("qualityAccepted"),
+      pickingDiagnosticsSource.includes("qualityAccepted") &&
+      pickingDiagnosticsSource.includes("parserPath") &&
+      pickingDiagnosticsSource.includes("positionFieldDiagnostics") &&
+      pickingDiagnosticsSource.includes("imageOnlyPdf") &&
+      pickingDiagnosticsSource.includes("orientationProbeAttempted") &&
+      pickingDiagnosticsSource.includes("orientationProbeCandidates") &&
+      pickingDiagnosticsSource.includes("selectedOrientation") &&
+      pickingDiagnosticsSource.includes("bestellscheinPageNotice") &&
+      pickingDiagnosticsSource.includes("siBestellscheinAccepted") &&
+      importDiagnosticsSource.includes("fromBinShapeStatus") &&
+      importDiagnosticsSource.includes("pickingFromBinShapeDiagnostic") &&
+      importDiagnosticsSource.includes("fromBinSuggestedCandidates") &&
+      importDiagnosticsSource.includes("fromBinReviewRequired") &&
+      importDiagnosticsSource.includes("fromBinReviewBlocksRelease") &&
+      importDiagnosticsSource.includes("fromBinReviewBlocksExport") &&
+      importDiagnosticsSource.includes("fromBinManualCorrectionClearsWarning") &&
+      importDiagnosticsSource.includes("fromBinRecheckAttempted") &&
+      importDiagnosticsSource.includes("fromBinRecheckCandidates") &&
+      importDiagnosticsSource.includes("fromBinRecheckSuggestion") &&
+      importDiagnosticsSource.includes("fromBinVisualRecheckAttempted") &&
+      importDiagnosticsSource.includes("fromBinVisualRecheckBestCandidate") &&
+      pickingDiagnosticsSource.includes("fromBinRechecks") &&
+      pickingDiagnosticsSource.includes("loadingSlipDiagnostics") &&
+      pickingDiagnosticsSource.includes("loadingSlipFallbackStatus") &&
+      pickingDiagnosticsSource.includes("importWarningReasons"),
     pickingDiagnosticsSource
+  );
+  check(
+    "picking UI blocks release and PDF export while OCR source-bin review is open",
+    appSource.includes("FROM_BIN_REVIEW_BLOCK_MESSAGE") &&
+      appSource.includes("fromBinReviewPatchForValue") &&
+      appSource.includes("applyFromBinReviewWarnings") &&
+      appSource.includes("hasOpenFromBinReviewWarnings") &&
+      appSource.includes("fromBinReviewBlockMessage") &&
+      appSource.includes("Export/Freigabe gesperrt: OCR-unsichere Von-Lagerplätze prüfen."),
+    "source-bin review block markers missing"
+  );
+  check(
+    "picking PDF import has targeted SI Bestellschein orientation probe",
+    appSource.includes("readSiBestellscheinOrientationProbe") &&
+      appSource.includes("SI_BESTELLSCHEIN_ORIENTATION_PROBE_ROTATIONS") &&
+      appSource.includes("selectSiBestellscheinOrientationCandidate") &&
+      appSource.includes("selectedOrientation") &&
+      appSource.includes("siBestellscheinAccepted") &&
+      appSource.includes("PDF enthaelt"),
+    "SI Bestellschein orientation probe markers missing"
+  );
+  check(
+    "picking PDF import has targeted suspicious source-bin cell recheck",
+    appSource.includes("readPickingFromBinCellRecheck") &&
+      appSource.includes("tessedit_char_whitelist") &&
+      appSource.includes("PICKING_FROM_BIN_RECHECK_WHITELIST") &&
+      appSource.includes("SINGLE_WORD") &&
+      appSource.includes("fromBinRechecks") &&
+      appSource.includes("pdfjs-cell-crop") &&
+      appSource.includes("ocr-line-bbox-crop") &&
+      appSource.includes("pickingVisualTextRows") &&
+      appSource.includes("pickingVisualFromBinCellBbox") &&
+      appSource.includes("findPickingPdfTextCellRecheck") &&
+      importDiagnosticsSource.includes("fromBinRecheckAutoApplied: false") &&
+      importDiagnosticsSource.includes("fromBinVisualRecheckAutoApplied: false"),
+    "cell recheck source markers missing"
   );
   check(
     "picking PDF import disables source-bin repair scan",
@@ -370,14 +623,19 @@ async function run() {
     pickingCandidateSource
   );
   check(
-    "picking PDF import does not call SSI storage-bin rules",
-    !appSource.includes("normalizeSsiStorageBin"),
-    "app.js contains normalizeSsiStorageBin"
+    "picking source-bin review uses shared browser storage-bin rules",
+    appSource.includes("HLogistikStorageBinRules") &&
+      importDiagnosticsSource.includes("storageBinRules") &&
+      storageBinRulesSource.includes("normalizeSsiStorageBin") &&
+      storageBinRulesSource.includes("002-H7-S") &&
+      storageBinRulesSource.includes("pickingFromBinShapeDiagnostic"),
+    "shared storage-bin rule markers missing"
   );
   check(
-    "picking stock enrichment does not replace imported source bin",
-    !stockEnrichmentSource.includes("fromBin: binChanged") &&
-      !stockEnrichmentSource.includes("applied += 1") &&
+    "picking stock enrichment only fills source bin through gated SI system-fill path",
+    stockEnrichmentSource.includes("allowSiFromBinFill") &&
+      stockEnrichmentSource.includes("currentOrderWarehouse() === \"SI\"") &&
+      stockEnrichmentSource.includes("siSystemFromBinPatchForLine") &&
       stockEnrichmentSource.includes("fromBin: line.fromBin"),
     stockEnrichmentSource
   );
@@ -1608,6 +1866,8 @@ async function createAppParserContext() {
   vm.runInContext(orderHintRulesCode, context, { filename: "order-hint-rules.js" });
   const storageHuRulesCode = await readFile(new URL("../shared/storage-hu-rules.js", import.meta.url), "utf8");
   vm.runInContext(storageHuRulesCode, context, { filename: "shared/storage-hu-rules.js" });
+  const storageBinRulesCode = await readFile(new URL("../shared/storage-bin-rules.js", import.meta.url), "utf8");
+  vm.runInContext(storageBinRulesCode, context, { filename: "shared/storage-bin-rules.js" });
   const manualStorageRulesCode = await readFile(new URL("../shared/manual-storage-rules.js", import.meta.url), "utf8");
   vm.runInContext(manualStorageRulesCode, context, { filename: "shared/manual-storage-rules.js" });
   const importLineHelpersCode = await readFile(new URL("../app-import-line-helpers.js", import.meta.url), "utf8");
@@ -1622,7 +1882,7 @@ async function createAppParserContext() {
   vm.runInContext(pickingParserCode, context, { filename: "app-picking-parser.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
-  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
+  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
   return context;
 }
 
@@ -1633,6 +1893,42 @@ function pickingTextFixture(orderHintBlock, orderNumber = "60126") {
     "Kunde: QA Importkunde",
     "1 123456 Serviceartikel 5 Stk"
   ].filter(Boolean).join("\n");
+}
+
+async function pickingBinShapeFixture(value) {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  return {
+    value,
+    shape: appParserContext.__pickingFromBinShapeDiagnostic(value),
+    review: appParserContext.__fromBinReviewDiagnosticForValue(value)
+  };
+}
+
+async function siSystemFromBinFillFixture(mode) {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const line = {
+    product: "1067349",
+    fromHandlingUnit: "72638937",
+    fromBin: mode === "valid-existing" ? "002-H7-S12A3" : "",
+    targetQty: "85",
+    actualQty: "85",
+    unit: "Stk",
+    autoPositionNotes: {}
+  };
+  const locations = {
+    unique: [
+      { materialnummer: "1067349", leNummer: "72638937", lagerplatz: "002-H7-S12A3", mengeStueck: 85 }
+    ],
+    ambiguous: [
+      { materialnummer: "1067349", leNummer: "72638937", lagerplatz: "002-H7-S12A3", mengeStueck: 85 },
+      { materialnummer: "1067349", leNummer: "72638937", lagerplatz: "002-H7-S13A1", mengeStueck: 85 }
+    ],
+    missing: [],
+    "valid-existing": [
+      { materialnummer: "1067349", leNummer: "72638937", lagerplatz: "002-H7-S13A1", mengeStueck: 85 }
+    ]
+  }[mode] || [];
+  return appParserContext.__siSystemFromBinPatchForLine(line, locations);
 }
 
 async function parseRefinedBestellscheinOcrFixture() {
@@ -1710,6 +2006,141 @@ async function siBestellscheinOcrCandidateFixture() {
     score: candidate.score,
     metrics: candidate.metrics,
     parsed: candidate.parsed
+  };
+}
+
+async function siBestellscheinOrientationProbeFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const rotatedText = [
+    "Bestellschein Nr.: 60389",
+    "Auslagerung: 030 / 012 Hummel Logistik SI",
+    "Seite: 1 (von 2)",
+    "Bestellhinweis: Service Ecke",
+    "Entnahmeanweisungen: von 012 ( Hummel Logistik SI ) an 421 ( Palettierung )",
+    "1067349 Korpus fuer 77/35 M - Vers.1 85 ST 72638937 DE",
+    "1067350 Sockelschlitten fuer 77/35 M - Vers.1 10 ST 72638937 DE",
+    "1067350 Sockelschlitten fuer 77/35 M - Vers.1 14 ST 72638937 DE",
+    "1067353 Stuelpkarton fuer 77/35 M - Vers.1 250 ST 72638937 DE",
+    "1075751 Umkarton XS Thekendisplay 600 ST 72638936 DE"
+  ].join("\n");
+  const garbledText = "sr SYS MY MAN ITI 1616/01/210 Ze|diabe 30 9E68E92 IS 009 Aejdsipuexeyl";
+  const partialText = [
+    "Bestellschein Nr.: 60389",
+    "Auslagerung: 030 / 012 Hummel Logistik SI",
+    "Seite: 1 (von 2)",
+    "1067349 Korpus fuer 77/35 M - Vers.1 85 ST 72638937 DE"
+  ].join("\n");
+  const candidates = [
+    appParserContext.__siBestellscheinOrientationProbeCandidate(garbledText, { rotation: 0, scale: 2, dpi: "180" }),
+    appParserContext.__siBestellscheinOrientationProbeCandidate(rotatedText, { rotation: 90, scale: 2, dpi: "180" }),
+    appParserContext.__siBestellscheinOrientationProbeCandidate(partialText, { rotation: 180, scale: 2, dpi: "180" })
+  ];
+  const selected = appParserContext.__selectSiBestellscheinOrientationCandidate(candidates);
+  return {
+    selectedOrientation: selected.selectedOrientation,
+    selectedCandidate: selected.selectedCandidate,
+    candidates: selected.candidates.map((candidate) => ({
+      rotation: candidate.rotation,
+      score: candidate.score,
+      siLike: candidate.siLike,
+      bestellscheinCompleteCount: candidate.bestellscheinCompleteCount
+    })),
+    pageNotice: appParserContext.__bestellscheinPageNotice(rotatedText, 1)
+  };
+}
+
+async function siBestellscheinOrientationTieBreakFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const probe = appParserContext.__selectSiBestellscheinOrientationCandidate([
+    {
+      rotation: 90,
+      score: 11450,
+      markerScore: 8,
+      siLike: true,
+      bestellscheinLike: true,
+      expectedRows: 2,
+      bestellscheinCompleteCount: 1,
+      markerHits: {
+        bestellschein: true,
+        entnahmeanweisungen: true,
+        siWarehouse: true,
+        siCustomer: true,
+        articleNumbers: true,
+        quantities: true,
+        handlingUnits: true,
+        pageNotice: true
+      }
+    },
+    {
+      rotation: 180,
+      score: 11000,
+      markerScore: 7,
+      siLike: true,
+      bestellscheinLike: true,
+      expectedRows: 2,
+      bestellscheinCompleteCount: 1,
+      markerHits: {
+        bestellschein: true,
+        entnahmeanweisungen: true,
+        siWarehouse: true,
+        siCustomer: true,
+        articleNumbers: true,
+        quantities: true,
+        handlingUnits: false,
+        pageNotice: true
+      }
+    }
+  ]);
+  const partialRotation90 = [
+    "Bestellschein Nr.: 60390",
+    "Auslagerung: 030 / 012 Hummel Logistik SI",
+    "Seite: 1 (von 2)",
+    "Bestellhinweis: Service Ecke",
+    "Entnahmeanweisungen: von 012 ( Hummel Logistik SI ) an 421 ( Palettierung )",
+    "1047652 Sicherungseinlage vorne f. 77/35 M-Floor 138 ST 49494594 DE"
+  ].join("\n");
+  const fullRotation180 = [
+    "Bestellschein Nr.: 60390",
+    "Auslagerung: 030 / 012 Hummel Logistik SI",
+    "Seite: 1 (von 2)",
+    "Bestellhinweis: Service Ecke",
+    "Entnahmeanweisungen: von 012 ( Hummel Logistik SI ) an 421 ( Palettierung )",
+    "1047651 Stegeinsatz fuer 77/35 M-Floorstand 2x 718 ST 49494594 DE",
+    "1047652 Sicherungseinlage vorne f. 77/35 M-Floor 138 ST 29562275 DE"
+  ].join("\n");
+  const result = {
+    candidates: [
+      appParserContext.__buildPickingOcrCandidate({
+        key: "qa-si-tiebreak-90",
+        label: "qa SI Tie-Break 90",
+        scale: 3.5,
+        dpi: "300",
+        rotation: 90,
+        pages: [partialRotation90],
+        pageRawLines: [6]
+      }),
+      appParserContext.__buildPickingOcrCandidate({
+        key: "qa-si-tiebreak-180",
+        label: "qa SI Tie-Break 180",
+        scale: 3.5,
+        dpi: "300",
+        rotation: 180,
+        pages: [fullRotation180],
+        pageRawLines: [7]
+      })
+    ]
+  };
+  const selected = appParserContext.__selectSiBestellscheinOrientationTieBreakCandidate(result, [90, 180]);
+  return {
+    probeSelectedOrientation: probe.selectedOrientation,
+    probeRejectReason: probe.rejectReason,
+    selectedRotation: selected.selectedCandidate?.rotation ?? "",
+    selectedAccepted: appParserContext.__isAcceptedSiBestellscheinOcrCandidate(selected.selectedCandidate),
+    selectedLines: selected.selectedCandidate?.parsed?.lines?.length || 0,
+    selectedOrderNumber: selected.selectedCandidate?.parsed?.orderNumber || "",
+    selectedCustomerName: selected.selectedCandidate?.parsed?.customerName || "",
+    candidates: selected.candidates,
+    pageNotice: appParserContext.__bestellscheinPageNotice(selected.selectedCandidate?.text || "", 1)
   };
 }
 
@@ -1931,6 +2362,101 @@ async function parseWarehouseRawBinFixture() {
     issues: appParserContext.__validatePickingImport(text, parsed),
     diagnostics: appParserContext.__buildPickingImportLineDiagnostics(parsed.lines)
   };
+}
+
+async function pickingDiagnosticExpansionFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "20260625080515 340063810002072174 002-H3-SO4D1 1060610 12 ST Referenzprodukt 9021-0OUT",
+    "20260625080515 340063810002072181 002-H3-SO4D1 1060610 18 ST Referenzprodukt 9021-0OUT"
+  ].join("\n");
+  const parsed = appParserContext.__parseOrderText(text);
+  const diagnostics = appParserContext.__pickingImportDiagnostics(text, parsed, {
+    source: "pdf-text",
+    qualityAccepted: true,
+    qualityScore: 6200,
+    loadingSlipCandidates: [{
+      label: "loading rotated",
+      expected: 1,
+      parsed: 1,
+      added: ["A1234567890"]
+    }]
+  });
+  const lineDiagnostics = appParserContext.__buildPickingImportLineDiagnostics(parsed.lines, parsed.lines, { text });
+  return { parsed, diagnostics, lineDiagnostics };
+}
+
+async function pickingSuspiciousBinDiagnosticFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "101094595 340063810002093506 002-H3-SOSA3 806713 720 ST SPITZE BOSS 9021-0OUT"
+  ].join("\n");
+  const parsed = appParserContext.__parseOrderText(text);
+  const diagnostics = appParserContext.__pickingImportDiagnostics(text, parsed, {
+    source: "pdf-text",
+    qualityAccepted: true,
+    qualityScore: 6200
+  });
+  const lineDiagnostics = appParserContext.__buildPickingImportLineDiagnostics(parsed.lines, parsed.lines, { text, diagnostics });
+  return { parsed, diagnostics, lineDiagnostics };
+}
+
+async function pickingSuspiciousBinRecheckDiagnosticFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "101094595 340063810002093506 002-H3-SOSA3 806713 720 ST SPITZE BOSS 9021-0OUT"
+  ].join("\n");
+  const parsed = appParserContext.__parseOrderText(text);
+  const fromBinRechecks = [{
+    position: 1,
+    tableRowKey: "101094595 | 340063810002093506 | 806713",
+    warehouseOrder: "101094595",
+    fromHandlingUnit: "340063810002093506",
+    product: "806713",
+    targetQty: "720",
+    rawValue: "002-H3-SOSA3",
+    method: "ocr-word-bbox-crop",
+    attempted: true,
+    candidates: [{
+      value: "002-H3-SO9A3",
+      valid: true,
+      confidence: 88,
+      occurrences: 2,
+      methods: ["crop-threshold"],
+      sources: ["ocr-crop"],
+      autoApplied: false
+    }],
+    suggestion: "002-H3-SO9A3",
+    confidence: 88,
+    autoApplied: false,
+    visualAttempted: true,
+    visualSource: "word-bbox",
+    visualCandidates: [{
+      value: "002-H3-SO9A3",
+      valid: true,
+      confidence: 88,
+      occurrences: 2,
+      methods: ["crop-threshold", "crop-upscale"],
+      sources: ["ocr-crop"],
+      autoApplied: false
+    }],
+    visualBestCandidate: "002-H3-SO9A3",
+    visualConfidence: 88,
+    visualReason: "Von-Lagerplatz-Zelle ueber OCR-Wort-BBox visuell ausgeschnitten.",
+    visualAutoApplied: false,
+    reason: "Cell-Recheck aus OCR-Wortboxen."
+  }];
+  const diagnostics = appParserContext.__pickingImportDiagnostics(text, parsed, {
+    source: "ocr-candidate",
+    qualityAccepted: true,
+    qualityScore: 6200,
+    fromBinRechecks
+  });
+  const lineDiagnostics = appParserContext.__buildPickingImportLineDiagnostics(parsed.lines, parsed.lines, { text, diagnostics });
+  return { parsed, diagnostics, lineDiagnostics };
 }
 
 async function parseWarehouseOcrConfusedBinFixture() {

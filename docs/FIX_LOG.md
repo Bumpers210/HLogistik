@@ -1,6 +1,64 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-03 07:42:22 +02:00
+Stand: 2026-07-07 11:30:00 +02:00
+
+## 2026-07-07 - Testsystem: SI-Bild-Bestellschein-Orientierung per Tie-Break
+
+Ausgangsproblem:
+
+Der Bild-Bestellschein `20260707084037.pdf` wurde in der groben Orientierungsprobe als SI-/Bestellschein erkannt, aber 90 Grad und 180 Grad lagen mit ihren Probe-Scores zu dicht beieinander. Der Import brach deshalb mit `SI-Bestellschein-Orientierung nicht eindeutig` ab, obwohl eine volle OCR der besten Rotationen einen klaren Parser-Kandidaten liefern konnte.
+
+Umgesetzt:
+
+- Die schnelle Orientierungsprobe bleibt unveraendert als erste Stufe.
+- Wenn mehrere SI-/Bestellschein-Rotationen nahe beieinander liegen, werden nur die besten zwei Signal-Rotationen begrenzt vollstaendig OCRt.
+- Die Auswahl erfolgt danach anhand Parser-/Importqualitaet: vollstaendige SI-Positionen, Artikel, Mengen, Einheiten, LE/HU, SI-Kontext, Bestellschein-Nummer und Import-Issues.
+- Die Diagnose zeigt Tie-Break-Rotationen, Kandidatenqualitaet, Akzeptanz-/Ablehnungsgrund, OCR-Schritte und Budget.
+- Die Warnung fuer `Seite 1 von 2` bei nur einer PDF-Seite bleibt Diagnose/Warnung und blockiert den Import nicht.
+
+Nicht geaendert:
+
+- Keine Parser-, Mengen-, Beschreibungs-, Stellplatz-, Export-, Tablet-, Offline- oder DB-Logik.
+- Keine automatische Stellplatzkorrektur.
+- CR-002 bleibt unveraendert.
+
+## 2026-07-07 - Testsystem: Stellplatzreview und SI-LE/HU-Fill
+
+Ausgangsproblem:
+
+Die Browser-Review fuer Von-Lagerplaetze nutzte unvollstaendige H1/H3/H4-Muster. Dadurch konnten regelkonforme H7-Werte als auffaellig erscheinen. Gleichzeitig blieb der SI-Systemabgleich fuer fehlende Von-Lagerplaetze wirkungslos, weil `applyStorageBinsFromArticleStock` den importierten `fromBin` bewusst nicht ersetzte.
+
+Umgesetzt:
+
+- Neue klassische Browser-Regeldatei `shared/storage-bin-rules.js` mit derselben Stellplatz-Regelbasis fuer Review-/Diagnoseentscheidungen, inklusive H7.
+- H7-Werte wie `002-H7-S12A3` gelten im Kommissionierimport als formal gueltig und blockieren keine Review.
+- Werte wie `002-H3-SOSA3` bleiben suspicious und bekommen nur Diagnose/Vorschlag, keine pauschale OCR-Korrektur.
+- SI-/Bestellschein-Importe duerfen fehlende oder formal auffaellige Von-Lagerplaetze anhand Artikel und LE/HU aus genau einem eindeutigen Systemtreffer ergaenzen; mehrdeutige, fehlende oder HU-lose Faelle bleiben im Review.
+- QA-Matrix um H7-valid, H3-suspicious, eindeutigen SI-Systemfill, mehrdeutige/fehlende Treffer und gueltigen bestehenden Von-Lagerplatz erweitert.
+
+Nicht geaendert:
+
+- Keine pauschale OCR-Zeichenkorrektur, keine Mengen-, Beschreibungs-, Parser-, Export-, Tablet-, Offline- oder DB-Logik.
+- SSI-Lageraufgaben erhalten keine allgemeine Bestands-Stellplatzkorrektur.
+- CR-002 bleibt unveraendert.
+
+## 2026-07-06 - Testsystem: Importdiagnose erweitert
+
+Ausgangsproblem:
+
+Fuer die weitere Import-Genauigkeitsarbeit fehlten in der bestehenden `PDF-Import Diagnose` Details, welche Rohzeilen zu welchen importierten Positionen gehoeren, welcher Parserpfad vermutlich aktiv war und wie sicher einzelne Felder erkannt wurden.
+
+Umgesetzt:
+
+- Reine Diagnosefelder fuer Rohpositionssegmente, Kandidatenzeilen, erwartete Tabellenzeilen, Parserpfad, erkannte Positionsfelder, Feldsicherheit, Akzeptanzgrund und Ladelistenstatus ergaenzt.
+- `PDF-Import Positionsdiagnose` zeigt zusaetzlich Rohsegment, Rohzeilennummern, Parserpfad, erkannte Felder, Feldsicherheit und verdaechtige Feldzuordnungen.
+- QA-Harness prueft, dass Diagnosefelder nicht in `parsed.lines` persistiert werden.
+
+Nicht geaendert:
+
+- Keine Importwerte, Parser-/OCR-Regeln, Mengen, Beschreibungen oder Stellplaetze werden korrigiert.
+- Keine Export-, Tablet-, Offline- oder DB-Logik wurde geaendert.
+- CR-002 bleibt unveraendert.
 
 ## 2026-07-03 - Wartbarkeit Phase 2D-2: UI-/SVG-Helfer ausgelagert
 

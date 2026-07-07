@@ -12,6 +12,7 @@ export const PUBLIC_STATIC_FILES = new Set([
   "/order-hint-rules.js",
   "/shared-ui.js",
   "/shared/storage-hu-rules.js",
+  "/shared/storage-bin-rules.js",
   "/shared/manual-storage-rules.js",
   "/artikel.js",
   "/xlsx.full.min.js",

@@ -1,6 +1,6 @@
 # HLogistik Rules Overview
 
-Stand: 2026-07-03 07:42:22 +02:00
+Stand: 2026-07-07 10:35:00 +02:00
 
 ## Regelorte
 
@@ -26,6 +26,7 @@ Weitere regelnahe Listen:
 - `app-import-diagnostics.js`: klassisches Browser-Helferskript fuer Import-/OCR-Diagnoseausgaben, Kandidaten-Diagnoseformatierung und Positionsdiagnose ohne DOM-, OCR- oder State-Seiteneffekte.
 - `app-state-helpers.js`: klassisches Browser-Helferskript fuer kleine reine Line-/State-Helfer wie Positionssortierung und Mengenabweichung.
 - `app-ui-helpers.js`: klassisches Browser-Helferskript fuer kleine reine UI-String-/SVG-Helfer wie Barcode-SVG und HTML-/SVG-Escaping.
+- `shared/storage-bin-rules.js`: klassisches Browser-Regelskript fuer regelbasierte Von-Lagerplatz-Review-Diagnose im Kommissionierimport, gespiegelt aus der Stellplatz-Regelbasis ohne DOM-, Fetch- oder Storage-Zugriffe.
 - `shared/storage-hu-rules.js`: klassisches Browser-Regelskript fuer SSI-HU-Prefix, Suffixlaenge, Gesamtlange und HU-Helfer in Desktop und Tablet.
 - `shared/manual-storage-rules.js`: klassisches Browser-Regelskript fuer manuelle Einlagerungsanzahl und Positionspraefix `M` in Desktop und Tablet.
 
@@ -45,7 +46,7 @@ Weitere regelnahe Listen:
 - Bestellhinweis-Erkennung bleibt klassisches JavaScript statt JSON, weil Labelsuche, Normalisierung, Kandidaten-Ablehnung und Doppelanhang-Logik Reihenfolge und Regex benoetigen.
 - Manuelle Einlagerungs-Stueckzahl wird weiterhin in den bestehenden Positionsfeldern gespeichert: `actualQty` ist die Stueckzahl, `targetQty` bleibt fuer manuelle Positionen leer. Neue manuelle Stellplaetze starten leer und werden nicht aus dem Artikelstamm vorbelegt.
 - Originaldatei-Archivierung ist bewusst serverseitige Pfadlogik und keine Browserregel: Der Browser liefert nur Dateinamen, der Server loest diese ausschliesslich im konfigurierten Importordner auf.
-- Kommissionier-PDF-Import nutzt fuer Von-Lagerplaetze bewusst keine SSI-Stellplatznormalisierung und keinen Bestands-Stellplatzabgleich. Der Von-Lagerplatz kommt aus dem gewaehlten OCR-Tabellenkandidaten; erlaubt sind nur trimmen, Whitespace entfernen und Bindestriche vereinheitlichen. Die Kandidatenbewertung in `app.js` waehlt zwischen Skalen/Rotationen, ist aber keine Stellplatzvalidierung und darf keine Stellplatzwerte korrigieren.
+- Kommissionier-PDF-Import nutzt die Stellplatz-Regelbasis nur fuer Review-/Diagnoseentscheidungen. Der Von-Lagerplatz kommt aus dem gewaehlten OCR-Tabellenkandidaten; erlaubt sind nur trimmen, Whitespace entfernen und Bindestriche vereinheitlichen. Im eng begrenzten SI-/Bestellschein-Kontext darf ein fehlender oder formal auffaelliger Von-Lagerplatz anhand Artikel und LE/HU aus genau einem eindeutigen Systemtreffer ergaenzt werden; SSI-Lageraufgaben erhalten weiterhin keine allgemeine Bestands-Stellplatzkorrektur.
 - Ladelisten duerfen aus OCR-Nebenkandidaten angehaengt werden. Dabei werden nur Ladelistenpositionen uebernommen; normale Auftragspositionen, Mengen, HU und Stellplaetze bleiben aus dem gewaehlten Hauptkandidaten.
 
 ## Regeln aendern
@@ -81,7 +82,7 @@ Bei Aenderungen an Originaldatei-Archivierung `server/original-archive.mjs`, `se
 
 Bei Aenderungen am Artikelstamm-Buchungsexport `server/reports.mjs`, `server.mjs`, `artikel.html`, `artikel.js` und `scripts/qa-api-matrix.mjs` gemeinsam pruefen. Die Server-Regelquelle fuer Zeitraum, Spalten und Fehlerlog-Auftragszuordnung ist `server/reports.mjs`; die echte XLSX-Erzeugung bleibt im Browser ueber die vorhandene `xlsx.full.min.js`.
 
-Bei Aenderungen am Kommissionier-PDF-Import `app.js`, `index.html`, `service-worker.js`, `manifest.webmanifest` und die Parser-Fixtures in `scripts/qa-api-matrix.mjs` gemeinsam pruefen. Wichtig: Von-Lagerplaetze im PDF-Import duerfen nicht ueber `server/rules/storage-bin-rules.mjs` oder Bestandsdaten korrigiert werden. Die OCR-Kandidatenbewertung darf nur entscheiden, welcher komplette Kandidat importiert wird.
+Bei Aenderungen am Kommissionier-PDF-Import `app.js`, `app-import-diagnostics.js`, `shared/storage-bin-rules.js`, `index.html`, `service-worker.js`, `manifest.webmanifest`, `server/config/static-files.mjs` und die Parser-Fixtures in `scripts/qa-api-matrix.mjs` gemeinsam pruefen. Wichtig: Von-Lagerplaetze im PDF-Import duerfen nicht pauschal ueber OCR-Zeichenersatz, SSI-Normalisierung oder Bestandsdaten korrigiert werden. Die OCR-Kandidatenbewertung darf nur entscheiden, welcher komplette Kandidat importiert wird; der SI-LE/HU-Systemfill bleibt auf eindeutige SI-/Bestellschein-Treffer beschraenkt.
 
 ## Pflicht-Tests nach Regelaenderungen
 
@@ -104,5 +105,5 @@ Manuell pruefen:
 - PDF-/Textimport: `Bestellhinweis: Service Ecke`, mehrzeiliger Hinweis, kein Hinweis, Doppelanhang und Positionsparsing.
 - PDF-/Textimport: `9021-0OUT` als Nach-Lagerplatz an beliebiger Position setzt den Kunden auf `9021-0OUT`; abweichende Nach-Lagerplaetze stehen als Zusatzbemerkung.
 - PDF-/OCR-Import: Ladeliste aus Nebenkandidaten wird angehaengt, ohne normale Auftragspositionen aus Nebenkandidaten zu mischen.
-- Kommissionier-PDF-Import: OCR-only, Kandidatenbewertung fuer Skala/Rotation, Von-Lagerplatz aus korrekter Tabellenspalte, Rohwert gleich finaler Von-Lagerplatz, keine `O/0`-, `S/5`- oder SSI-Regelkorrektur.
+- Kommissionier-PDF-Import: OCR-only, Kandidatenbewertung fuer Skala/Rotation, Von-Lagerplatz aus korrekter Tabellenspalte, regelbasierte Review-Diagnose, keine `O/0`-, `S/5`- oder pauschale SSI-Regelkorrektur; SI-Bestellschein-Systemfill nur bei eindeutigem Artikel- und LE/HU-Treffer.
 - CR-002 bleibt unveraendert aktiv

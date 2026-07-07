@@ -1,6 +1,6 @@
 # HLogistik Robustness Audit
 
-Stand: 2026-07-03 07:42:22 +02:00
+Stand: 2026-07-06 08:45:00 +02:00
 
 ## Aktueller Stabilitaetsstand
 
@@ -9,6 +9,21 @@ Stand: 2026-07-03 07:42:22 +02:00
 - Die QA-Matrix deckt Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung, Buchungsexport, CR-002 und QA-Artefaktfreiheit ab.
 - Laufzeitdaten, lokale Pfaddateien und QA-Artefakte sind nicht Teil des Commit-Scopes.
 - Die verbindliche Testbasis liegt in `docs/TEST_BASELINE.md`; PowerShell ist die Hauptshell fuer QA-Befehle.
+
+## Testsystem Importdiagnose
+
+Geprueft und erweitert:
+
+- Die Kommissionier-Importdiagnose zeigt jetzt erwartete Tabellenzeilen, importierte Positionen, Rohsegmente pro Position, nicht importierte Kandidatenzeilen und den abgeleiteten Parserpfad.
+- Pro Position werden erkannte Felder (`Lagerauftrag`, `HU/LE`, `Von-Lagerplatz`, Artikel, Beschreibung, Menge, Einheit, `Nach-Lagerplatz`) mit Feldsicherheit (`sicher`, `fallback`, `fehlt`, `verdaechtig`, `nicht-bewertet`) ausgegeben.
+- Die Diagnose enthaelt Akzeptanzgrund/-Flags und eine erweiterte Ladelisten-Diagnose fuer Rohtext und OCR-Nebenkandidaten.
+- Die Erweiterung ist nicht-persistent: Diagnosefelder bleiben in Konsolen-/QA-Diagnoseobjekten und werden nicht an gespeicherte Positionsobjekte gehaengt.
+
+Nicht geaendert:
+
+- Keine Importwerte, OCR-/Parserregeln, Stellplatzwerte, Mengen oder Beschreibungen wurden veraendert.
+- Keine Stellplatzvalidierung, keine Stellplatzkorrektur und kein Bestands-Stellplatzersatz wurden eingefuehrt.
+- CR-002 bleibt unveraendert.
 
 ## PDF-Import OCR-Kandidatenbewertung
 
