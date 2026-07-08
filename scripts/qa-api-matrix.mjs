@@ -347,8 +347,22 @@ async function run() {
   const correctedReviewLines = appParserContext.__applyFromBinReviewWarnings([
     { ...suspiciousReviewLines[0], fromBin: "002-H3-SO9A3" }
   ]);
+  const confirmedReviewLines = appParserContext.__applyFromBinReviewWarnings([
+    { ...suspiciousReviewLines[0], fromBinReviewConfirmedValue: "002-H3-SOSA3" }
+  ]);
+  const changedAfterConfirmReviewLines = appParserContext.__applyFromBinReviewWarnings([
+    { ...confirmedReviewLines[0], fromBin: "002-H3-SOSB3" }
+  ]);
+  const multipleReviewLines = appParserContext.__applyFromBinReviewWarnings([
+    { ...suspiciousReviewLines[0], id: "qa-review-a", fromBinReviewConfirmedValue: "002-H3-SOSA3" },
+    { ...suspiciousReviewLines[0], id: "qa-review-b", fromBin: "002-H3-SOSB3", fromBinReviewConfirmedValue: "" }
+  ]);
+  const emptyReviewLine = { ...suspiciousReviewLines[0], fromBin: "", fromBinReviewConfirmedValue: "", fromBinReviewRequired: true };
   const pickedSuspiciousReviewLines = suspiciousReviewLines.map((line) => ({ ...line, picked: true }));
   const pickedCorrectedReviewLines = correctedReviewLines.map((line) => ({ ...line, picked: true }));
+  const pickedConfirmedReviewLines = confirmedReviewLines.map((line) => ({ ...line, picked: true }));
+  const pickedChangedAfterConfirmReviewLines = changedAfterConfirmReviewLines.map((line) => ({ ...line, picked: true }));
+  const pickedMultipleReviewLines = multipleReviewLines.map((line) => ({ ...line, picked: true }));
   check(
     "picking import marks suspicious source bin for manual review and keeps raw value",
     suspiciousReviewLines[0]?.fromBin === "002-H3-SOSA3" &&
@@ -373,6 +387,50 @@ async function run() {
     JSON.stringify({
       correctedLine: correctedReviewLines[0],
       exportMessage: appParserContext.__orderExportCompletionMessage({ lines: pickedCorrectedReviewLines })
+    })
+  );
+  check(
+    "manual source-bin review confirmation clears only the unchanged confirmed bin block",
+    suspiciousReviewLines[0]?.fromBin === "002-H3-SOSA3" &&
+      appParserContext.__canConfirmFromBinReview(suspiciousReviewLines[0]) === true &&
+      confirmedReviewLines[0]?.fromBin === "002-H3-SOSA3" &&
+      confirmedReviewLines[0]?.fromBinReviewConfirmedValue === "002-H3-SOSA3" &&
+      confirmedReviewLines[0]?.fromBinReviewRequired === false &&
+      confirmedReviewLines[0]?.fromBinReviewBlocksRelease === false &&
+      confirmedReviewLines[0]?.fromBinReviewBlocksExport === false &&
+      !String(confirmedReviewLines[0]?.binWarning || "").trim() &&
+      /manuell gepr/.test(confirmedReviewLines[0]?.fromBinReviewReason || "") &&
+      appParserContext.__isFromBinReviewConfirmedForValue("002-H3-SOSA3", confirmedReviewLines[0]) === true &&
+      appParserContext.__orderExportCompletionMessage({ lines: pickedConfirmedReviewLines }) === "",
+    JSON.stringify({
+      confirmedLine: confirmedReviewLines[0],
+      exportMessage: appParserContext.__orderExportCompletionMessage({ lines: pickedConfirmedReviewLines })
+    })
+  );
+  check(
+    "manual source-bin review confirmation is invalidated when the source bin value changes",
+    changedAfterConfirmReviewLines[0]?.fromBin === "002-H3-SOSB3" &&
+      changedAfterConfirmReviewLines[0]?.fromBinReviewConfirmedValue === "" &&
+      changedAfterConfirmReviewLines[0]?.fromBinReviewRequired === true &&
+      changedAfterConfirmReviewLines[0]?.fromBinReviewBlocksRelease === true &&
+      changedAfterConfirmReviewLines[0]?.fromBinReviewBlocksExport === true &&
+      appParserContext.__isFromBinReviewConfirmedForValue("002-H3-SOSB3", changedAfterConfirmReviewLines[0]) === false &&
+      appParserContext.__orderExportCompletionMessage({ lines: pickedChangedAfterConfirmReviewLines }) === appParserContext.__fromBinReviewBlockMessage(),
+    JSON.stringify({
+      changedLine: changedAfterConfirmReviewLines[0],
+      exportMessage: appParserContext.__orderExportCompletionMessage({ lines: pickedChangedAfterConfirmReviewLines })
+    })
+  );
+  check(
+    "manual source-bin review confirmation does not clear other open review positions or empty bins",
+    multipleReviewLines[0]?.fromBinReviewRequired === false &&
+      multipleReviewLines[1]?.fromBinReviewRequired === true &&
+      appParserContext.__orderExportCompletionMessage({ lines: pickedMultipleReviewLines }) === appParserContext.__fromBinReviewBlockMessage() &&
+      appParserContext.__canConfirmFromBinReview(emptyReviewLine) === false,
+    JSON.stringify({
+      multipleReviewLines,
+      emptyCanConfirm: appParserContext.__canConfirmFromBinReview(emptyReviewLine),
+      exportMessage: appParserContext.__orderExportCompletionMessage({ lines: pickedMultipleReviewLines })
     })
   );
 
@@ -605,6 +663,9 @@ async function run() {
       appSource.includes("applyFromBinReviewWarnings") &&
       appSource.includes("hasOpenFromBinReviewWarnings") &&
       appSource.includes("fromBinReviewBlockMessage") &&
+      appSource.includes("fromBinReviewConfirmedValue") &&
+      appSource.includes("isFromBinReviewConfirmedForValue") &&
+      appSource.includes("Stellplatz geprüft") &&
       appSource.includes("Export/Freigabe gesperrt: OCR-unsichere Von-Lagerplätze prüfen."),
     "source-bin review block markers missing"
   );
@@ -1901,7 +1962,7 @@ async function createAppParserContext() {
   vm.runInContext(pickingParserCode, context, { filename: "app-picking-parser.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
-  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
+  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__fromBinReviewPatchForValue = fromBinReviewPatchForValue; globalThis.__isFromBinReviewConfirmedForValue = isFromBinReviewConfirmedForValue; globalThis.__canConfirmFromBinReview = canConfirmFromBinReview; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
   return context;
 }
 

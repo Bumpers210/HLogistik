@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260708-1";
+const CLIENT_ASSET_VERSION = "20260708-2";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 3.5;
 const OCR_PRECISE_RENDER_SCALE = 4.5;
@@ -950,6 +950,11 @@ function fromBinReviewWarningMessage(value) {
   return `Von-Lagerplatz OCR-unsicher: ${bin}. Bitte anhand PDF prüfen und korrigieren.`;
 }
 
+function fromBinReviewConfirmationMessage(value) {
+  const bin = normalizePickingBinText(value) || String(value || "").trim();
+  return `Von-Lagerplatz manuell geprüft: ${bin}.`;
+}
+
 function fromBinReviewDiagnosticForValue(value) {
   const bin = normalizePickingBinText(value);
   const shape = pickingFromBinShapeDiagnostic(bin);
@@ -964,8 +969,40 @@ function fromBinReviewDiagnosticForValue(value) {
   };
 }
 
+function isFromBinReviewConfirmedForValue(value, line = {}) {
+  const bin = normalizePickingBinText(value);
+  const confirmedBin = normalizePickingBinText(line.fromBinReviewConfirmedValue);
+  return Boolean(bin && confirmedBin && bin === confirmedBin);
+}
+
+function fromBinReviewConfirmedPatchForValue(value) {
+  const bin = normalizePickingBinText(value);
+  return {
+    binWarning: "",
+    binWarningValue: "",
+    binWarningType: "",
+    fromBinReviewRequired: false,
+    fromBinReviewReason: fromBinReviewConfirmationMessage(bin),
+    fromBinReviewBlocksRelease: false,
+    fromBinReviewBlocksExport: false,
+    fromBinManualCorrectionClearsWarning: false,
+    fromBinReviewConfirmedValue: bin
+  };
+}
+
+function canConfirmFromBinReview(line) {
+  if (!line || line.lineType === "loading-slip") return false;
+  const bin = normalizePickingBinText(line.fromBin);
+  if (!bin || isFromBinReviewConfirmedForValue(bin, line)) return false;
+  const review = fromBinReviewDiagnosticForValue(bin);
+  return Boolean(review.fromBinReviewRequired && (line.fromBinReviewRequired === true || line.binWarningType === "from-bin-review"));
+}
+
 function fromBinReviewPatchForValue(value, line = {}) {
   const review = fromBinReviewDiagnosticForValue(value);
+  if (review.fromBinReviewRequired && isFromBinReviewConfirmedForValue(value, line)) {
+    return fromBinReviewConfirmedPatchForValue(value);
+  }
   if (!review.fromBinReviewRequired) {
     const clearOwnWarning = line.fromBinReviewRequired === true || line.binWarningType === "from-bin-review";
     return {
@@ -974,7 +1011,8 @@ function fromBinReviewPatchForValue(value, line = {}) {
       fromBinReviewReason: "",
       fromBinReviewBlocksRelease: false,
       fromBinReviewBlocksExport: false,
-      fromBinManualCorrectionClearsWarning: false
+      fromBinManualCorrectionClearsWarning: false,
+      fromBinReviewConfirmedValue: ""
     };
   }
 
@@ -987,7 +1025,8 @@ function fromBinReviewPatchForValue(value, line = {}) {
     fromBinReviewReason: review.fromBinReviewReason,
     fromBinReviewBlocksRelease: true,
     fromBinReviewBlocksExport: true,
-    fromBinManualCorrectionClearsWarning: true
+    fromBinManualCorrectionClearsWarning: true,
+    fromBinReviewConfirmedValue: ""
   };
 }
 
@@ -1007,7 +1046,10 @@ function applyFromBinReviewWarnings(lines) {
 function openFromBinReviewWarnings(lines) {
   return (Array.isArray(lines) ? lines : [])
     .filter((line) => line?.lineType !== "loading-slip")
-    .filter((line) => fromBinReviewDiagnosticForValue(line.fromBin).fromBinReviewRequired);
+    .filter((line) =>
+      fromBinReviewDiagnosticForValue(line.fromBin).fromBinReviewRequired
+        && !isFromBinReviewConfirmedForValue(line.fromBin, line)
+    );
 }
 
 function hasOpenFromBinReviewWarnings(lines = state.lines) {
@@ -3788,7 +3830,8 @@ function clearBinWarnings(lines) {
       fromBinReviewReason: "",
       fromBinReviewBlocksRelease: false,
       fromBinReviewBlocksExport: false,
-      fromBinManualCorrectionClearsWarning: false
+      fromBinManualCorrectionClearsWarning: false,
+      fromBinReviewConfirmedValue: ""
     };
   });
 
@@ -3894,6 +3937,7 @@ async function applyStorageBinsFromArticleStock(lines, options = {}) {
       fromBinReviewBlocksRelease: line.fromBinReviewBlocksRelease === true,
       fromBinReviewBlocksExport: line.fromBinReviewBlocksExport === true,
       fromBinManualCorrectionClearsWarning: line.fromBinManualCorrectionClearsWarning === true,
+      fromBinReviewConfirmedValue: line.fromBinReviewConfirmedValue || "",
       ...siFromBin.patch,
       autoPositionNotes: nextAutoNotes,
       ...(match ? { stockQty } : {})
@@ -5554,6 +5598,7 @@ function createLine(overrides = {}) {
     binWarning: "",
     binWarningValue: "",
     binWarningType: "",
+    fromBinReviewConfirmedValue: "",
     fromBin: "",
     product: "",
     description: "",
@@ -5772,6 +5817,7 @@ function render() {
     map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
     map.fromBin.addEventListener("input", () => {
       if (canEditBin) map.fromBin.value = map.fromBin.value.toUpperCase();
+      const reviewWasConfirmed = isFromBinReviewConfirmedForValue(line.fromBin, line);
       const reviewPatch = fromBinReviewPatchForValue(map.fromBin.value, line);
       const patch = { fromBin: map.fromBin.value, ...reviewPatch };
       const clearWarning = shouldClearBinWarning(line, map.fromBin.value);
@@ -5784,8 +5830,12 @@ function render() {
         patch.fromBinReviewBlocksRelease = false;
         patch.fromBinReviewBlocksExport = false;
         patch.fromBinManualCorrectionClearsWarning = false;
+        patch.fromBinReviewConfirmedValue = "";
       }
-      updateLine(line.id, patch, clearWarning);
+      const reviewConfirmationInvalidated = reviewWasConfirmed && !isFromBinReviewConfirmedForValue(map.fromBin.value, patch);
+      const reviewWarningChanged = Boolean(line.fromBinReviewRequired) !== Boolean(patch.fromBinReviewRequired)
+        || String(line.binWarning || "") !== String(patch.binWarning || "");
+      updateLine(line.id, patch, clearWarning || reviewConfirmationInvalidated || reviewWarningChanged);
     });
     map.product.addEventListener("input", () => {
       map.product.value = normalizeDigits(map.product.value);
@@ -5806,7 +5856,8 @@ function render() {
     });
     map.unit.addEventListener("input", () => updateLine(line.id, { unit: map.unit.value }, false));
 
-    if (binWarningText) renderBinWarning(item, binWarningText);
+    if (binWarningText) renderBinWarning(item, binWarningText, line);
+    else if (isFromBinReviewConfirmedForValue(line.fromBin, line)) renderFromBinReviewConfirmation(item, line);
     if (isManualStorageLine) renderManualStorageDeleteButton(item, line);
 
     elements.pickList.appendChild(item);
@@ -5833,13 +5884,53 @@ function renderStorageLineActions() {
   }
 }
 
-function renderBinWarning(item, message) {
+function renderBinWarning(item, message, line) {
   const body = item.querySelector(".line-body");
   if (!body) return;
   const warning = document.createElement("p");
   warning.className = "bin-warning";
   warning.textContent = message;
   body.appendChild(warning);
+  if (!canConfirmFromBinReview(line)) return;
+  const confirmButton = document.createElement("button");
+  confirmButton.type = "button";
+  confirmButton.className = "secondary-button";
+  confirmButton.textContent = "Stellplatz geprüft";
+  confirmButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    confirmFromBinReview(line.id);
+  });
+  body.appendChild(confirmButton);
+}
+
+function renderFromBinReviewConfirmation(item, line) {
+  const body = item.querySelector(".line-body");
+  if (!body) return;
+  const note = document.createElement("p");
+  note.className = "import-status is-ok";
+  note.textContent = fromBinReviewConfirmationMessage(line.fromBin);
+  body.appendChild(note);
+}
+
+function confirmFromBinReview(lineId) {
+  const line = state.lines.find((entry) => entry.id === lineId);
+  if (!line || line.lineType === "loading-slip") return;
+  const bin = normalizePickingBinText(line.fromBin);
+  if (!bin) {
+    setServerStatus("Von-Lagerplatz fehlt und kann nicht als geprüft bestätigt werden.", "error");
+    return;
+  }
+  if (!fromBinReviewDiagnosticForValue(bin).fromBinReviewRequired) {
+    setServerStatus("Für diesen Von-Lagerplatz ist keine manuelle Prüfung offen.", "ok");
+    return;
+  }
+  const message = fromBinReviewConfirmationMessage(bin);
+  updateLine(line.id, {
+    ...fromBinReviewConfirmedPatchForValue(bin)
+  }, true);
+  setImportStatus(message, "ok", 100);
+  setServerStatus(message, "ok");
 }
 
 async function addManualStorageLine() {
@@ -6663,6 +6754,7 @@ function syncLineFieldsFromDom() {
         line.fromBinReviewBlocksRelease = false;
         line.fromBinReviewBlocksExport = false;
         line.fromBinManualCorrectionClearsWarning = false;
+        line.fromBinReviewConfirmedValue = "";
       }
     }
     if (productInput) {

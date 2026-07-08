@@ -1,6 +1,27 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-08 07:25:00 +02:00
+Stand: 2026-07-08 08:05:00 +02:00
+
+## 2026-07-08 - Live-Hotfix: gepruefte Von-Lagerplaetze bestaetigen
+
+Ausgangsproblem:
+
+OCR-unsichere Von-Lagerplaetze blockierten Freigabe und Export auch dann weiter, wenn der Nutzer den angezeigten Rohwert fachlich geprueft hatte und der Stellplatz korrekt war.
+
+Umgesetzt:
+
+- Review-Warnungen fuer konkrete Positionen zeigen eine Aktion `Stellplatz geprueft`.
+- Die Bestaetigung speichert nur den aktuell geprueften Von-Lagerplatz in `fromBinReviewConfirmedValue`.
+- Freigabe und Export ignorieren genau diese OCR-Review-Warnung nur, solange der aktuelle Von-Lagerplatz unveraendert zum bestaetigten Wert passt.
+- Wird der Von-Lagerplatz spaeter geaendert, wird die Bestaetigung ungueltig und die normale Review-Bewertung greift wieder.
+- Die Positionsanzeige und der Review-Status zeigen den Diagnosehinweis `Von-Lagerplatz manuell geprueft`.
+- Asset-/Cache-Version auf `app.js?v=20260708-2` und Service-Worker-/Manifest-Version `1.5.167` erhoeht.
+
+Nicht geaendert:
+
+- Keine automatische Stellplatzkorrektur.
+- Keine OCR-, Parser-, Mengen-, Beschreibungs-, Export-, Tablet-, Offline- oder DB-Logik.
+- CR-002 bleibt unveraendert.
 
 ## 2026-07-08 - Live-Hotfix: Ladelisten-Renderguard
 
