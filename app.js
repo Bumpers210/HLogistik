@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260708-2";
+const CLIENT_ASSET_VERSION = "20260708-3";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 3.5;
 const OCR_PRECISE_RENDER_SCALE = 4.5;
@@ -4796,10 +4796,9 @@ function parseWarehouseLine(line) {
 
   while (shouldSkipOcrQuantityPrefix(tokens[cursor], tokens[cursor + 1], tokens[cursor + 2])) cursor += 1;
 
-  const combinedQuantity = parseQuantityWithUnitToken(tokens[cursor] || "");
-  const quantity = combinedQuantity || parseQuantityToken(tokens[cursor] || "");
+  const quantity = parseWarehouseQuantityAt(tokens, cursor);
   const targetQty = quantity ? quantity.value : "";
-  if (quantity) cursor += 1;
+  if (quantity) cursor = quantity.next;
   const unit = /^[A-Za-zÄÖÜäöü]{1,5}$/.test(tokens[cursor] || "") ? normalizeUnit(tokens[cursor++]) : "Stk";
   const remaining = tokens.slice(cursor);
 
@@ -4841,11 +4840,7 @@ function parseWarehouseLineByColumns(line) {
   const unitIndex = tokens.findIndex((token, index) => index >= productInfo.next && isUnitToken(token));
   if (unitIndex === -1) return null;
 
-  const quantityTokens = tokens
-    .slice(productInfo.next, unitIndex)
-    .map(parseQuantityToken)
-    .filter(Boolean);
-  const quantity = quantityTokens.at(-1);
+  const quantity = parseLastWarehouseQuantityInRange(tokens, productInfo.next, unitIndex);
   if (!quantity || isSuspiciousMultiplierQuantity(quantity.value)) return null;
 
   const fromHandlingUnit = extractHandlingUnit(tokens.slice(firstNumber + 1, binIndex).join(" "));
@@ -4893,18 +4888,18 @@ function parseWarehouseLineWithoutBin(line) {
   if (extractBin(beforeProductText)) return null;
 
   let unitIndex = -1;
-  let quantityIndex = -1;
+  let quantity = null;
   for (let index = productInfo.next + 1; index < tokens.length; index += 1) {
     if (!isUnitToken(tokens[index])) continue;
-    const quantity = parseQuantityToken(tokens[index - 1]);
-    if (!quantity || isSuspiciousMultiplierQuantity(quantity.value)) continue;
+    const parsedQuantity = parseLastWarehouseQuantityInRange(tokens, productInfo.next, index);
+    if (!parsedQuantity || isSuspiciousMultiplierQuantity(parsedQuantity.value)) continue;
     unitIndex = index;
-    quantityIndex = index - 1;
+    quantity = parsedQuantity;
     break;
   }
-  if (unitIndex === -1 || quantityIndex === -1) return null;
+  if (unitIndex === -1 || !quantity) return null;
 
-  const descriptionBeforeQuantity = tokens.slice(productInfo.next, quantityIndex).join(" ");
+  const descriptionBeforeQuantity = tokens.slice(productInfo.next, quantity.start).join(" ");
   const afterUnit = tokens.slice(unitIndex + 1).join(" ");
   const toBin = extractDestinationBin(afterUnit);
   const description = cleanProductDescription([descriptionBeforeQuantity, afterUnit].filter(Boolean).join(" "), toBin);
@@ -4916,7 +4911,7 @@ function parseWarehouseLineWithoutBin(line) {
     fromBin: "",
     product,
     description,
-    targetQty: normalizeQuantity(parseQuantityToken(tokens[quantityIndex])?.value || ""),
+    targetQty: normalizeQuantity(quantity.value),
     unit: normalizeUnit(tokens[unitIndex]),
     toBin
   };
@@ -5378,6 +5373,72 @@ function parseQuantityToken(value) {
 
   if (/^[\d.,]+$/.test(compact)) return { value: compact.replace(",", ".") };
   return null;
+}
+
+function parseWarehouseQuantityAt(tokens, cursor) {
+  const splitMultiplier = parseSplitMultiplierQuantityTokens(tokens, cursor);
+  if (splitMultiplier) return splitMultiplier;
+
+  const combinedQuantity = parseQuantityWithUnitToken(tokens[cursor] || "");
+  if (combinedQuantity) {
+    return {
+      ...combinedQuantity,
+      start: cursor,
+      next: cursor + 1
+    };
+  }
+
+  const quantity = parseQuantityToken(tokens[cursor] || "");
+  return quantity
+    ? {
+      ...quantity,
+      start: cursor,
+      next: cursor + 1
+    }
+    : null;
+}
+
+function parseSplitMultiplierQuantityTokens(tokens, cursor) {
+  const first = compactWarehouseQuantityToken(tokens[cursor]);
+  const second = compactWarehouseQuantityToken(tokens[cursor + 1]);
+  const third = compactWarehouseQuantityToken(tokens[cursor + 2]);
+
+  if (/^\d+[xX]$/.test(first) && isPlainWarehouseQuantityToken(second)) {
+    return {
+      value: `${first.slice(0, -1)}x${normalizeQuantity(second)}`,
+      start: cursor,
+      next: cursor + 2
+    };
+  }
+
+  if (/^\d+$/.test(first) && /^[xX]$/.test(second) && isPlainWarehouseQuantityToken(third)) {
+    return {
+      value: `${first}x${normalizeQuantity(third)}`,
+      start: cursor,
+      next: cursor + 3
+    };
+  }
+
+  return null;
+}
+
+function parseLastWarehouseQuantityInRange(tokens, start, end) {
+  let quantity = null;
+  for (let index = start; index < end; index += 1) {
+    const parsed = parseWarehouseQuantityAt(tokens, index);
+    if (!parsed || parsed.next > end) continue;
+    quantity = parsed;
+    index = parsed.next - 1;
+  }
+  return quantity;
+}
+
+function compactWarehouseQuantityToken(value) {
+  return normalizeQuantityTokenText(value).replace(/\s+/g, "");
+}
+
+function isPlainWarehouseQuantityToken(value) {
+  return /^\d+(?:[,.]\d+)?$/.test(String(value || ""));
 }
 
 function parseQuantityWithUnitToken(value) {

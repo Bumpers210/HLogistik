@@ -259,6 +259,39 @@ async function run() {
     JSON.stringify(missingBinWarehouseImport)
   );
 
+  const splitMultiplierWithoutHuImport = await parseWarehouseSplitMultiplierWithoutHuFixture();
+  check(
+    "picking import keeps SSI row without HU and OCR-split multiplier quantity",
+    splitMultiplierWithoutHuImport.parsed.lines.length === 1 &&
+      splitMultiplierWithoutHuImport.parsed.lines[0]?.warehouseOrder === "101097251" &&
+      splitMultiplierWithoutHuImport.parsed.lines[0]?.fromHandlingUnit === "" &&
+      splitMultiplierWithoutHuImport.parsed.lines[0]?.fromBin === "022-H4-R8" &&
+      splitMultiplierWithoutHuImport.parsed.lines[0]?.product === "1014678" &&
+      splitMultiplierWithoutHuImport.parsed.lines[0]?.targetQty === "2x33000" &&
+      splitMultiplierWithoutHuImport.parsed.lines[0]?.unit === "Stk" &&
+      splitMultiplierWithoutHuImport.parsed.lines[0]?.toBin === "4000-KAPPE" &&
+      splitMultiplierWithoutHuImport.issues.length === 0,
+    JSON.stringify(splitMultiplierWithoutHuImport)
+  );
+
+  const adjacentSameProductImport = await parseWarehouseAdjacentSameProductSplitMultiplierFixture();
+  check(
+    "picking import keeps adjacent SSI rows with same product and different tasks",
+    adjacentSameProductImport.parsed.lines.length === 2 &&
+      adjacentSameProductImport.parsed.lines[0]?.warehouseOrder === "101097250" &&
+      adjacentSameProductImport.parsed.lines[1]?.warehouseOrder === "101097251" &&
+      adjacentSameProductImport.parsed.lines.every((line) => line.product === "1014678") &&
+      adjacentSameProductImport.parsed.lines[0]?.fromBin === "022-H4-R7" &&
+      adjacentSameProductImport.parsed.lines[1]?.fromBin === "022-H4-R8" &&
+      adjacentSameProductImport.parsed.lines[0]?.targetQty === "6x33000" &&
+      adjacentSameProductImport.parsed.lines[1]?.targetQty === "2x33000" &&
+      adjacentSameProductImport.diagnostics.expectedTableRows === 2 &&
+      adjacentSameProductImport.diagnostics.importedPositionCount === 2 &&
+      adjacentSameProductImport.diagnostics.unimportedCandidateLines.length === 0 &&
+      adjacentSameProductImport.issues.length === 0,
+    JSON.stringify(adjacentSameProductImport)
+  );
+
   const longWarehouseTaskImport = await parseWarehouseLongTaskFixture();
   check(
     "picking import reads Lageraufgabe table rows with long task numbers",
@@ -2446,6 +2479,36 @@ async function parseWarehouseMissingBinFixture() {
   return {
     parsed,
     issues: appParserContext.__validatePickingImport(text, parsed)
+  };
+}
+
+async function parseWarehouseSplitMultiplierWithoutHuFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "101097251 022-H4-R8 1014678 2x 33000 4000-KAPPE"
+  ].join("\n");
+  const parsed = appParserContext.__parseOrderText(text);
+  return {
+    parsed,
+    issues: appParserContext.__validatePickingImport(text, parsed)
+  };
+}
+
+async function parseWarehouseAdjacentSameProductSplitMultiplierFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const text = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "101097250 022-H4-R7 1014678 6x33000 4000-KAPPE",
+    "101097251 022-H4-R8 1014678 2 x 33000 4000-KAPPE"
+  ].join("\n");
+  const parsed = appParserContext.__parseOrderText(text);
+  return {
+    parsed,
+    issues: appParserContext.__validatePickingImport(text, parsed),
+    diagnostics: appParserContext.__pickingImportDiagnostics(text, parsed, {
+      source: "qa-split-multiplier"
+    })
   };
 }
 
