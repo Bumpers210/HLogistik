@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260707-2";
+const CLIENT_ASSET_VERSION = "20260708-1";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 3.5;
 const OCR_PRECISE_RENDER_SCALE = 4.5;
@@ -6587,9 +6587,9 @@ function renderLoadingSlipLine(item, map, line) {
   map.description.readOnly = true;
   map.targetQty.value = line.targetQty || "";
   map.targetQty.readOnly = true;
-  map.actualQty.closest("label").remove();
-  map.unit.closest("label").remove();
-  map.fromHandlingUnit.closest("label").remove();
+  removeClosestLabelOrElement(map.actualQty);
+  removeClosestLabelOrElement(map.unit);
+  removeClosestLabelOrElement(map.fromHandlingUnit);
   map.positionNote.value = combinedPositionNote(line);
   map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
 
@@ -6603,6 +6603,15 @@ function renderLoadingSlipLine(item, map, line) {
     item.classList.toggle("is-done", picked);
     item.classList.toggle("is-collapsed", picked);
   });
+}
+
+function removeClosestLabelOrElement(element) {
+  if (!element) return false;
+  const container = typeof element.closest === "function" ? element.closest("label") : null;
+  const target = container || element;
+  if (!target || typeof target.remove !== "function") return false;
+  target.remove();
+  return true;
 }
 
 function syncStateFromFields() {

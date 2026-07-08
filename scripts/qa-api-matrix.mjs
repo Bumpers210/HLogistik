@@ -459,8 +459,27 @@ async function run() {
   const pickingOcrScoreSource = extractFunctionSource(appSource, "function scorePickingOcrCandidate");
   const pickingDiagnosticsSource = extractFunctionSource(importDiagnosticsSource, "function pickingImportDiagnostics");
   const loadingSlipFallbackSource = extractFunctionSource(appSource, "async function readLoadingSlipOcrFallbackIfNeeded");
+  const loadingSlipRenderSource = extractFunctionSource(appSource, "function renderLoadingSlipLine");
+  const removeClosestLabelOrElementSource = extractFunctionSource(appSource, "function removeClosestLabelOrElement");
   const storageImportSource = extractFunctionSource(appSource, "async function chooseBestStorageImportText");
   const stockEnrichmentSource = extractFunctionSource(appSource, "async function applyStorageBinsFromArticleStock");
+  const loadingSlipCleanupGuard = await loadingSlipCleanupGuardFixture();
+  check(
+    "picking loading-slip render cleanup tolerates missing optional label elements",
+    loadingSlipCleanupGuard.nullSafe === true &&
+      loadingSlipCleanupGuard.noLabelRemovedElement === true &&
+      loadingSlipCleanupGuard.labelRemovedContainer === true &&
+      loadingSlipCleanupGuard.noStateMutation === true &&
+      loadingSlipCleanupGuard.noLocalStorageWrites === true &&
+      loadingSlipRenderSource.includes("removeClosestLabelOrElement(map.actualQty)") &&
+      loadingSlipRenderSource.includes("removeClosestLabelOrElement(map.unit)") &&
+      loadingSlipRenderSource.includes("removeClosestLabelOrElement(map.fromHandlingUnit)") &&
+      !loadingSlipRenderSource.includes('.closest("label").remove()') &&
+      removeClosestLabelOrElementSource.includes('typeof element.closest === "function"') &&
+      removeClosestLabelOrElementSource.includes('typeof target.remove !== "function"') &&
+      importDiagnosticsSource.includes("logPickingImportDiagnostics"),
+    JSON.stringify(loadingSlipCleanupGuard)
+  );
   check(
     "picking PDF import keeps OCR scoring and permits SI Bestellschein PDF text",
     pickingImportSource.includes("readPickingPdfWithOcrCandidate(pdf,") &&
@@ -1882,8 +1901,41 @@ async function createAppParserContext() {
   vm.runInContext(pickingParserCode, context, { filename: "app-picking-parser.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
-  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
+  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
   return context;
+}
+
+async function loadingSlipCleanupGuardFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const context = appParserContext;
+  const stateBefore = JSON.stringify(context.__state);
+  const removals = [];
+  let localStorageWrites = 0;
+  const originalSetItem = context.localStorage.setItem;
+  context.localStorage.setItem = () => {
+    localStorageWrites += 1;
+  };
+  try {
+    const labelContainer = { remove: () => removals.push("label") };
+    const elementWithLabel = {
+      closest: (selector) => selector === "label" ? labelContainer : null,
+      remove: () => removals.push("element-with-label")
+    };
+    const elementWithoutLabel = {
+      closest: () => null,
+      remove: () => removals.push("element-without-label")
+    };
+    return {
+      nullSafe: context.__removeClosestLabelOrElement(null) === false,
+      noLabelRemovedElement: context.__removeClosestLabelOrElement(elementWithoutLabel) === true && removals.includes("element-without-label"),
+      labelRemovedContainer: context.__removeClosestLabelOrElement(elementWithLabel) === true && removals.includes("label") && !removals.includes("element-with-label"),
+      noStateMutation: JSON.stringify(context.__state) === stateBefore,
+      noLocalStorageWrites: localStorageWrites === 0,
+      removals
+    };
+  } finally {
+    context.localStorage.setItem = originalSetItem;
+  }
 }
 
 function pickingTextFixture(orderHintBlock, orderNumber = "60126") {

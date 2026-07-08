@@ -1,6 +1,25 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-07 11:30:00 +02:00
+Stand: 2026-07-08 07:25:00 +02:00
+
+## 2026-07-08 - Live-Hotfix: Ladelisten-Renderguard
+
+Ausgangsproblem:
+
+Beim Import eines Bild-PDFs mit gedrehten Ladeschein-Seiten konnte der UI-Nachlauf mit `Cannot read properties of null (reading 'remove')` abbrechen, wenn optionale Ladelisten-Templatefelder keinen umschliessenden `label`-Container hatten.
+
+Umgesetzt:
+
+- `renderLoadingSlipLine()` entfernt optionale Ladelistenfelder jetzt ueber einen kleinen Guard.
+- Fehlt das Feld, der `label`-Container oder eine `remove()`-Funktion, wird der Renderpfad nicht abgebrochen.
+- Asset-/Cache-Version auf `app.js?v=20260708-1` und Service-Worker-/Manifest-Version `1.5.166` erhoeht.
+- QA-Matrix prueft den null-sicheren Cleanup-Pfad ohne State-/LocalStorage-Persistenz.
+
+Nicht geaendert:
+
+- Keine OCR-, Parser-, Mengen-, Beschreibungs-, Stellplatz-, Export-, Tablet-, Offline- oder DB-Logik.
+- Keine automatische Stellplatzkorrektur.
+- CR-002 bleibt unveraendert.
 
 ## 2026-07-07 - Testsystem: SI-Bild-Bestellschein-Orientierung per Tie-Break
 
