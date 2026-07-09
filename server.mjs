@@ -728,14 +728,12 @@ function validateStorageOrderForExport(order) {
   lines.forEach((line, index) => {
     const position = line.warehouseOrder || index + 1;
     const materialnummer = String(line.product || "").trim();
-    const description = String(line.description || "").trim();
     const lagerplatz = String(line.fromBin || "").trim();
     const handlingUnit = String(line.fromHandlingUnit || "").trim();
     const mengeStueck = readInteger(storageLineQuantity(line));
     const missing = isMissingStorageLine(line);
 
     if (!materialnummer) errors.push(`Pos. ${position}: Artikelnummer fehlt`);
-    if (line.manual !== true && !description) errors.push(`Pos. ${position}: Artikelbezeichnung fehlt`);
     if (!Number.isInteger(mengeStueck) || mengeStueck <= 0) errors.push(`Pos. ${position}: Menge fehlt oder ist ungueltig`);
     if (missing) return;
 

@@ -65,6 +65,19 @@ async function run() {
   check("manual storage max count accepted", normalizeManualStoragePositionCreateCount(String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX)).ok === true, String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX));
   check("manual storage position prefix remains M", MANUAL_STORAGE_POSITION_PREFIX === "M", MANUAL_STORAGE_POSITION_PREFIX);
 
+  const storageMissingDescriptionCompletion = await storageMissingDescriptionCompletionFixture();
+  check(
+    "storage completion accepts line without article description",
+    storageMissingDescriptionCompletion.completeErrors.length === 0 &&
+      storageMissingDescriptionCompletion.exportMessage === "",
+    JSON.stringify(storageMissingDescriptionCompletion)
+  );
+  check(
+    "storage completion still requires article number",
+    storageMissingDescriptionCompletion.missingProductErrors.some((error) => /Artikelnummer fehlt/i.test(error)),
+    JSON.stringify(storageMissingDescriptionCompletion)
+  );
+
   const orderHintSameLine = await parsePickingTextFixture(pickingTextFixture("Bestellhinweis: Service Ecke"));
   check(
     "picking import appends same-line order hint",
@@ -1377,6 +1390,46 @@ async function run() {
     storageExport.status === 200 && storageExport.body.ok && isDiscardedExport(storageExport.body) && storageExport.body.stockReceipt?.booked === 1,
     `${storageExport.status} ${JSON.stringify(storageExport.body)}`
   );
+
+  const storageMissingDescriptionPayload = {
+    ...storageOrderPayload,
+    orderNumber: `QA-ST-NODESC-${suffix}`,
+    customerName: "SSI",
+    customerGroupKey: "SSI",
+    lines: [{
+      warehouseOrder: "101097251",
+      product: materialnummer,
+      description: "",
+      targetQty: "33000",
+      actualQty: "33000",
+      unit: "ST",
+      fromBin: "H3T3",
+      fromHandlingUnit: "340063810001234567",
+      picked: true,
+      manual: false
+    }]
+  };
+  const storageMissingDescriptionCreate = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(storageMissingDescriptionPayload)
+  });
+  const storageMissingDescriptionId = storageMissingDescriptionCreate.body.order?.id;
+  const storageMissingDescriptionExport = noteExportResponse(await request(`/api/orders/${encodeURIComponent(storageMissingDescriptionId)}/export-pdf?warehouse=SSI`, {
+    method: "POST",
+    headers: QA_EXPORT_HEADERS,
+    body: JSON.stringify({ order: storageMissingDescriptionPayload })
+  }));
+  check(
+    "storage SSI export accepts line without article description",
+    storageMissingDescriptionCreate.status === 200 &&
+      storageMissingDescriptionExport.status === 200 &&
+      storageMissingDescriptionExport.body.ok &&
+      isDiscardedExport(storageMissingDescriptionExport.body) &&
+      storageMissingDescriptionExport.body.stockReceipt?.booked === 1,
+    `${storageMissingDescriptionCreate.status}/${storageMissingDescriptionExport.status} ${JSON.stringify(storageMissingDescriptionExport.body)}`
+  );
+
   const exportedStorageDelete = await request(`/api/orders/${encodeURIComponent(storageOrderId)}`, {
     method: "DELETE",
     headers: ROLE_HEADERS
@@ -1949,6 +2002,42 @@ async function parsePickingTextFixture(text) {
   return appParserContext.__parseOrderText(String(text || ""));
 }
 
+async function storageMissingDescriptionCompletionFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const context = appParserContext;
+  const stateBefore = JSON.stringify(context.__state);
+  const completeLine = {
+    warehouseOrder: "101097251",
+    product: "1014678",
+    description: "",
+    targetQty: "33000",
+    actualQty: "33000",
+    unit: "ST",
+    fromBin: "H3T3",
+    fromHandlingUnit: "340063810001234567",
+    picked: true,
+    manual: false
+  };
+
+  try {
+    Object.assign(context.__state, {
+      orderType: "storage",
+      customerName: "SSI",
+      customerGroupKey: "SSI",
+      lines: [completeLine]
+    });
+    const completeErrors = context.__storageLineCompletionErrors(completeLine);
+    const exportMessage = context.__storageOrderExportMessage();
+    const missingProductErrors = context.__storageLineCompletionErrors({
+      ...completeLine,
+      product: ""
+    });
+    return { completeErrors, missingProductErrors, exportMessage };
+  } finally {
+    Object.assign(context.__state, JSON.parse(stateBefore));
+  }
+}
+
 async function createAppParserContext() {
   const context = vm.createContext({
     console,
@@ -1996,6 +2085,7 @@ async function createAppParserContext() {
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
   vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__fromBinReviewPatchForValue = fromBinReviewPatchForValue; globalThis.__isFromBinReviewConfirmedForValue = isFromBinReviewConfirmedForValue; globalThis.__canConfirmFromBinReview = canConfirmFromBinReview; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
+  vm.runInContext("globalThis.__storageLineCompletionErrors = storageLineCompletionErrors; globalThis.__storageOrderExportMessage = storageOrderExportMessage;", context, { filename: "app.js" });
   return context;
 }
 

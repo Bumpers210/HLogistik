@@ -6178,7 +6178,6 @@ function storageLineCompletionErrors(line) {
   const handlingUnit = String(line.fromHandlingUnit || "").trim();
   if (!product) errors.push("Artikelnummer fehlt");
   else if (!/^\d+$/.test(product)) errors.push("Artikelnummer darf nur Zahlen enthalten");
-  if (line.manual !== true && !String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
   if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
   if (currentStorageRequiresHandlingUnit()) {
     if (isSsiStorageOrderContext()) {
