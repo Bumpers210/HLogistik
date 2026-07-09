@@ -78,6 +78,23 @@ async function run() {
     JSON.stringify(storageMissingDescriptionCompletion)
   );
 
+  const tabletModernMissingDescriptionCompletion = await tabletMissingDescriptionCompletionFixture("tablet.js");
+  const tabletLegacyMissingDescriptionCompletion = await tabletMissingDescriptionCompletionFixture("tablet-legacy.js");
+  check(
+    "tablet storage completion accepts line without article description",
+    tabletModernMissingDescriptionCompletion.completeErrors.length === 0 &&
+      tabletLegacyMissingDescriptionCompletion.completeErrors.length === 0 &&
+      tabletModernMissingDescriptionCompletion.exportMessage === "" &&
+      tabletLegacyMissingDescriptionCompletion.exportMessage === "",
+    JSON.stringify({ modern: tabletModernMissingDescriptionCompletion, legacy: tabletLegacyMissingDescriptionCompletion })
+  );
+  check(
+    "tablet storage completion still requires article number",
+    tabletModernMissingDescriptionCompletion.missingProductErrors.some((error) => /Artikelnummer fehlt/i.test(error)) &&
+      tabletLegacyMissingDescriptionCompletion.missingProductErrors.some((error) => /Artikelnummer fehlt/i.test(error)),
+    JSON.stringify({ modern: tabletModernMissingDescriptionCompletion, legacy: tabletLegacyMissingDescriptionCompletion })
+  );
+
   const orderHintSameLine = await parsePickingTextFixture(pickingTextFixture("Bestellhinweis: Service Ecke"));
   check(
     "picking import appends same-line order hint",
@@ -2036,6 +2053,76 @@ async function storageMissingDescriptionCompletionFixture() {
   } finally {
     Object.assign(context.__state, JSON.parse(stateBefore));
   }
+}
+
+async function tabletMissingDescriptionCompletionFixture(fileName) {
+  const context = await createTabletValidationContext(fileName);
+  const completeLine = {
+    warehouseOrder: "101097251",
+    product: "1014678",
+    description: "",
+    targetQty: "33000",
+    actualQty: "33000",
+    unit: "ST",
+    fromBin: "H3T3",
+    fromHandlingUnit: "340063810001234567",
+    picked: false,
+    manual: false
+  };
+  context.__setTabletOrder({
+    orderType: "storage",
+    customerName: "SSI",
+    customerGroupKey: "SSI",
+    lines: [completeLine]
+  });
+  const completeErrors = context.__storageLineCompletionErrors(completeLine);
+  const exportMessage = context.__storageOrderExportMessage();
+  const missingProductErrors = context.__storageLineCompletionErrors({
+    ...completeLine,
+    product: ""
+  });
+  return { fileName, completeErrors, missingProductErrors, exportMessage };
+}
+
+async function createTabletValidationContext(fileName) {
+  const context = vm.createContext({
+    console,
+    Date,
+    Math,
+    URLSearchParams,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    setInterval: () => 0,
+    clearInterval: () => {},
+    localStorage: {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {}
+    },
+    document: {
+      addEventListener: () => {},
+      getElementById: () => null,
+      hidden: false
+    },
+    navigator: { onLine: true },
+    location: { href: "http://127.0.0.1:4175/tablet.html" },
+    fetch: async () => ({ ok: true, json: async () => ({}) })
+  });
+  context.window = context;
+  context.globalThis = context;
+
+  const storageHuRulesCode = await readFile(new URL("../shared/storage-hu-rules.js", import.meta.url), "utf8");
+  vm.runInContext(storageHuRulesCode, context, { filename: "shared/storage-hu-rules.js" });
+  const manualStorageRulesCode = await readFile(new URL("../shared/manual-storage-rules.js", import.meta.url), "utf8");
+  vm.runInContext(manualStorageRulesCode, context, { filename: "shared/manual-storage-rules.js" });
+  const tabletCode = await readFile(new URL(`../${fileName}`, import.meta.url), "utf8");
+  vm.runInContext(`${tabletCode}
+globalThis.__setTabletOrder = (order) => { currentOrder = order; currentMode = order?.orderType || "picking"; };
+globalThis.__storageLineCompletionErrors = storageLineCompletionErrors;
+globalThis.__storageOrderExportMessage = storageOrderExportMessage;`, context, { filename: fileName });
+  return context;
 }
 
 async function createAppParserContext() {
