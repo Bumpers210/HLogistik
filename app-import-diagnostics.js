@@ -659,7 +659,7 @@
     var shape = pickingFromBinShapeDiagnostic(fields.fromBin);
     var reason = "";
     if (["suspicious", "invalid"].indexOf(shape.status) !== -1 && Array.isArray(rechecks) && !rechecks.length) {
-      reason = "Kein Cell-Recheck-Datensatz verfuegbar.";
+      reason = "Von-Lagerplatz-Zell-Recheck durch Richtlinie deaktiviert.";
     }
     return {
       position: index + 1,

@@ -497,25 +497,27 @@ async function run() {
     })
   );
 
-  const suspiciousBinRecheckDiagnostic = await pickingSuspiciousBinRecheckDiagnosticFixture();
+  const suspiciousBinWithoutRecheckDiagnostic = await pickingSuspiciousBinWithoutRecheckDiagnosticFixture();
   check(
-    "picking import diagnostics expose cell recheck suggestion without auto-applying source bin",
-    suspiciousBinRecheckDiagnostic.parsed.lines[0]?.fromBin === "002-H3-SOSA3" &&
-      !Object.prototype.hasOwnProperty.call(suspiciousBinRecheckDiagnostic.parsed.lines[0], "fromBinRecheckSuggestion") &&
-      suspiciousBinRecheckDiagnostic.diagnostics.fromBinRechecks.length === 1 &&
-      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckAttempted === true &&
-      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckSuggestion === "002-H3-SO9A3" &&
-      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckAutoApplied === false &&
-      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckAttempted === true &&
-      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckSource === "word-bbox" &&
-      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckBestCandidate === "002-H3-SO9A3" &&
-      suspiciousBinRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckAutoApplied === false &&
-      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.fromBinRecheckSuggestion === "002-H3-SO9A3" &&
-      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.fromBinRecheckAutoApplied === false &&
-      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.fromBinVisualRecheckBestCandidate === "002-H3-SO9A3" &&
-      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.fromBinVisualRecheckAutoApplied === false &&
-      suspiciousBinRecheckDiagnostic.lineDiagnostics[0]?.finalFromBin === "002-H3-SOSA3",
-    JSON.stringify(suspiciousBinRecheckDiagnostic)
+    "picking import diagnostics keep suspicious source-bin review without cell recheck",
+    suspiciousBinWithoutRecheckDiagnostic.parsed.lines[0]?.fromBin === "002-H3-SOSA3" &&
+      !Object.prototype.hasOwnProperty.call(suspiciousBinWithoutRecheckDiagnostic.parsed.lines[0], "fromBinRecheckSuggestion") &&
+      suspiciousBinWithoutRecheckDiagnostic.diagnostics.fromBinRechecks.length === 0 &&
+      suspiciousBinWithoutRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckAttempted === false &&
+      suspiciousBinWithoutRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckSuggestion === "" &&
+      suspiciousBinWithoutRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckAutoApplied === false &&
+      /Richtlinie deaktiviert/.test(suspiciousBinWithoutRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinRecheckReason || "") &&
+      suspiciousBinWithoutRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckAttempted === false &&
+      suspiciousBinWithoutRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinVisualRecheckBestCandidate === "" &&
+      suspiciousBinWithoutRecheckDiagnostic.diagnostics.positionFieldDiagnostics[0]?.fromBinReviewRequired === true &&
+      suspiciousBinWithoutRecheckDiagnostic.lineDiagnostics[0]?.fromBinRecheckAttempted === false &&
+      suspiciousBinWithoutRecheckDiagnostic.lineDiagnostics[0]?.fromBinRecheckSuggestion === "" &&
+      /Richtlinie deaktiviert/.test(suspiciousBinWithoutRecheckDiagnostic.lineDiagnostics[0]?.fromBinRecheckReason || "") &&
+      suspiciousBinWithoutRecheckDiagnostic.lineDiagnostics[0]?.fromBinVisualRecheckAttempted === false &&
+      suspiciousBinWithoutRecheckDiagnostic.lineDiagnostics[0]?.fromBinVisualRecheckBestCandidate === "" &&
+      suspiciousBinWithoutRecheckDiagnostic.lineDiagnostics[0]?.finalFromBin === "002-H3-SOSA3" &&
+      suspiciousBinWithoutRecheckDiagnostic.lineDiagnostics[0]?.fromBinReviewRequired === true,
+    JSON.stringify(suspiciousBinWithoutRecheckDiagnostic)
   );
 
   const ocrConfusedBinImport = await parseWarehouseOcrConfusedBinFixture();
@@ -580,6 +582,9 @@ async function run() {
   const pickingOcrScoreSource = extractFunctionSource(appSource, "function scorePickingOcrCandidate");
   const pickingDiagnosticsSource = extractFunctionSource(importDiagnosticsSource, "function pickingImportDiagnostics");
   const loadingSlipFallbackSource = extractFunctionSource(appSource, "async function readLoadingSlipOcrFallbackIfNeeded");
+  const pickingNoCellRecheckSource = extractFunctionSource(appSource, "function pickingOcrSelectionWithoutFromBinCellRecheck");
+  const fromBinCellRecheckSetSource = extractFunctionSource(appSource, "async function readPickingFromBinCellRechecks(");
+  const fromBinCellRecheckSource = extractFunctionSource(appSource, "async function readPickingFromBinCellRecheck(");
   const loadingSlipRenderSource = extractFunctionSource(appSource, "function renderLoadingSlipLine");
   const removeClosestLabelOrElementSource = extractFunctionSource(appSource, "function removeClosestLabelOrElement");
   const storageImportSource = extractFunctionSource(appSource, "async function chooseBestStorageImportText");
@@ -743,20 +748,21 @@ async function run() {
     "SI Bestellschein orientation probe markers missing"
   );
   check(
-    "picking PDF import has targeted suspicious source-bin cell recheck",
-    appSource.includes("readPickingFromBinCellRecheck") &&
-      appSource.includes("tessedit_char_whitelist") &&
-      appSource.includes("PICKING_FROM_BIN_RECHECK_WHITELIST") &&
-      appSource.includes("SINGLE_WORD") &&
-      appSource.includes("fromBinRechecks") &&
-      appSource.includes("pdfjs-cell-crop") &&
-      appSource.includes("ocr-line-bbox-crop") &&
-      appSource.includes("pickingVisualTextRows") &&
-      appSource.includes("pickingVisualFromBinCellBbox") &&
-      appSource.includes("findPickingPdfTextCellRecheck") &&
+    "picking PDF import disables source-bin OCR cell recheck",
+    pickingOcrReaderSource.includes("pickingOcrSelectionWithoutFromBinCellRecheck") &&
+      !pickingOcrReaderSource.includes("readPickingFromBinCellRechecks") &&
+      !pickingOcrReaderSource.includes("enrichPickingOcrSelectionWithFromBinRechecks") &&
+      !appSource.includes("OCR Zell-Recheck Von-Lagerplatz") &&
+      pickingNoCellRecheckSource.includes("selection.fromBinRechecks = []") &&
+      fromBinCellRecheckSetSource.includes("return [];") &&
+      fromBinCellRecheckSource.includes('method: "disabled"') &&
+      fromBinCellRecheckSource.includes("durch Richtlinie deaktiviert") &&
+      !fromBinCellRecheckSource.includes("worker.recognize") &&
+      countSourceOccurrences(appSource, "readPickingFromBinCellRechecks(") === 1 &&
+      countSourceOccurrences(appSource, "readPickingFromBinCellRecheck(") === 1 &&
       importDiagnosticsSource.includes("fromBinRecheckAutoApplied: false") &&
       importDiagnosticsSource.includes("fromBinVisualRecheckAutoApplied: false"),
-    "cell recheck source markers missing"
+    `${pickingOcrReaderSource}\n${pickingNoCellRecheckSource}\n${fromBinCellRecheckSetSource}\n${fromBinCellRecheckSource}`
   );
   check(
     "picking PDF import disables source-bin repair scan",
@@ -1956,6 +1962,19 @@ function extractFunctionSource(source, marker) {
   return text.slice(start);
 }
 
+function countSourceOccurrences(source, marker) {
+  const text = String(source || "");
+  const needle = String(marker || "");
+  if (!needle) return 0;
+  let count = 0;
+  let index = text.indexOf(needle);
+  while (index !== -1) {
+    count += 1;
+    index = text.indexOf(needle, index + needle.length);
+  }
+  return count;
+}
+
 function noteExportResponse(response) {
   if (response?.body && typeof response.body === "object") exportResponses.push(response.body);
   return response;
@@ -2756,57 +2775,18 @@ async function pickingSuspiciousBinDiagnosticFixture() {
   return { parsed, diagnostics, lineDiagnostics };
 }
 
-async function pickingSuspiciousBinRecheckDiagnosticFixture() {
+async function pickingSuspiciousBinWithoutRecheckDiagnosticFixture() {
   if (!appParserContext) appParserContext = await createAppParserContext();
   const text = [
     "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
     "101094595 340063810002093506 002-H3-SOSA3 806713 720 ST SPITZE BOSS 9021-0OUT"
   ].join("\n");
   const parsed = appParserContext.__parseOrderText(text);
-  const fromBinRechecks = [{
-    position: 1,
-    tableRowKey: "101094595 | 340063810002093506 | 806713",
-    warehouseOrder: "101094595",
-    fromHandlingUnit: "340063810002093506",
-    product: "806713",
-    targetQty: "720",
-    rawValue: "002-H3-SOSA3",
-    method: "ocr-word-bbox-crop",
-    attempted: true,
-    candidates: [{
-      value: "002-H3-SO9A3",
-      valid: true,
-      confidence: 88,
-      occurrences: 2,
-      methods: ["crop-threshold"],
-      sources: ["ocr-crop"],
-      autoApplied: false
-    }],
-    suggestion: "002-H3-SO9A3",
-    confidence: 88,
-    autoApplied: false,
-    visualAttempted: true,
-    visualSource: "word-bbox",
-    visualCandidates: [{
-      value: "002-H3-SO9A3",
-      valid: true,
-      confidence: 88,
-      occurrences: 2,
-      methods: ["crop-threshold", "crop-upscale"],
-      sources: ["ocr-crop"],
-      autoApplied: false
-    }],
-    visualBestCandidate: "002-H3-SO9A3",
-    visualConfidence: 88,
-    visualReason: "Von-Lagerplatz-Zelle ueber OCR-Wort-BBox visuell ausgeschnitten.",
-    visualAutoApplied: false,
-    reason: "Cell-Recheck aus OCR-Wortboxen."
-  }];
   const diagnostics = appParserContext.__pickingImportDiagnostics(text, parsed, {
     source: "ocr-candidate",
     qualityAccepted: true,
     qualityScore: 6200,
-    fromBinRechecks
+    fromBinRechecks: []
   });
   const lineDiagnostics = appParserContext.__buildPickingImportLineDiagnostics(parsed.lines, parsed.lines, { text, diagnostics });
   return { parsed, diagnostics, lineDiagnostics };

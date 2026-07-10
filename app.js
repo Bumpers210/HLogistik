@@ -4,7 +4,7 @@ const USER_GROUP_KEY = "kommissionier-app-user-group-v1";
 const KNOWN_ORDERS_KEY = "kommissionier-app-known-orders-v1";
 const MODE_KEY = "kommissionier-app-mode-v1";
 const API_BASE = "";
-const CLIENT_ASSET_VERSION = "20260708-3";
+const CLIENT_ASSET_VERSION = "20260710-1";
 const OCR_LANGUAGE = "deu+eng";
 const OCR_RENDER_SCALE = 3.5;
 const OCR_PRECISE_RENDER_SCALE = 4.5;
@@ -31,7 +31,6 @@ const SI_BESTELLSCHEIN_ORIENTATION_PROBE_MIN_MARGIN = 1200;
 const SI_BESTELLSCHEIN_ORIENTATION_TIEBREAKER_LIMIT = 2;
 const SI_BESTELLSCHEIN_ORIENTATION_TIEBREAKER_MAX_MS = 60000;
 const PICKING_FROM_BIN_RECHECK_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
-const PICKING_FROM_BIN_RECHECK_MAX_POSITIONS = 3;
 const PICKING_FROM_BIN_RECHECK_MIN_CONFIDENCE = 55;
 const PICKING_FROM_BIN_VISUAL_RECHECK_ROW_RADIUS = 4;
 const PICKING_FROM_BIN_VISUAL_RECHECK_MAX_ROW_HEIGHT = 120;
@@ -1160,7 +1159,7 @@ async function readPickingPdfWithOcrCandidate(pdf, options = {}) {
           stageStarted = pushImportTiming(timings, "si-bestellschein-praezision", preciseStarted, orientedResult);
         }
 
-        const selection = await enrichPickingOcrSelectionWithFromBinRechecks(
+        const selection = pickingOcrSelectionWithoutFromBinCellRecheck(
           pdf,
           worker,
           orientedResult,
@@ -1186,7 +1185,7 @@ async function readPickingPdfWithOcrCandidate(pdf, options = {}) {
           timings
         );
         if (tieBreak.selectedCandidate && tieBreak.result) {
-          const selection = await enrichPickingOcrSelectionWithFromBinRechecks(
+          const selection = pickingOcrSelectionWithoutFromBinCellRecheck(
             pdf,
             worker,
             tieBreak.result,
@@ -1211,7 +1210,7 @@ async function readPickingPdfWithOcrCandidate(pdf, options = {}) {
     }
     if (isFastAcceptedPickingOcrCandidate(fastResult.best)) {
       const resultWithLoadingSlip = await readLoadingSlipOcrFallbackIfNeeded(pdf, fastResult, scaleCandidates, worker, candidateMap, timings, budget);
-      return enrichPickingOcrSelectionWithFromBinRechecks(
+      return pickingOcrSelectionWithoutFromBinCellRecheck(
         pdf,
         worker,
         resultWithLoadingSlip,
@@ -1239,7 +1238,7 @@ async function readPickingPdfWithOcrCandidate(pdf, options = {}) {
       stageStarted = pushImportTiming(timings, "praezise-gerade", stageStarted, uprightResult);
       if (isStableUprightPickingOcrResult(uprightResult, scaleCandidates)) {
         const resultWithLoadingSlip = await readLoadingSlipOcrFallbackIfNeeded(pdf, uprightResult, scaleCandidates, worker, candidateMap, timings, budget);
-        return enrichPickingOcrSelectionWithFromBinRechecks(
+        return pickingOcrSelectionWithoutFromBinCellRecheck(
           pdf,
           worker,
           resultWithLoadingSlip,
@@ -1258,7 +1257,7 @@ async function readPickingPdfWithOcrCandidate(pdf, options = {}) {
         reason: "kein-konkreter-rotationshinweis",
         rotations: PICKING_OCR_ROTATION_FALLBACK_ROTATIONS
       });
-      return enrichPickingOcrSelectionWithFromBinRechecks(
+      return pickingOcrSelectionWithoutFromBinCellRecheck(
         pdf,
         worker,
         uprightResult,
@@ -1283,7 +1282,7 @@ async function readPickingPdfWithOcrCandidate(pdf, options = {}) {
       stageStartedAt: stageStarted
     });
     pushImportTiming(timings, "rotations-fallback", stageStarted, fullResult);
-    return enrichPickingOcrSelectionWithFromBinRechecks(
+    return pickingOcrSelectionWithoutFromBinCellRecheck(
       pdf,
       worker,
       fullResult,
@@ -2208,99 +2207,28 @@ function pickingOcrSelectionResult(result, allScaleCandidates, rotations, timing
   };
 }
 
-async function enrichPickingOcrSelectionWithFromBinRechecks(pdf, worker, result, allScaleCandidates, rotations, timings = [], budget = null, stage = "") {
+function pickingOcrSelectionWithoutFromBinCellRecheck(_pdf, _worker, result, allScaleCandidates, rotations, timings = [], budget = null, stage = "") {
   const selection = pickingOcrSelectionResult(result, allScaleCandidates, rotations, timings, budget, stage);
-  selection.fromBinRechecks = await readPickingFromBinCellRechecks(pdf, result?.best, worker);
+  selection.fromBinRechecks = [];
   return selection;
 }
 
+/* eslint-disable no-unused-vars */
+// Legacy Zell-Recheck-Helfer bleiben unaufgerufen; der produktive Importpfad nutzt nur die regelbasierte Pruefung.
 async function readPickingFromBinCellRechecks(pdf, candidate, worker) {
-  const lines = (Array.isArray(candidate?.parsed?.lines) ? candidate.parsed.lines : [])
-    .filter((line) => line?.lineType !== "loading-slip");
-  const targets = lines
-    .map((line, index) => ({ line, index, shape: pickingFromBinShapeDiagnostic(line.fromBin) }))
-    .filter((entry) => entry.shape.status === "suspicious")
-    .slice(0, PICKING_FROM_BIN_RECHECK_MAX_POSITIONS);
-
-  if (!targets.length || !pdf || !worker) return [];
-
-  const rawLines = pickingOcrRawLineEntries(candidate);
-  const rechecks = [];
-  for (const target of targets) {
-    const rawLine = findPickingOcrRawLineForPosition(rawLines, target.line, target.index);
-    rechecks.push(await readPickingFromBinCellRecheck(pdf, worker, candidate, target.line, target.index, rawLine));
-  }
-  return rechecks;
+  return [];
 }
 
 async function readPickingFromBinCellRecheck(pdf, worker, candidate, line, index, rawLine) {
   const fields = pickingFromBinRecheckFields(line);
   const base = basePickingFromBinRecheck(fields, index, {
-    attempted: true,
-    method: "ocr-cell-recheck"
+    attempted: false,
+    method: "disabled"
   });
-  if (!rawLine) {
-    return {
-      ...base,
-      attempted: false,
-      reason: "Kein passendes Rohsegment fuer den Cell-Recheck gefunden."
-    };
-  }
-  if (Number(candidate?.rotation || 0) !== 0) {
-    return rawSegmentPickingFromBinRecheck(base, rawLine, "OCR-Zellkoordinaten nur fuer Upright-Kandidaten freigegeben.");
-  }
-
-  setImportStatus(`OCR Zell-Recheck Von-Lagerplatz Pos. ${index + 1} ...`, "", 82);
-  const visualBase = {
+  return {
     ...base,
-    visualAttempted: true
+    reason: "Von-Lagerplatz-Zell-Recheck durch Richtlinie deaktiviert."
   };
-  const crop = await createPickingFromBinRecheckCrop(pdf, worker, candidate, line, rawLine);
-  if (!crop.canvas && Array.isArray(crop.candidates) && crop.candidates.length) {
-    return choosePickingFromBinRecheckSuggestion({
-      ...visualBase,
-      method: crop.method,
-      visualSource: crop.visualSource || crop.method || "",
-      visualCandidates: crop.candidates,
-      visualReason: crop.reason || "Cell-Recheck aus visuellen Zellkoordinaten ausgefuehrt.",
-      reason: crop.reason || "Cell-Recheck aus PDF.js-Textpositionen ausgefuehrt.",
-      candidates: crop.candidates
-    }, fields.fromBin);
-  }
-  if (!crop.canvas) {
-    return rawSegmentPickingFromBinRecheck({
-      ...visualBase,
-      visualSource: crop.visualSource || "raw-segment",
-      visualReason: crop.reason || "Keine visuellen OCR-Zellkoordinaten verfuegbar."
-    }, rawLine, crop.reason || "Keine OCR-Zellkoordinaten verfuegbar.");
-  }
-  if (!isReasonablePickingFromBinRecheckCrop(crop.canvas)) {
-    const reason = `${crop.reason || "Visueller Zell-Crop erzeugt."} Cropgroesse ${crop.canvas.width}x${crop.canvas.height} ist fuer sicheren Zell-Recheck zu gross.`;
-    crop.canvas.width = 0;
-    crop.canvas.height = 0;
-    return rawSegmentPickingFromBinRecheck({
-      ...visualBase,
-      visualSource: crop.visualSource || "line-bbox",
-      visualReason: reason
-    }, rawLine, reason);
-  }
-
-  try {
-    const candidates = await recognizePickingFromBinRecheckCrop(worker, crop.canvas, fields.fromBin, crop.dpi);
-    const allCandidates = (Array.isArray(crop.candidates) ? crop.candidates : []).concat(candidates);
-    return choosePickingFromBinRecheckSuggestion({
-      ...visualBase,
-      method: crop.method,
-      visualSource: crop.visualSource || crop.method || "",
-      visualCandidates: allCandidates,
-      visualReason: crop.reason || "Cell-Recheck aus visuellen Zellkoordinaten ausgefuehrt.",
-      reason: crop.reason || "Cell-Recheck aus OCR-Wortboxen ausgefuehrt.",
-      candidates: allCandidates
-    }, fields.fromBin);
-  } finally {
-    crop.canvas.width = 0;
-    crop.canvas.height = 0;
-  }
 }
 
 function pickingFromBinRecheckFields(line) {
@@ -3027,6 +2955,7 @@ function unionBbox(boxes) {
     y1: Math.max(...valid.map((box) => Number(box.y1)))
   };
 }
+/* eslint-enable no-unused-vars */
 
 function compactOcrFieldValue(value) {
   return String(value || "").toUpperCase().replace(/[^A-Z0-9]+/g, "");
