@@ -19,5 +19,8 @@
     "eslint": "^9.0.0",
     "globals": "^15.0.0",
     "prettier": "^3.0.0"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0"
   }
 }

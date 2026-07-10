@@ -1,4 +1,7 @@
 import { normalizeSsiStorageBin } from "../server/helpers.mjs";
+import ExcelJS from "exceljs";
+import { exportPdf } from "../server/export.mjs";
+import { ORDER_EXCEL_HEADERS, ORDER_EXCEL_SHEET_NAME } from "../server/order-excel-export.mjs";
 import {
   destinationCustomerNameForLines,
   MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX,
@@ -892,17 +895,24 @@ async function run() {
     })
   );
   check(
-    "server export verifies pdf file before exported status",
-    exportSource.includes("assertPdfCreated(pdfPath)") &&
+    "server export verifies temporary PDF and XLSX before final artifacts",
+    exportSource.includes("assertExportArtifactCreated(tempPdfPath, \"PDF\")") &&
+      exportSource.includes("exportOrderExcel(order, tempXlsxPath") &&
+      exportSource.includes("assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")") &&
       exportSource.includes("stat(filePath)") &&
-      exportSource.includes("PDF wurde nicht erstellt") &&
-      exportSource.indexOf("await run(browser") < exportSource.indexOf("await assertPdfCreated(pdfPath)") &&
-      exportSource.indexOf("await assertPdfCreated(pdfPath)") < exportSource.indexOf("return {"),
+      exportSource.includes("wurde nicht erstellt") &&
+      exportSource.indexOf("await run(browser") < exportSource.indexOf("await assertExportArtifactCreated(tempPdfPath, \"PDF\")") &&
+      exportSource.indexOf("await assertExportArtifactCreated(tempPdfPath, \"PDF\")") < exportSource.indexOf("await exportOrderExcel(order, tempXlsxPath") &&
+      exportSource.indexOf("await assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")") < exportSource.indexOf("await copyFile(tempPdfPath, pdfPath)") &&
+      exportSource.indexOf("await copyFile(tempXlsxPath, xlsxPath)") < exportSource.indexOf("return {"),
     JSON.stringify({
-      checksPdfPath: exportSource.includes("assertPdfCreated(pdfPath)"),
+      checksTempPdf: exportSource.includes("assertExportArtifactCreated(tempPdfPath, \"PDF\")"),
+      checksTempXlsx: exportSource.includes("assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")"),
+      writesXlsx: exportSource.includes("exportOrderExcel(order, tempXlsxPath"),
       checksFileStats: exportSource.includes("stat(filePath)"),
-      checksAfterBrowserRun: exportSource.indexOf("await run(browser") < exportSource.indexOf("await assertPdfCreated(pdfPath)"),
-      checksBeforeReturn: exportSource.indexOf("await assertPdfCreated(pdfPath)") < exportSource.indexOf("return {")
+      checksAfterBrowserRun: exportSource.indexOf("await run(browser") < exportSource.indexOf("await assertExportArtifactCreated(tempPdfPath, \"PDF\")"),
+      copiesAfterChecks: exportSource.indexOf("await assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")") < exportSource.indexOf("await copyFile(tempPdfPath, pdfPath)"),
+      checksBeforeReturn: exportSource.indexOf("await copyFile(tempXlsxPath, xlsxPath)") < exportSource.indexOf("return {")
     })
   );
   check(
@@ -1453,6 +1463,140 @@ async function run() {
     `${storageMissingDescriptionCreate.status}/${storageMissingDescriptionExport.status} ${JSON.stringify(storageMissingDescriptionExport.body)}`
   );
 
+  const storageExcelProduct = `00${materialnummer}`;
+  const storageExcelPayload = {
+    ...storageOrderPayload,
+    orderNumber: `QA-XLSX-ST-${suffix}`,
+    customerName: "Fremdkunde",
+    customerGroupKey: "FREMDKUNDE",
+    orderWarehouse: "SI",
+    lines: [{
+      warehouseOrder: "1",
+      product: storageExcelProduct,
+      description: "QA Excel Einlagerung",
+      targetQty: "4",
+      actualQty: "4",
+      unit: "ST",
+      fromBin: "H3T2",
+      fromHandlingUnit: "000000123456",
+      picked: true,
+      manual: true
+    }]
+  };
+  const storageExcelCreate = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(storageExcelPayload)
+  });
+  const storageExcelId = storageExcelCreate.body.order?.id;
+  const storageExcelExport = noteExportResponse(await request(`/api/orders/${encodeURIComponent(storageExcelId)}/export-pdf?warehouse=SI`, {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ order: storageExcelPayload })
+  }));
+  const storageExcelWorkbook = storageExcelExport.body?.xlsxPath
+    ? await readOrderExportWorkbook(storageExcelExport.body)
+    : { sheetName: "", headers: [], rows: [], error: "xlsxPath fehlt" };
+  check(
+    "storage export creates matching PDF and XLSX artifacts",
+    storageExcelCreate.status === 200 &&
+      storageExcelExport.status === 200 &&
+      storageExcelExport.body.ok &&
+      await pathExists(storageExcelExport.body.path) &&
+      await pathExists(storageExcelExport.body.xlsxPath) &&
+      path.parse(storageExcelExport.body.path).name === path.parse(storageExcelExport.body.xlsxPath).name,
+    `${storageExcelCreate.status}/${storageExcelExport.status} ${JSON.stringify(storageExcelExport.body)}`
+  );
+  check(
+    "storage order XLSX has expected sheet, headers, date and SI LE text",
+    storageExcelWorkbook.sheetName === ORDER_EXCEL_SHEET_NAME &&
+      JSON.stringify(storageExcelWorkbook.headers) === JSON.stringify(ORDER_EXCEL_HEADERS) &&
+      storageExcelWorkbook.rows.length === 1 &&
+      storageExcelWorkbook.rows[0].direction === "Ein" &&
+      storageExcelWorkbook.rows[0].product === storageExcelProduct &&
+      storageExcelWorkbook.rows[0].bin === "002-H3-T2" &&
+      storageExcelWorkbook.rows[0].handlingUnit === "000000123456" &&
+      storageExcelWorkbook.rows[0].quantity === 4 &&
+      storageExcelWorkbook.rows[0].dateIsDate === true &&
+      storageExcelWorkbook.rows[0].productIsText === true &&
+      storageExcelWorkbook.rows[0].binIsText === true &&
+      storageExcelWorkbook.rows[0].handlingUnitIsText === true &&
+      storageExcelWorkbook.rows[0].quantityIsNumber === true,
+    JSON.stringify(storageExcelWorkbook)
+  );
+  await cleanupExportResponseArtifacts(storageExcelExport.body);
+
+  const pickingExcelPayload = {
+    ...orderPayload,
+    orderNumber: `QA-XLSX-PK-${suffix}`,
+    customerName: "QA Excel Picking",
+    customerGroupKey: "QA EXCEL PICKING",
+    orderWarehouse: "SSI",
+    lines: [
+      {
+        ...orderPayload.lines[0],
+        actualQty: "1",
+        picked: true,
+        positionNote: ""
+      },
+      {
+        lineType: "loading-slip",
+        position: "2",
+        product: `QA-LS-${suffix}`,
+        description: "QA Ladeliste nicht in Excel",
+        targetQty: "1",
+        actualQty: "1",
+        unit: "ST",
+        fromBin: "",
+        fromHandlingUnit: "",
+        toBin: "",
+        picked: true,
+        barcode: `QA-LS-${suffix}`,
+        positionNote: ""
+      }
+    ]
+  };
+  const pickingExcelCreate = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(pickingExcelPayload)
+  });
+  const pickingExcelId = pickingExcelCreate.body.order?.id;
+  const pickingExcelExport = noteExportResponse(await request(`/api/orders/${encodeURIComponent(pickingExcelId)}/export-pdf?warehouse=SSI`, {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ order: pickingExcelPayload })
+  }));
+  const pickingExcelWorkbook = pickingExcelExport.body?.xlsxPath
+    ? await readOrderExportWorkbook(pickingExcelExport.body)
+    : { sheetName: "", headers: [], rows: [], error: "xlsxPath fehlt" };
+  check(
+    "picking order XLSX uses source bin, keeps SSI LE empty and skips loading-slip lines",
+    pickingExcelCreate.status === 200 &&
+      pickingExcelExport.status === 200 &&
+      pickingExcelExport.body.ok &&
+      pickingExcelWorkbook.rows.length === 1 &&
+      pickingExcelWorkbook.rows[0].direction === "Aus" &&
+      pickingExcelWorkbook.rows[0].product === materialnummer &&
+      pickingExcelWorkbook.rows[0].bin === "002-H3-SQA" &&
+      pickingExcelWorkbook.rows[0].handlingUnit === "" &&
+      pickingExcelWorkbook.rows[0].quantity === 1 &&
+      !pickingExcelWorkbook.rows.some((row) => row.product === `QA-LS-${suffix}`),
+    JSON.stringify({ export: pickingExcelExport.body, workbook: pickingExcelWorkbook })
+  );
+  await cleanupExportResponseArtifacts(pickingExcelExport.body);
+
+  const excelFailure = await excelArtifactFailureFixture();
+  check(
+    "XLSX failure leaves no final PDF/XLSX artifacts",
+    excelFailure.failed === true &&
+      excelFailure.finalPdfExists === false &&
+      excelFailure.finalXlsxExists === false &&
+      excelFailure.tempPdfExists === false &&
+      excelFailure.tempXlsxExists === false,
+    JSON.stringify(excelFailure)
+  );
+
   const exportedStorageDelete = await request(`/api/orders/${encodeURIComponent(storageOrderId)}`, {
     method: "DELETE",
     headers: ROLE_HEADERS
@@ -1918,6 +2062,101 @@ async function pathExists(filePath) {
   }
 }
 
+async function readOrderExportWorkbook(exportBody) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(exportBody.xlsxPath);
+  const worksheet = workbook.getWorksheet(ORDER_EXCEL_SHEET_NAME);
+  if (!worksheet) return { sheetName: "", headers: [], rows: [] };
+  const headers = ORDER_EXCEL_HEADERS.map((_, index) => worksheet.getRow(1).getCell(index + 1).value);
+  const rows = [];
+  for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    if (!row.hasValues) continue;
+    const productCell = row.getCell(3);
+    const binCell = row.getCell(4);
+    const handlingUnitCell = row.getCell(5);
+    const quantityCell = row.getCell(6);
+    rows.push({
+      direction: String(row.getCell(1).value || ""),
+      exportedAt: row.getCell(2).value,
+      dateIsDate: row.getCell(2).value instanceof Date,
+      product: String(productCell.value || ""),
+      productIsText: productCell.type === ExcelJS.ValueType.String || typeof productCell.value === "string",
+      bin: String(binCell.value || ""),
+      binIsText: binCell.type === ExcelJS.ValueType.String || typeof binCell.value === "string",
+      handlingUnit: String(handlingUnitCell.value || ""),
+      handlingUnitIsText: handlingUnitCell.type === ExcelJS.ValueType.String || typeof handlingUnitCell.value === "string",
+      quantity: quantityCell.value,
+      quantityIsNumber: quantityCell.type === ExcelJS.ValueType.Number && typeof quantityCell.value === "number"
+    });
+  }
+  return { sheetName: worksheet.name, headers, rows };
+}
+
+async function cleanupExportResponseArtifacts(exportBody) {
+  const paths = new Set([
+    exportBody?.path,
+    exportBody?.copyPath,
+    exportBody?.xlsxPath,
+    exportBody?.xlsxCopyPath
+  ].filter(Boolean));
+  for (const filePath of paths) {
+    await rm(filePath, { force: true });
+  }
+}
+
+async function excelArtifactFailureFixture() {
+  const root = repoRootDir();
+  const fixtureRoot = path.join(root, "tmp", `xlsx-failure-${suffix}`);
+  const exportDir = path.join(fixtureRoot, "exports");
+  const tempDir = path.join(fixtureRoot, "temp");
+  await mkdir(exportDir, { recursive: true });
+  await mkdir(tempDir, { recursive: true });
+  const order = {
+    orderNumber: `QA-XLSX-FAIL-${suffix}`,
+    customerName: "QA-XLSX-FEHLER",
+    orderDate: "2026-06-22",
+    orderTime: "09:01",
+    orderType: "picking",
+    orderWarehouse: "SSI",
+    lines: [{
+      position: "1",
+      product: materialnummer,
+      description: "QA Excel Fehler",
+      targetQty: "1",
+      actualQty: "1",
+      unit: "ST",
+      fromBin: "002-H3-SQA",
+      fromHandlingUnit: hu,
+      toBin: "QA-ZIEL",
+      picked: true
+    }]
+  };
+  const fileBase = `${order.orderNumber}-${order.customerName}-${order.orderDate}-${order.orderTime.replace(":", "-")}`;
+  const finalPdf = path.join(exportDir, `${fileBase}.pdf`);
+  const finalXlsx = path.join(exportDir, `${fileBase}.xlsx`);
+  const tempPdf = path.join(tempDir, `${fileBase}.pdf`);
+  const tempXlsx = path.join(tempDir, `${fileBase}.xlsx`);
+  let failed = false;
+  let message = "";
+  try {
+    await exportPdf(order, exportDir, tempDir, "", "", { exportedAt: "kein-datum", warehouse: "SSI" });
+  } catch (error) {
+    failed = true;
+    message = error.message || String(error);
+  }
+  const result = {
+    failed,
+    message,
+    finalPdfExists: await pathExists(finalPdf),
+    finalXlsxExists: await pathExists(finalXlsx),
+    tempPdfExists: await pathExists(tempPdf),
+    tempXlsxExists: await pathExists(tempXlsx)
+  };
+  await rm(fixtureRoot, { recursive: true, force: true });
+  return result;
+}
+
 async function request(path, options = {}) {
   const response = await fetch(`${BASE_URL}${path}`, {
     ...options,
@@ -2016,7 +2255,7 @@ async function qaArtifactSearchDirs() {
   dirs.add(path.join(repoRootDir(), "tmp"));
 
   for (const body of exportResponses) {
-    for (const candidate of [body.path, body.copyPath]) {
+    for (const candidate of [body.path, body.copyPath, body.xlsxPath, body.xlsxCopyPath]) {
       if (typeof candidate === "string" && candidate.trim()) {
         dirs.add(path.dirname(candidate));
       }

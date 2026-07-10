@@ -615,7 +615,9 @@ async function route(request, response) {
       : { created: [], updated: [] };
     const discardExport = isQaDiscardExportRequest(request, order);
     const result = await exportPdf(order, exportDir, tempDir, requestOrigin(request), defaultExportDir, {
-      discard: discardExport
+      discard: discardExport,
+      exportedAt: new Date().toISOString(),
+      warehouse: stockWarehouse
     });
     const stockIssue = orderType === "picking" && !savedOrder?.exportedAt
       ? bookPickingOrderIssues(order, stockWarehouse)
@@ -661,13 +663,16 @@ async function sendStatic(response, requestPath) {
 
 async function sendExportFile(response, requestPath) {
   const relativeName = requestPath.replace(/^\/exports\//, "");
-  if (!/^[^/\\]+\.pdf$/i.test(relativeName)) {
+  if (!/^[^/\\]+\.(pdf|xlsx)$/i.test(relativeName)) {
     sendText(response, 404, "Not found");
     return;
   }
   const filePath = safeResolve(exportDir, `/${relativeName}`);
   if (!filePath) return sendText(response, 403, "Forbidden");
-  await sendFile(response, filePath);
+  const headers = /\.xlsx$/i.test(relativeName)
+    ? { "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }
+    : {};
+  await sendFile(response, filePath, headers);
 }
 
 // ── Security helpers ──────────────────────────────────────────────────────────

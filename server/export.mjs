@@ -4,57 +4,83 @@ import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { escapeHtml, formatDate, sanitizeFileName, sanitizeFileNamePart, absoluteUrl } from "./helpers.mjs";
+import { exportOrderExcel } from "./order-excel-export.mjs";
 
 export async function exportPdf(order, exportDir, tempDir, origin = "", copyDir = "", options = {}) {
   const discard = options?.discard === true;
   const fileBase = pdfFileBase(order);
   const htmlPath = path.join(tempDir, `${fileBase}.html`);
-  const pdfPath = path.join(discard ? tempDir : exportDir, `${fileBase}.pdf`);
+  const pdfFileName = `${fileBase}.pdf`;
+  const xlsxFileName = `${fileBase}.xlsx`;
+  const tempPdfPath = path.join(tempDir, pdfFileName);
+  const tempXlsxPath = path.join(tempDir, xlsxFileName);
+  const pdfPath = path.join(exportDir, pdfFileName);
+  const xlsxPath = path.join(exportDir, xlsxFileName);
+  const exportedAt = options?.exportedAt || new Date().toISOString();
   await mkdir(tempDir, { recursive: true });
   if (!discard) await mkdir(exportDir, { recursive: true });
 
   try {
-    await writeFile(htmlPath, printableHtml(order, `${fileBase}.pdf`), "utf8");
+    await writeFile(htmlPath, printableHtml(order, pdfFileName), "utf8");
 
     const browser = findBrowser();
     if (!browser) {
       throw new Error("Kein Edge/Chrome gefunden. Bitte Microsoft Edge oder Chrome installieren.");
     }
 
-    await run(browser, ["--headless", "--disable-gpu", `--print-to-pdf=${pdfPath}`, pathToFileURL(htmlPath).href]);
-    await assertPdfCreated(pdfPath);
-    const copyPath = discard ? "" : await copyPdfToExportFolder(pdfPath, copyDir, `${fileBase}.pdf`);
-    if (copyPath) await assertPdfCreated(copyPath);
+    await run(browser, ["--headless", "--disable-gpu", `--print-to-pdf=${tempPdfPath}`, pathToFileURL(htmlPath).href]);
+    await assertExportArtifactCreated(tempPdfPath, "PDF");
+    await exportOrderExcel(order, tempXlsxPath, { exportedAt, warehouse: options?.warehouse });
+    await assertExportArtifactCreated(tempXlsxPath, "Excel-Datei");
+
+    let copyPath = "";
+    let xlsxCopyPath = "";
+    if (!discard) {
+      await copyFile(tempPdfPath, pdfPath);
+      await copyFile(tempXlsxPath, xlsxPath);
+      await assertExportArtifactCreated(pdfPath, "PDF");
+      await assertExportArtifactCreated(xlsxPath, "Excel-Datei");
+      copyPath = await copyExportArtifactToFolder(pdfPath, copyDir, pdfFileName);
+      xlsxCopyPath = await copyExportArtifactToFolder(xlsxPath, copyDir, xlsxFileName);
+      if (copyPath) await assertExportArtifactCreated(copyPath, "PDF");
+      if (xlsxCopyPath) await assertExportArtifactCreated(xlsxCopyPath, "Excel-Datei");
+    }
 
     return {
-      file: `${fileBase}.pdf`,
+      file: pdfFileName,
       path: discard ? "" : pdfPath,
       copyPath,
-      url: discard ? "" : absoluteUrl(origin, `/exports/${encodeURIComponent(`${fileBase}.pdf`)}`),
+      url: discard ? "" : absoluteUrl(origin, `/exports/${encodeURIComponent(pdfFileName)}`),
+      xlsxFile: xlsxFileName,
+      xlsxPath: discard ? "" : xlsxPath,
+      xlsxCopyPath,
+      xlsxUrl: discard ? "" : absoluteUrl(origin, `/exports/${encodeURIComponent(xlsxFileName)}`),
+      artifactExportedAt: exportedAt,
       ...(discard ? { discarded: true } : {})
     };
   } finally {
     await safeUnlink(htmlPath);
-    if (discard) await safeUnlink(pdfPath);
+    await safeUnlink(tempPdfPath);
+    await safeUnlink(tempXlsxPath);
   }
 }
 
-async function assertPdfCreated(filePath) {
+async function assertExportArtifactCreated(filePath, label) {
   let fileStats;
   try {
     fileStats = await stat(filePath);
   } catch (error) {
     if (error?.code === "ENOENT") {
-      throw new Error("PDF wurde nicht erstellt. Auftrag wurde nicht als exportiert markiert.");
+      throw new Error(`${label} wurde nicht erstellt. Auftrag wurde nicht als exportiert markiert.`);
     }
     throw error;
   }
   if (!fileStats.isFile() || fileStats.size <= 0) {
-    throw new Error("PDF wurde leer erstellt. Auftrag wurde nicht als exportiert markiert.");
+    throw new Error(`${label} wurde leer erstellt. Auftrag wurde nicht als exportiert markiert.`);
   }
 }
 
-async function copyPdfToExportFolder(sourcePath, copyDir, fileName) {
+async function copyExportArtifactToFolder(sourcePath, copyDir, fileName) {
   if (!copyDir) return "";
   const targetPath = path.join(copyDir, fileName);
   if (path.resolve(sourcePath).toLowerCase() === path.resolve(targetPath).toLowerCase()) return "";
