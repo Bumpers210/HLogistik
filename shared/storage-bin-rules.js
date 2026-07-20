@@ -45,10 +45,14 @@
   function normalizeSsiBlockBin(hall, blockNumber) {
     var hallNumber = Number(hall);
     var number = Number(blockNumber);
-    if (!Number.isInteger(hallNumber) || hallNumber < 1 || hallNumber > 7 || !Number.isInteger(number) || number <= 0) {
+    if (!isWholeNumber(hallNumber) || hallNumber < 1 || hallNumber > 7 || !isWholeNumber(number) || number <= 0) {
       return null;
     }
     return "022-H" + hallNumber + "-R" + number;
+  }
+
+  function isWholeNumber(value) {
+    return typeof value === "number" && isFinite(value) && Math.floor(value) === value;
   }
 
   function normalizeSsiH3DirectBin(code) {

@@ -111,6 +111,7 @@ let orderListInitialized = false;
 let knownOrderIds = new Set();
 let orderNoticeTimer = null;
 let notifiedOrderId = "";
+const packageArticleLookupCache = new Map();
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -134,6 +135,7 @@ function bindElements() {
   [
     "pdfInput",
     "imageInput",
+    "loadingSlipPdfInput",
     "fileDrop",
     "fileDropTitle",
     "appTitle",
@@ -175,6 +177,7 @@ function bindElements() {
     "pickHeader",
     "storageLineActions",
     "manualStorageMaterialInput",
+    "manualStorageBinInput",
     "manualStoragePositionCountInput",
     "manualStorageQuantityInput",
     "addStorageLineButton",
@@ -202,6 +205,7 @@ function bindElements() {
 function bindEvents() {
   elements.pdfInput.addEventListener("change", handlePdfUpload);
   elements.imageInput.addEventListener("change", handleImageUpload);
+  elements.loadingSlipPdfInput.addEventListener("change", handleLoadingSlipPdfUpload);
   elements.pickingModeButton.addEventListener("click", () => setMode("picking"));
   elements.storageModeButton.addEventListener("click", () => setMode("storage"));
   elements.topToggleButton.addEventListener("click", () => {
@@ -212,7 +216,7 @@ function bindEvents() {
   elements.exportButton.addEventListener("click", exportCsv);
   elements.pdfExportButton.addEventListener("click", exportPdf);
   elements.addStorageLineButton.addEventListener("click", addManualStorageLine);
-  elements.saveOrderButton.addEventListener("click", saveOrderNow);
+  elements.saveOrderButton.addEventListener("click", handleSaveOrderButtonClick);
   elements.releaseOrderButton.addEventListener("click", releaseCurrentOrder);
   elements.discardDraftButton.addEventListener("click", discardCurrentDraft);
   elements.takeOverOrderButton.addEventListener("click", takeOverCurrentOrder);
@@ -433,6 +437,15 @@ async function handlePdfUpload(event) {
   if (!file) return;
   let data;
 
+  if (/\.xlsx?$/i.test(file.name || "")) {
+    try {
+      await handlePickingXlsxUpload(file);
+    } finally {
+      event.target.value = "";
+    }
+    return;
+  }
+
   if (!window.pdfjsLib) {
     setImportStatus("PDF-Modul konnte nicht geladen werden. Seite neu laden.", "error");
     return;
@@ -504,6 +517,170 @@ async function handlePdfUpload(event) {
   } finally {
     event.target.value = "";
   }
+}
+
+async function handleSaveOrderButtonClick() {
+  if (!canAppendLoadingSlipToXlsxDraft()) {
+    await saveOrderNow();
+    return;
+  }
+
+  if (!elements.loadingSlipPdfInput) return;
+  elements.loadingSlipPdfInput.value = "";
+  elements.loadingSlipPdfInput.click();
+}
+
+function canAppendLoadingSlipToXlsxDraft(order = state) {
+  const lines = Array.isArray(order?.lines) ? order.lines : [];
+  return isPickingXlsxOrder(order)
+    && order?.awaitingRelease === true
+    && !String(order?.id || "").trim()
+    && lines.some((line) => line?.lineType !== "loading-slip");
+}
+
+async function handleLoadingSlipPdfUpload(event) {
+  const file = event?.target?.files?.[0];
+  if (!file) return;
+  if (!canAppendLoadingSlipToXlsxDraft()) {
+    setImportStatus("Ladelisten können nur an einen noch ungespeicherten XLSX-Entwurf angehängt werden.", "error", 100);
+    event.target.value = "";
+    return;
+  }
+  if (!window.pdfjsLib || !window.Tesseract?.createWorker) {
+    setImportStatus("PDF- oder OCR-Modul konnte nicht geladen werden. Seite neu laden.", "error", 100);
+    event.target.value = "";
+    return;
+  }
+
+  try {
+    const attachment = await readLoadingSlipAttachmentPdf(file);
+    if (!attachment.lines.length) {
+      const detail = attachment.warnings.length ? ` ${attachment.warnings.join(" ")}` : "";
+      setImportStatus(`Keine Ladelistenpositionen angehängt; der XLSX-Entwurf blieb unverändert.${detail}`, "error", 100);
+      return;
+    }
+
+    state.lines = appendAllLoadingSlipLines(state.lines, attachment.lines);
+    render();
+    const warningText = attachment.warnings.length ? ` Warnung: ${attachment.warnings.join(" ")}` : "";
+    setImportStatus(
+      `${attachment.lines.length} Ladelistenposition(en) aus ${attachment.loadingSlipCount} Ladeliste(n) angehängt.${warningText}`,
+      attachment.warnings.length ? "warning" : "ok",
+      100
+    );
+  } catch (error) {
+    console.error(error);
+    setImportStatus(`Ladeliste konnte nicht angehängt werden; der XLSX-Entwurf blieb unverändert. ${error.message || ""}`.trim(), "error", 100);
+  } finally {
+    event.target.value = "";
+  }
+}
+
+async function readLoadingSlipAttachmentPdf(file) {
+  const data = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data }).promise;
+  const pageTexts = await readPdfPages(pdf);
+  const attachmentId = createId();
+  const pageCandidates = pageTexts.map((text, index) => loadingSlipAttachmentPageCandidate(text, index + 1, {
+    source: "pdf-text",
+    rotation: 0
+  }));
+  const requiresOcr = pageCandidates.map((candidate) => !loadingSlipAttachmentCandidateIsComplete(candidate));
+  let worker = null;
+
+  try {
+    if (requiresOcr.some(Boolean)) {
+      worker = await createOcrWorker(pdf.numPages * OCR_ROTATIONS.length, OCR_RENDER_DPI);
+      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+        if (!requiresOcr[pageNumber - 1]) continue;
+        const baseCanvas = await renderPdfPageToCanvas(pdf, pageNumber, OCR_RENDER_SCALE);
+        try {
+          for (const rotation of OCR_ROTATIONS) {
+            const canvas = rotation ? rotateCanvas(baseCanvas, rotation) : baseCanvas;
+            try {
+              setOcrWorkerStage(worker, "Ladeliste");
+              await setOcrWorkerDpi(worker, OCR_RENDER_DPI);
+              setImportStatus(`OCR Ladeliste: Seite ${pageNumber}/${pdf.numPages}${rotation ? `, Drehung ${rotation} Grad` : ""} ...`);
+              const result = await worker.recognize(canvas);
+              const candidate = loadingSlipAttachmentPageCandidate(result.data.text || "", pageNumber, {
+                source: "ocr",
+                rotation
+              });
+              if (loadingSlipAttachmentCandidateScore(candidate) > loadingSlipAttachmentCandidateScore(pageCandidates[pageNumber - 1])) {
+                pageCandidates[pageNumber - 1] = candidate;
+              }
+            } catch (error) {
+              pageCandidates[pageNumber - 1].ocrErrors.push(error.message || "OCR fehlgeschlagen.");
+            } finally {
+              if (canvas !== baseCanvas) {
+                canvas.width = 0;
+                canvas.height = 0;
+              }
+            }
+          }
+        } finally {
+          baseCanvas.width = 0;
+          baseCanvas.height = 0;
+        }
+      }
+    }
+  } finally {
+    if (worker) await worker.terminate();
+  }
+
+  const warnings = [];
+  const lines = pageCandidates.flatMap((candidate) => {
+    warnings.push(...loadingSlipAttachmentWarnings(candidate));
+    return candidate.lines.map((line) => createLine({
+      ...line,
+      loadingSlipAttachmentId: attachmentId,
+      loadingSlipAttachmentPage: candidate.pageNumber
+    }));
+  });
+  const loadingSlipCount = new Set(lines.map((line) => `${line.loadingSlipAttachmentPage}:${line.loadingSlipBlockIndex || 1}`)).size;
+  return { lines, loadingSlipCount, warnings, pages: pageCandidates };
+}
+
+function loadingSlipAttachmentPageCandidate(text, pageNumber, options = {}) {
+  const sourceLines = String(text || "")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const lines = parseLoadingSlipLines(sourceLines);
+  const audit = auditLoadingSlipImport(sourceLines, lines);
+  const blocks = loadingSlipBlocksFrom(sourceLines);
+  const hasSignal = blocks.length > 0 || /lad[ce](?:schein|liste)|lade(?:schein|liste)/i.test(sourceLines.join("\n"));
+  return {
+    pageNumber,
+    source: options.source || "",
+    rotation: Number(options.rotation || 0),
+    sourceLines,
+    lines,
+    audit,
+    hasSignal,
+    ocrErrors: []
+  };
+}
+
+function loadingSlipAttachmentCandidateIsComplete(candidate) {
+  return candidate?.lines?.length > 0 && !candidate?.audit?.issues?.length;
+}
+
+function loadingSlipAttachmentCandidateScore(candidate) {
+  const lines = Array.isArray(candidate?.lines) ? candidate.lines.length : 0;
+  const expected = Number(candidate?.audit?.expected || 0);
+  const issues = Array.isArray(candidate?.audit?.issues) ? candidate.audit.issues.length : 0;
+  return lines * 10000 + expected * 100 - issues * 1000 + (candidate?.source === "pdf-text" ? 1 : 0);
+}
+
+function loadingSlipAttachmentWarnings(candidate) {
+  if (!candidate?.hasSignal) return [];
+  const pageLabel = `Seite ${candidate.pageNumber}`;
+  if (!candidate.lines.length) {
+    return [`${pageLabel}: Ladeliste erkannt, aber keine Position konnte gelesen werden.`];
+  }
+  return (candidate.audit?.issues || []).map((issue) => `${pageLabel}: ${issue}`);
 }
 
 async function handleImageUpload(event) {
@@ -1042,7 +1219,27 @@ function applyFromBinReviewWarnings(lines) {
   });
 }
 
-function openFromBinReviewWarnings(lines) {
+function isPickingXlsxOrder(order = state) {
+  const orderType = order?.orderType || currentMode;
+  return orderType === "picking" && /\.(?:xlsx|xls)$/i.test(String(order?.originalFileName || "").trim());
+}
+
+function noFromBinReviewPatch() {
+  return {
+    binWarning: "",
+    binWarningValue: "",
+    binWarningType: "",
+    fromBinReviewRequired: false,
+    fromBinReviewReason: "",
+    fromBinReviewBlocksRelease: false,
+    fromBinReviewBlocksExport: false,
+    fromBinManualCorrectionClearsWarning: false,
+    fromBinReviewConfirmedValue: ""
+  };
+}
+
+function openFromBinReviewWarnings(lines, order = state) {
+  if (isPickingXlsxOrder(order)) return [];
   return (Array.isArray(lines) ? lines : [])
     .filter((line) => line?.lineType !== "loading-slip")
     .filter((line) =>
@@ -1051,8 +1248,8 @@ function openFromBinReviewWarnings(lines) {
     );
 }
 
-function hasOpenFromBinReviewWarnings(lines = state.lines) {
-  return openFromBinReviewWarnings(lines).length > 0;
+function hasOpenFromBinReviewWarnings(lines = state.lines, order = state) {
+  return openFromBinReviewWarnings(lines, order).length > 0;
 }
 
 function pickingFromBinShapeDiagnostic(value) {
@@ -1087,6 +1284,32 @@ function isFormalValidPickingBin(value) {
 
 function normalizePickingBinText(value) {
   return cleanImportedWarehouseBin(value);
+}
+
+function formatPickingBinForDisplay(value) {
+  return String(value || "").replace(/^\d{3}-/, "");
+}
+
+function formatLineQuantityForDisplay(line, value) {
+  return window.HLogistikQuantityFormat?.displayLineQuantity(line, value) ?? String(value || "");
+}
+
+function normalizeOrderQuantitiesForSave(order) {
+  (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
+    if (!line || line.lineType === "loading-slip") return;
+    ["targetQty", "actualQty"].forEach((key) => {
+      const text = String(line[key] ?? "").trim();
+      if (!text) return;
+      const parsed = window.HLogistikQuantityFormat?.parse(text);
+      if (Number.isFinite(parsed)) line[key] = String(parsed);
+    });
+    const source = String(line.quantitySourceText || "").trim();
+    const effectiveQuantity = String(line.actualQty ?? "").trim() || line.targetQty;
+    if (source && window.HLogistikQuantityFormat?.parse(source) !== window.HLogistikQuantityFormat?.parse(effectiveQuantity)) {
+      line.quantitySourceText = "";
+    }
+  });
+  return order;
 }
 
 function cleanImportedWarehouseBin(value) {
@@ -2075,6 +2298,10 @@ function shouldRunLoadingSlipOcrFallback(result) {
   if (!isCleanUprightPickingOcrCandidate(best)) return false;
   if (best.metrics?.bestellscheinLike) return false;
 
+  // A complete first picking page can otherwise hide a rotated loading-slip
+  // page: the upright OCR result is accepted before that page gets a rotated pass.
+  if (hasUnrecognizedUprightOcrPage(best)) return true;
+
   const source = String(best.text || "");
   if (isLoadingSlipStartLine(source) || isLoadingSlipHeaderBarcodeLine(source)) return true;
 
@@ -2082,6 +2309,18 @@ function shouldRunLoadingSlipOcrFallback(result) {
   const parsedLineCount = Number(best.metrics?.parsedLineCount || 0);
   const expectedRows = Number(best.metrics?.expectedRows || 0);
   return rawLineCount - Math.max(parsedLineCount, expectedRows) >= 8;
+}
+
+function hasUnrecognizedUprightOcrPage(candidate) {
+  const pages = Array.isArray(candidate?.pages) ? candidate.pages : [];
+  if (pages.length < 2) return false;
+
+  return pages.some((page) => {
+    const source = String(page || "").trim();
+    if (!source) return true;
+    const parsed = parseOrderText(source);
+    return !Array.isArray(parsed?.lines) || parsed.lines.length === 0;
+  });
 }
 
 function isFastAcceptedPickingOcrCandidate(candidate) {
@@ -3628,12 +3867,16 @@ async function importText(text, fileName = "", parsed = parseOrderText(text), im
   state.customerGroupKey = parsed.customerGroupKey || customerGroupKeyForImport(state.customerName);
 
   const nextLines = parsed.lines;
+  const isPickingXlsx = importDiagnostics.documentType === "picking-xlsx";
   const warehouseHint = await detectPickingWarehouse(nextLines, text);
   applyWarehouseHint(warehouseHint);
   const binResult = await applyStorageBinsFromArticleStock(nextLines, {
-    allowSiFromBinFill: isSiSystemFromBinFillContext(text, parsed, importDiagnostics)
+    allowSiFromBinFill: !isPickingXlsx && isSiSystemFromBinFillContext(text, parsed, importDiagnostics)
   });
-  state.lines = applyFromBinReviewWarnings(binResult.lines);
+  const reviewedLines = isPickingXlsx
+    ? binResult.lines
+    : applyFromBinReviewWarnings(binResult.lines);
+  state.lines = await applyPackageNotesForImportedLines(reviewedLines);
   const lineDiagnostics = buildPickingImportLineDiagnostics(nextLines, state.lines, { text, diagnostics: importDiagnostics });
   logPickingImportLineDiagnostics(lineDiagnostics, importDiagnostics);
   applyDefaultDestinationCustomer(state.lines);
@@ -4241,7 +4484,7 @@ function parseOrderText(text) {
       customerGroupKey,
       lines: appendLoadingSlipLines(warehouseRows.map((line) => createLine({
         ...line,
-        actualQty: line.targetQty,
+        ...canonicalImportedQuantity(line.targetQty),
         fromHandlingUnitEditable: !String(line.fromHandlingUnit || "").trim()
       })), loadingSlipLines)
     };
@@ -4256,8 +4499,8 @@ function parseOrderText(text) {
       customerGroupKey: customerGroupKeyForImport(bestellscheinCustomer),
       lines: appendLoadingSlipLines(bestellscheinRows.map((line, index) => createLine({
         ...line,
+        ...canonicalImportedQuantity(line.targetQty),
         warehouseOrder: String(index + 1),
-        actualQty: line.targetQty,
         fromHandlingUnitEditable: !String(line.fromHandlingUnit || "").trim()
       })), loadingSlipLines)
     };
@@ -4300,9 +4543,69 @@ function parseOrderText(text) {
     customerGroupKey,
     lines: appendLoadingSlipLines(candidates.map((line, index) => createLine({
       ...line,
+      ...canonicalImportedQuantity(line.targetQty),
       warehouseOrder: line.position || String(index + 1),
-      actualQty: line.targetQty
     })), loadingSlipLines)
+  };
+}
+
+async function handlePickingXlsxUpload(file) {
+  if (currentMode === "storage") {
+    setImportStatus("XLSX-Kommissionierimporte sind nur im Modus Kommissionierung zulässig.", "error", 100);
+    return;
+  }
+  if (!window.XLSX?.read || !window.HLogistikPickingXlsxImport?.previewWorkbook) {
+    setImportStatus("XLSX-Modul konnte nicht geladen werden. Seite neu laden.", "error", 100);
+    return;
+  }
+
+  setImportStatus(`Lese ${file.name} ...`, "", 0);
+  const workbook = window.XLSX.read(await file.arrayBuffer(), { type: "array", cellText: true, cellDates: false });
+  const preview = window.HLogistikPickingXlsxImport.previewWorkbook(workbook);
+  if (!preview.ok) {
+    const firstError = preview.hardErrors?.[0];
+    const detail = firstError ? ` Zeile ${firstError.rowNumber}: ${firstError.errors.join(", ")}.` : "";
+    setImportStatus(`XLSX-Import abgebrochen.${detail}`, "error", 100);
+    return;
+  }
+
+  const parsed = {
+    orderNumber: "",
+    customerName: "",
+    customerGroupKey: "",
+    lines: preview.lines.map((line) => createLine(line))
+  };
+  const diagnostics = {
+    source: "xlsx",
+    documentType: "picking-xlsx",
+    sheetName: preview.sheetName,
+    headerRow: preview.headerRow,
+    inputRowCount: preview.inputRowCount,
+    importedPositionCount: preview.lines.length,
+    ignoredRowCount: preview.ignoredRows.length,
+    hardErrorCount: preview.hardErrors.length
+  };
+  const result = await importText(`XLSX-Blatt ${preview.sheetName}`, file.name, parsed, diagnostics);
+  if (result.cancelled) {
+    setImportStatus(result.message || "XLSX-Import abgebrochen.", result.type || "warning", 100);
+    return;
+  }
+  setImportStatus(
+    `${result.lines} XLSX-Positionen importiert; ${preview.ignoredRows.length} Leer-/Summenzeile(n) begründet ignoriert.`,
+    "ok",
+    100
+  );
+}
+
+function canonicalImportedQuantity(value) {
+  const raw = String(value ?? "").trim();
+  const parsed = window.HLogistikQuantityFormat?.parse(raw);
+  if (!Number.isFinite(parsed)) return { targetQty: raw, actualQty: raw, quantitySourceText: "" };
+  const canonical = String(parsed);
+  return {
+    targetQty: canonical,
+    actualQty: canonical,
+    quantitySourceText: /[xX×]/.test(raw) ? raw : ""
   };
 }
 
@@ -4328,12 +4631,21 @@ function loadingSlipParserDependencies() {
     createLine,
     setAutoPositionNote,
     normalizeUnit,
-    normalizeQuantity
+    normalizeQuantity,
+    parseQuantity: parseImportQuantityValue
   };
 }
 
 function appendLoadingSlipLines(lines, loadingSlipLines) {
   return window.HLogistikPickingParser.appendLoadingSlipLines(lines, loadingSlipLines);
+}
+
+function appendAllLoadingSlipLines(lines, loadingSlipLines) {
+  return window.HLogistikPickingParser.appendAllLoadingSlipLines(lines, loadingSlipLines);
+}
+
+function loadingSlipLineKey(line) {
+  return window.HLogistikPickingParser.loadingSlipLineKey(line);
 }
 
 function countLoadingSlipLines(lines) {
@@ -4355,14 +4667,14 @@ function mergeServerLoadingSlipLines(order, serverOrder) {
     .filter((line) => line?.lineType === "loading-slip" && String(line.barcode || "").trim());
   if (!serverLoadingSlipLines.length) return order;
 
-  const previousByBarcode = new Map(
+  const previousByKey = new Map(
     order.lines
       .filter((line) => line?.lineType === "loading-slip" && String(line.barcode || "").trim())
-      .map((line) => [String(line.barcode || "").trim(), line])
+      .map((line) => [loadingSlipLineKey(line), line])
   );
   const normalLines = order.lines.filter((line) => line?.lineType !== "loading-slip");
   const mergedLoadingSlipLines = serverLoadingSlipLines.map((line) => {
-    const previous = previousByBarcode.get(String(line.barcode || "").trim());
+    const previous = previousByKey.get(loadingSlipLineKey(line));
     return {
       ...line,
       picked: previous?.picked ?? line.picked,
@@ -4400,7 +4712,6 @@ function parseLoadingSlipBlock(lines) {
   return window.HLogistikPickingParser.parseLoadingSlipBlock(lines, loadingSlipParserDependencies());
 }
 
-// eslint-disable-next-line no-unused-vars
 function loadingSlipBlocksFrom(lines) {
   return window.HLogistikPickingParser.loadingSlipBlocksFrom(lines, loadingSlipParserDependencies());
 }
@@ -4569,7 +4880,8 @@ function countWarehouseCandidateRows(lines) {
 }
 
 function parseImportQuantityValue(value) {
-  return window.HLogistikImportLineHelpers.parseImportQuantityValue(value);
+  return window.HLogistikQuantityFormat?.parse(value)
+    ?? window.HLogistikImportLineHelpers.parseImportQuantityValue(value);
 }
 
 function collectBestellscheinRows(lines) {
@@ -5569,6 +5881,48 @@ function combineUniqueNoteParts(parts) {
   return window.HLogistikImportLineHelpers.combineUniqueNoteParts(parts);
 }
 
+async function applyPackageNotesForImportedLines(lines) {
+  return Promise.all((Array.isArray(lines) ? lines : []).map(async (line) => {
+    if (!line || line.lineType === "loading-slip") return line;
+    const article = await articleForPackageNote(line.product);
+    return {
+      ...line,
+      autoPositionNotes: setAutoPositionNote(line.autoPositionNotes, "package", packageNoteForLine(line, article))
+    };
+  }));
+}
+
+async function refreshPackageNoteForLine(line) {
+  if (!line || line.lineType === "loading-slip") return false;
+  const article = await articleForPackageNote(line.product);
+  const next = setAutoPositionNote(line.autoPositionNotes, "package", packageNoteForLine(line, article));
+  if (JSON.stringify(next) === JSON.stringify(normalizeAutoPositionNotes(line.autoPositionNotes))) return false;
+  line.autoPositionNotes = next;
+  return true;
+}
+
+async function articleForPackageNote(material) {
+  const product = String(material || "").trim();
+  if (!serverOnline || !product) return null;
+  const warehouse = currentOrderWarehouse();
+  const key = `${warehouse}:${product}`;
+  if (!packageArticleLookupCache.has(key)) {
+    const request = apiJson(`/api/articles/lookup/${encodeURIComponent(product)}`, {
+      headers: { "X-Warehouse": warehouse }
+    }).catch(() => null);
+    packageArticleLookupCache.set(key, request);
+  }
+  return packageArticleLookupCache.get(key);
+}
+
+function packageNoteForLine(line, article) {
+  const quantity = window.HLogistikQuantityFormat?.parse(line?.targetQty);
+  const quantityPerPackage = Number(article?.mengeProKarton || 0);
+  const packageType = String(article?.gebindeArt || "").trim().toUpperCase();
+  if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(quantityPerPackage) || quantityPerPackage <= 0 || !packageType) return "";
+  return `${Math.ceil(quantity / quantityPerPackage)}${packageType}`;
+}
+
 function findFirst(text, patterns) {
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -5699,6 +6053,7 @@ function stripSsiStorageHandlingUnitPrefix(value) {
 function render() {
   renderModeControls();
   renderWarehouseHint();
+  renderSaveOrderButton();
   renderReleaseButton();
   renderDiscardButton();
   renderTakeOverButton();
@@ -5751,28 +6106,30 @@ function render() {
     const canEditHandlingUnit = isStorageLine || state.awaitingRelease || line.fromHandlingUnitEditable === true || isMissingOrIncompleteHandlingUnit(line.fromHandlingUnit);
     map.fromHandlingUnit.value = storageHandlingUnitDisplayValue(line.fromHandlingUnit, useSsiStorageHuPrefix);
     map.positionNote.value = combinedPositionNote(line);
-    map.fromBin.value = line.fromBin || "";
     map.product.value = line.product || "";
     map.description.value = line.description;
-    map.targetQty.value = line.targetQty;
-    map.actualQty.value = line.actualQty;
+    map.targetQty.value = formatLineQuantityForDisplay(line, line.targetQty);
+    map.actualQty.value = formatLineQuantityForDisplay(line, line.actualQty);
     map.unit.value = line.unit;
     map.product.readOnly = !isManualStorageLine;
     setNumericInputMode(map.product);
     map.description.readOnly = !isManualStorageLine;
     setHandlingUnitEditMode(map.fromHandlingUnit, canEditHandlingUnit, { useSsiStorageHuPrefix });
     const canEditBin = isStorageLine || state.awaitingRelease || Boolean(binWarningText);
+    const fullFromBin = line.fromBin || "";
+    map.fromBin.value = !isStorageLine && !canEditBin ? formatPickingBinForDisplay(fullFromBin) : fullFromBin;
+    map.fromBin.dataset.fullValue = !isStorageLine && !canEditBin && map.fromBin.value !== fullFromBin ? fullFromBin : "";
     map.fromBin.readOnly = !canEditBin;
     map.fromBin.placeholder = isStorageLine ? "Stellplatz" : "Lagerplatz";
     map.fromBin.setAttribute("autocapitalize", "characters");
     map.fromBin.classList.add("uppercase-input");
     map.fromBin.classList.toggle("is-warning", Boolean(binWarningText));
-    if (binWarningText) map.fromBin.title = binWarningText;
+    map.fromBin.title = binWarningText || (!isStorageLine && map.fromBin.value !== fullFromBin ? fullFromBin : "");
     map.fromHandlingUnit.placeholder = isStorageLine
       ? (useSsiStorageHuPrefix ? `${SSI_STORAGE_HU_PREFIX} + 7 Stellen` : "HU eintragen")
       : map.fromHandlingUnit.placeholder;
     if (isManualStorageLine) {
-      map.targetQty.closest("label")?.remove();
+      (map.targetQty.closest("label") || map.targetQty).remove();
       map.actualQty.placeholder = "Stückzahl";
       map.actualQty.setAttribute("aria-label", "Stückzahl");
     } else {
@@ -5806,11 +6163,14 @@ function render() {
     });
     map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
     map.fromBin.addEventListener("input", () => {
-      if (canEditBin) map.fromBin.value = map.fromBin.value.toUpperCase();
-      const reviewWasConfirmed = isFromBinReviewConfirmedForValue(line.fromBin, line);
-      const reviewPatch = fromBinReviewPatchForValue(map.fromBin.value, line);
+      const skipFromBinReview = isPickingXlsxOrder();
+      if (canEditBin && !skipFromBinReview) map.fromBin.value = map.fromBin.value.toUpperCase();
+      const reviewWasConfirmed = !skipFromBinReview && isFromBinReviewConfirmedForValue(line.fromBin, line);
+      const reviewPatch = skipFromBinReview
+        ? noFromBinReviewPatch()
+        : fromBinReviewPatchForValue(map.fromBin.value, line);
       const patch = { fromBin: map.fromBin.value, ...reviewPatch };
-      const clearWarning = shouldClearBinWarning(line, map.fromBin.value);
+      const clearWarning = !skipFromBinReview && shouldClearBinWarning(line, map.fromBin.value);
       if (clearWarning) {
         patch.binWarning = "";
         patch.binWarningValue = "";
@@ -5833,10 +6193,10 @@ function render() {
     });
     map.description.addEventListener("input", () => updateLine(line.id, { description: map.description.value }, false));
     if (!isManualStorageLine) {
-      map.targetQty.addEventListener("input", () => updateLine(line.id, { targetQty: map.targetQty.value }, false));
+      map.targetQty.addEventListener("input", () => updateLine(line.id, { targetQty: map.targetQty.value, quantitySourceText: "" }, false));
     }
     map.actualQty.addEventListener("input", () => {
-      const patch = { actualQty: map.actualQty.value };
+      const patch = { actualQty: map.actualQty.value, quantitySourceText: "" };
       if (Number(line.stockQty || 0) > 0) {
         const quantityRemark = storageQuantityRemarkForLine({ ...line, actualQty: map.actualQty.value }, Number(line.stockQty || 0));
         patch.autoPositionNotes = setAutoPositionNote(line.autoPositionNotes, "quantity", quantityRemark);
@@ -5863,6 +6223,7 @@ function renderStorageLineActions() {
   elements.storageLineActions.hidden = !isStorage;
   elements.addStorageLineButton.disabled = !isStorage;
   if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.disabled = !isStorage;
+  if (elements.manualStorageBinInput) elements.manualStorageBinInput.disabled = !isStorage;
   if (elements.manualStoragePositionCountInput) {
     elements.manualStoragePositionCountInput.disabled = !isStorage;
     elements.manualStoragePositionCountInput.min = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN);
@@ -5937,6 +6298,12 @@ async function addManualStorageLine() {
     elements.manualStorageQuantityInput?.focus();
     return;
   }
+  const binResult = readManualStorageBin();
+  if (!binResult.ok) {
+    setServerStatus(binResult.error, "error");
+    elements.manualStorageBinInput?.focus();
+    return;
+  }
   const material = normalizeDigits(elements.manualStorageMaterialInput?.value || "");
   const preset = await manualStorageLinePreset(material);
 
@@ -5951,9 +6318,10 @@ async function addManualStorageLine() {
   state.createdBy = state.createdBy || currentUser.name;
   state.awaitingRelease = state.awaitingRelease || !state.id;
   for (let index = 0; index < countResult.value; index += 1) {
-    state.lines.push(createManualStorageLine(preset, { actualQty: quantityResult.value }));
+    state.lines.push(createManualStorageLine(preset, { actualQty: quantityResult.value, fromBin: binResult.value }));
   }
   if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.value = "";
+  if (elements.manualStorageBinInput) elements.manualStorageBinInput.value = "";
   if (elements.manualStoragePositionCountInput) elements.manualStoragePositionCountInput.value = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT);
   if (elements.manualStorageQuantityInput) elements.manualStorageQuantityInput.value = "1";
   topControlsCollapsed = false;
@@ -5971,7 +6339,7 @@ function createManualStorageLine(preset = {}, options = {}) {
     fromHandlingUnitEditable: true,
     product: preset.product || "",
     description: preset.description || "",
-    fromBin: "",
+    fromBin: options.fromBin || "",
     targetQty: "",
     actualQty: options.actualQty || "",
     unit: preset.unit || "Stk"
@@ -6013,6 +6381,16 @@ function readManualStoragePositionQuantity() {
     };
   }
   return { ok: true, value: String(value), error: "" };
+}
+
+function readManualStorageBin() {
+  const raw = String(elements.manualStorageBinInput?.value || "").trim();
+  if (!raw) return { ok: true, value: "", error: "" };
+  const value = window.HLogistikStorageBinRules?.normalizeSsiStorageBin(raw) || "";
+  if (!value) {
+    return { ok: false, value: "", error: `Stellplatz "${raw}" ist für SSI nicht bekannt.` };
+  }
+  return { ok: true, value, error: "" };
 }
 
 async function manualStorageLinePreset(material) {
@@ -6142,8 +6520,7 @@ function parseStorageSlipText(text, _fileName = "", pageTexts = []) {
     fromBin: "",
     product: line.product,
     description: line.description || "",
-    targetQty: line.targetQty,
-    actualQty: line.targetQty,
+    ...canonicalImportedQuantity(line.targetQty),
     unit: line.unit || "Stk",
     palletInfo: line.palletInfo,
     positionNote: "",
@@ -6535,7 +6912,10 @@ function renderModeControls() {
   document.body.classList.toggle("is-storage-mode", isStorage);
   elements.appTitle.textContent = isStorage ? "Einlagerung" : "Kommissionierliste";
   elements.fileDrop.setAttribute("for", "pdfInput");
-  elements.fileDropTitle.textContent = isStorage ? "Lieferschein-PDF importieren" : "PDF importieren";
+  elements.pdfInput.accept = isStorage
+    ? ".pdf,application/pdf"
+    : ".pdf,.xlsx,.xls,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel";
+  elements.fileDropTitle.textContent = isStorage ? "Lieferschein-PDF importieren" : "PDF oder XLSX importieren";
   elements.fileDrop.querySelector(".file-drop-copy").textContent = isStorage
     ? "PDF vom Einlager-Lieferschein importieren, Positionen pruefen und HU/Stellplatz eintragen."
     : "Auftrag auswählen, Positionen prüfen und digital abhaken.";
@@ -6574,6 +6954,19 @@ function renderReleaseButton() {
   );
   elements.releaseOrderButton.hidden = !isDraft;
   elements.releaseOrderButton.disabled = !isDraft || !serverOnline || !currentUser.name;
+}
+
+function renderSaveOrderButton() {
+  if (!elements.saveOrderButton) return;
+  const canAppend = canAppendLoadingSlipToXlsxDraft();
+  elements.saveOrderButton.textContent = canAppend
+    ? "Ladeliste anhängen"
+    : state.awaitingRelease
+      ? "Entwurf lokal speichern"
+      : "Auftrag speichern";
+  elements.saveOrderButton.title = canAppend
+    ? "PDF-Ladeliste an diesen XLSX-Entwurf anhängen"
+    : "";
 }
 
 function hasCurrentOrderData() {
@@ -6631,7 +7024,6 @@ function renderTopControls() {
   elements.topToggleButton.querySelector("span").textContent = topControlsCollapsed ? "v" : "^";
   elements.topToggleButton.title = topControlsCollapsed ? "Kopfleiste anzeigen" : "Kopfleiste einklappen";
   elements.topToggleButton.setAttribute("aria-label", elements.topToggleButton.title);
-  elements.saveOrderButton.textContent = state.awaitingRelease ? "Entwurf lokal speichern" : "Auftrag speichern";
 }
 
 function setTopControlsCollapsed(collapsed) {
@@ -6665,7 +7057,7 @@ function renderLoadingSlipLine(item, map, line) {
   map.fromBin.classList.add("short-input");
   map.description.value = line.description || "";
   map.description.readOnly = true;
-  map.targetQty.value = line.targetQty || "";
+  map.targetQty.value = formatLineQuantityForDisplay(line, line.targetQty);
   map.targetQty.readOnly = true;
   removeClosestLabelOrElement(map.actualQty);
   removeClosestLabelOrElement(map.unit);
@@ -6732,9 +7124,13 @@ function syncLineFieldsFromDom() {
         : huInput.value;
     }
     if (binInput) {
-      line.fromBin = binInput.value.toUpperCase();
-      Object.assign(line, fromBinReviewPatchForValue(line.fromBin, line));
-      if (shouldClearBinWarning(line, line.fromBin)) {
+      const fromBinValue = binInput.readOnly && binInput.dataset.fullValue
+        ? binInput.dataset.fullValue
+        : binInput.value;
+      const skipFromBinReview = isPickingXlsxOrder();
+      line.fromBin = skipFromBinReview ? fromBinValue : fromBinValue.toUpperCase();
+      Object.assign(line, skipFromBinReview ? noFromBinReviewPatch() : fromBinReviewPatchForValue(line.fromBin, line));
+      if (!skipFromBinReview && shouldClearBinWarning(line, line.fromBin)) {
         line.binWarning = "";
         line.binWarningValue = "";
         line.binWarningType = "";
@@ -6760,11 +7156,19 @@ function syncLineFieldsFromDom() {
 function updateLine(id, patch, rerender = true) {
   const line = state.lines.find((entry) => entry.id === id);
   if (!line) return;
+  const refreshPackage = Object.prototype.hasOwnProperty.call(patch, "product") || Object.prototype.hasOwnProperty.call(patch, "targetQty");
   Object.assign(line, patch);
   markOrderTouched();
   saveState();
   updateCounts();
   if (rerender) render();
+  if (refreshPackage) {
+    refreshPackageNoteForLine(line).then((changed) => {
+      if (!changed) return;
+      saveState();
+      render();
+    });
+  }
 }
 
 function markOrderTouched() {
@@ -7194,6 +7598,7 @@ function scheduleServerSave() {
 async function saveOrderNow(silent = false, { allowDraftRelease = false, touch = true } = {}) {
   if (!requireCurrentUser()) return false;
   syncStateFromFields();
+  normalizeOrderQuantitiesForSave(state);
 
   if (state.awaitingRelease && !allowDraftRelease) {
     saveDraftState(silent ? "Entwurf lokal gespeichert." : "Entwurf lokal gespeichert. Mit \"Auftrag freigeben\" in die Auftragsliste übernehmen.");

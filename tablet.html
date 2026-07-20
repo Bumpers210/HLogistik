@@ -9,8 +9,10 @@
     <link rel="stylesheet" href="tablet.css?v=20260623-7">
     <script src="offline-store.js?v=20260623-7"></script>
     <script src="shared/storage-hu-rules.js?v=20260702-2"></script>
+    <script src="shared/storage-bin-rules.js?v=20260707-1"></script>
     <script src="shared/manual-storage-rules.js?v=20260702-2"></script>
-    <script src="tablet-legacy.js?v=20260709-1"></script>
+    <script src="shared/quantity-format.js?v=20260720-2"></script>
+    <script src="tablet-legacy.js?v=20260720-1"></script>
   </head>
   <body>
     <header class="tablet-header">
@@ -98,6 +100,10 @@
           <label>
             Material
             <input id="manualStorageMaterialInput" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="Artikelnummer">
+          </label>
+          <label>
+            Stellplatz für alle Positionen (optional)
+            <input id="manualStorageBinInput" type="text" autocomplete="off" autocapitalize="characters" placeholder="Stellplatz">
           </label>
           <label>
             Anzahl Positionen

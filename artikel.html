@@ -77,6 +77,25 @@
         <p id="articleStatus" class="export-status" role="status">Artikel werden geladen...</p>
       </section>
 
+      <section id="siStockImportPanel" class="toolbar article-toolbar" aria-labelledby="siStockImportTitle" hidden>
+        <div>
+          <p class="eyebrow">Nur Lager SI</p>
+          <h2 id="siStockImportTitle">SI-Bestandsersatz</h2>
+          <p>Die Datei wird zuerst vollständig geprüft. Erst eine fehlerfreie Vorschau kann mit der exakten Bestätigung <strong>SI-BESTAND ERSETZEN</strong> übernommen werden.</p>
+        </div>
+        <div class="stacked-actions">
+          <label class="secondary-button file-button">
+            Bestandsdetail auswählen
+            <input id="siStockInput" type="file" accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+          </label>
+          <button id="siStockReplaceButton" class="danger-button" type="button" disabled>Geprüften SI-Bestand ersetzen</button>
+        </div>
+        <div id="siStockPreview" aria-live="polite">
+          <p>Keine Vorschau geladen.</p>
+        </div>
+        <p id="siStockStatus" class="export-status" role="status"></p>
+      </section>
+
       <section class="article-layout">
         <div class="list-panel">
           <div class="section-heading">

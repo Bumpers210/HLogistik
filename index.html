@@ -13,6 +13,7 @@
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css?v=20260622-2">
     <script src="pdf.min.js" defer></script>
+    <script src="xlsx.full.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
     <script src="shared-ui.js?v=20260619-2" defer></script>
     <script src="offline-store.js?v=20260619-2" defer></script>
@@ -20,12 +21,14 @@
     <script src="shared/storage-hu-rules.js?v=20260702-2" defer></script>
     <script src="shared/storage-bin-rules.js?v=20260707-1" defer></script>
     <script src="shared/manual-storage-rules.js?v=20260702-2" defer></script>
+    <script src="shared/quantity-format.js?v=20260717-1" defer></script>
+    <script src="app-picking-xlsx-import.js?v=20260717-1" defer></script>
     <script src="app-import-line-helpers.js?v=20260702-3" defer></script>
     <script src="app-import-diagnostics.js?v=20260710-1" defer></script>
     <script src="app-state-helpers.js?v=20260703-1" defer></script>
     <script src="app-ui-helpers.js?v=20260703-2" defer></script>
-    <script src="app-picking-parser.js?v=20260703-4" defer></script>
-  <script src="app.js?v=20260710-1" defer></script>
+    <script src="app-picking-parser.js?v=20260720-2" defer></script>
+  <script src="app.js?v=20260720-2" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -85,8 +88,9 @@
         <label id="fileDrop" class="file-drop" for="pdfInput">
           <span id="fileDropTitle" class="file-drop-title">PDF importieren</span>
           <span class="file-drop-copy">Auftrag auswählen, Positionen prüfen und digital abhaken.</span>
-          <input id="pdfInput" type="file" accept=".pdf,application/pdf">
+          <input id="pdfInput" type="file" accept=".pdf,.xlsx,.xls,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel">
           <input id="imageInput" type="file" accept="image/*" capture="environment">
+          <input id="loadingSlipPdfInput" type="file" accept=".pdf,application/pdf" hidden>
         </label>
 
         <div class="order-picker">
@@ -177,6 +181,10 @@
             <label class="line-action-field">
               Material
               <input id="manualStorageMaterialInput" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="Artikelnummer">
+            </label>
+            <label class="line-action-field">
+              Stellplatz für alle Positionen (optional)
+              <input id="manualStorageBinInput" type="text" autocomplete="off" autocapitalize="characters" placeholder="Stellplatz">
             </label>
             <label class="line-action-field compact">
               Anzahl Positionen
