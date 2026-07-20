@@ -779,6 +779,24 @@ async function run() {
     JSON.stringify(loadingSlipThreePositions)
   );
 
+  check(
+    "picking loading-slip imports leave position notes empty",
+    loadingSlipXlsxAttachment.loadingLines.concat(loadingSlipThreePositions.loadingLines).every((line) =>
+      !String(line.positionNote || "").trim() &&
+        !String(line.autoPositionNotes?.loadingSlip || "").trim()
+    ),
+    JSON.stringify({
+      xlsxAttachmentNotes: loadingSlipXlsxAttachment.loadingLines.map((line) => ({
+        positionNote: line.positionNote || "",
+        autoLoadingSlipNote: line.autoPositionNotes?.loadingSlip || ""
+      })),
+      automaticImportNotes: loadingSlipThreePositions.loadingLines.map((line) => ({
+        positionNote: line.positionNote || "",
+        autoLoadingSlipNote: line.autoPositionNotes?.loadingSlip || ""
+      }))
+    })
+  );
+
   const rotatedLoadingSlipFallback = await rotatedLoadingSlipFallbackFixture();
   check(
     "picking import starts rotated loading-slip OCR for an unrecognised second page",
@@ -1400,6 +1418,7 @@ async function run() {
 
   const tabletLegacySource = await readFile(new URL("../tablet-legacy.js", import.meta.url), "utf8");
   const tabletModernSource = await readFile(new URL("../tablet.js", import.meta.url), "utf8");
+  const tabletCssSource = await readFile(new URL("../tablet.css", import.meta.url), "utf8");
   const serviceWorkerSource = await readFile(new URL("../service-worker.js", import.meta.url), "utf8");
   const manifestSource = await readFile(new URL("../manifest.webmanifest", import.meta.url), "utf8");
   const exportSource = await readFile(new URL("../server/export.mjs", import.meta.url), "utf8");
@@ -1428,8 +1447,9 @@ async function run() {
       countSourceOccurrences(tabletLegacyServiceWorkerSource, "registration.update()") === 1 &&
       countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
       tabletHtmlSource.includes("tablet-legacy.js?v=20260720-1") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.190\"") &&
-      manifestSource.includes("\"version\": \"1.5.190\"") &&
+      tabletHtmlSource.includes("tablet.css?v=20260720-1") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.191\"") &&
+      manifestSource.includes("\"version\": \"1.5.191\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&
@@ -1447,6 +1467,12 @@ async function run() {
       manifestVersion: JSON.parse(manifestSource).version,
       legacyAsset: tabletHtmlSource.match(/tablet-legacy\.js\?v=[^"]+/)?.[0] || ""
     })
+  );
+  check(
+    "tablet picking columns leave room for six-digit target and actual quantities",
+    /\.pick-column-grid span:nth-child\(3\),\s*\.line-top label:nth-child\(3\)\s*\{\s*width: 25%;\s*\}/.test(tabletCssSource) &&
+      /\.pick-column-grid span:nth-child\(4\),\s*\.line-top label:nth-child\(4\),\s*\.pick-column-grid span:nth-child\(5\),\s*\.line-top label:nth-child\(5\)\s*\{\s*width: 14%;\s*\}/.test(tabletCssSource),
+    "description=25%, target=14%, actual=14%"
   );
   check(
     "quantity and picking XLSX browser modules load before their consumers",

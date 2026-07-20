@@ -456,14 +456,14 @@ input[autocapitalize="characters"] {
 
 .pick-column-grid span:nth-child(3),
 .line-top label:nth-child(3) {
-  width: 33%;
+  width: 25%;
 }
 
 .pick-column-grid span:nth-child(4),
 .line-top label:nth-child(4),
 .pick-column-grid span:nth-child(5),
 .line-top label:nth-child(5) {
-  width: 10%;
+  width: 14%;
 }
 
 .pick-column-grid span:nth-child(6),
