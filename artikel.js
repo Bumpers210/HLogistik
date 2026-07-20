@@ -1,5 +1,7 @@
 const ARTICLE_SEARCH_DEBOUNCE_MS = 200;
 const ARTICLE_SORT_KEY = "artikelstamm-sort-v1";
+const SI_STOCK_IMPORT_SHEET_NAME = "Bestandsdetail";
+const SI_STOCK_REPLACE_CONFIRMATION = "SI-BESTAND ERSETZEN";
 const ARTICLE_SORT_COLUMNS = new Set([
   "materialnummer",
   "materialbezeichnung",
@@ -17,6 +19,8 @@ let selectedArticleId = "";
 let searchTimer = null;
 let serverOnline = false;
 let articleSort = readArticleSort();
+let siStockImportPayload = null;
+let siStockImportPreview = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
@@ -36,6 +40,11 @@ function bindElements() {
     "includeInactiveInput",
     "newArticleButton",
     "csvInput",
+    "siStockImportPanel",
+    "siStockInput",
+    "siStockReplaceButton",
+    "siStockPreview",
+    "siStockStatus",
     "exportLink",
     "bookingExportFromInput",
     "bookingExportToInput",
@@ -74,6 +83,8 @@ function bindEvents() {
   elements.includeInactiveInput.addEventListener("change", loadArticles);
   elements.newArticleButton.addEventListener("click", () => { selectArticle(null); openEditor(); });
   elements.csvInput.addEventListener("change", importArticleFile);
+  elements.siStockInput.addEventListener("change", previewSiStockImportFile);
+  elements.siStockReplaceButton.addEventListener("click", replaceSiStockImport);
   elements.bookingExportButton.addEventListener("click", exportBookings);
   elements.resetArticleDataButton.addEventListener("click", resetArticleMasterData);
   elements.articleForm.addEventListener("submit", saveArticle);
@@ -97,6 +108,7 @@ function bindEvents() {
       selectedArticleId = "";
       selectArticle(null);
       updateExportLink();
+      updateSiStockImportVisibility(true);
       if (serverOnline) await loadArticles();
     });
   }
@@ -105,6 +117,7 @@ function bindEvents() {
 async function initialize() {
   if (!enforceArticleAccess()) return;
   applyWarehouseSelection();
+  updateSiStockImportVisibility(true);
   setDefaultBookingExportDates();
   updateExportLink();
   selectArticle(null);
@@ -181,6 +194,169 @@ function applyWarehouseSelection() {
 function updateExportLink() {
   if (!elements.exportLink) return;
   elements.exportLink.href = `/api/articles/export?warehouse=${encodeURIComponent(currentWarehouse())}`;
+}
+
+function canManageSiStockImport() {
+  const { group } = HLogistikUi.currentUser();
+  return currentWarehouse() === "SI" && ["buero", "verwaltung"].includes(group);
+}
+
+function updateSiStockImportVisibility(resetPreview = false) {
+  if (!elements.siStockImportPanel) return;
+  const visible = canManageSiStockImport();
+  elements.siStockImportPanel.hidden = !visible;
+  if (resetPreview || !visible) resetSiStockImportPreview();
+}
+
+function resetSiStockImportPreview() {
+  siStockImportPayload = null;
+  siStockImportPreview = null;
+  if (elements.siStockInput) elements.siStockInput.value = "";
+  if (elements.siStockReplaceButton) elements.siStockReplaceButton.disabled = true;
+  if (elements.siStockPreview) {
+    const message = document.createElement("p");
+    message.textContent = "Keine Vorschau geladen.";
+    elements.siStockPreview.replaceChildren(message);
+  }
+  setSiStockStatus("");
+}
+
+async function previewSiStockImportFile(event) {
+  const file = event.target.files?.[0];
+  siStockImportPayload = null;
+  siStockImportPreview = null;
+  elements.siStockReplaceButton.disabled = true;
+  if (!file) {
+    resetSiStockImportPreview();
+    return;
+  }
+  if (!canManageSiStockImport()) {
+    setSiStockStatus("Der SI-Bestandsersatz ist nur im Lager SI für Büro und Verwaltung verfügbar.", "error");
+    return;
+  }
+  if (!window.XLSX?.read || !window.XLSX?.utils?.sheet_to_json) {
+    setSiStockStatus("Excel-Import ist nicht verfügbar. Seite neu laden.", "error");
+    return;
+  }
+
+  try {
+    setSiStockStatus("SI-Bestandsdatei wird für die Vorschau geprüft.");
+    const workbook = window.XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false });
+    const sheetName = workbook.SheetNames.find((name) => String(name).trim() === SI_STOCK_IMPORT_SHEET_NAME);
+    if (!sheetName) throw new Error(`Tabellenblatt ${SI_STOCK_IMPORT_SHEET_NAME} fehlt.`);
+    const rows = window.XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+      header: 1,
+      raw: false,
+      defval: "",
+      blankrows: true
+    });
+    const payload = { fileName: file.name, sheetName, rows };
+    const previewResponse = await apiJson("/api/articles/si-stock-import/preview", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    const preview = previewResponse.preview;
+    if (!preview?.counts) throw new Error("SI-Vorschauantwort ist unvollständig.");
+    siStockImportPayload = payload;
+    siStockImportPreview = preview;
+    renderSiStockImportPreview(preview);
+    elements.siStockReplaceButton.disabled = !preview.ok;
+    setSiStockStatus(
+      preview.ok
+        ? "Vorschau vollständig. Der SI-Bestand wurde noch nicht verändert."
+        : "Vorschau enthält harte Fehler; der Bestandsersatz bleibt gesperrt.",
+      preview.ok ? "ok" : "error"
+    );
+  } catch (error) {
+    renderSiStockImportPreview(null);
+    setSiStockStatus(`SI-Vorschau fehlgeschlagen: ${error.message}`, "error");
+  }
+}
+
+function renderSiStockImportPreview(preview) {
+  if (!elements.siStockPreview) return;
+  if (!preview?.counts) {
+    const message = document.createElement("p");
+    message.textContent = "Keine verwertbare Vorschau geladen.";
+    elements.siStockPreview.replaceChildren(message);
+    return;
+  }
+  const counts = preview.counts;
+  const summary = document.createElement("p");
+  summary.textContent = [
+    `${counts.nonEmptyDataRows} Quelldatenzeile(n)`,
+    `${counts.importArticles} Artikel`,
+    `${counts.importStockRows} Bestandszeile(n)`,
+    `${counts.discardedExactDuplicates} exakte Dublette(n) verworfen`,
+    `${counts.mergedEmptyLeGroups} Leer-LE-Gruppe(n) zusammengefasst`,
+    `${counts.warnings} Warnung(en)`,
+    `${counts.hardErrors} harte Fehler`
+  ].join(" · ");
+  const content = [summary];
+  appendSiStockIssues(content, "Harte Fehler", preview.hardErrors);
+  appendSiStockIssues(content, "Warnungen", preview.warnings);
+  elements.siStockPreview.replaceChildren(...content);
+}
+
+function appendSiStockIssues(content, title, issues) {
+  if (!Array.isArray(issues) || !issues.length) return;
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const list = document.createElement("ul");
+  issues.slice(0, 50).forEach((issue) => {
+    const item = document.createElement("li");
+    item.textContent = `${issue.rowNumber ? `Zeile ${issue.rowNumber}: ` : ""}${issue.message}`;
+    list.append(item);
+  });
+  if (issues.length > 50) {
+    const item = document.createElement("li");
+    item.textContent = `${issues.length - 50} weitere Meldung(en) sind in der Zählung enthalten.`;
+    list.append(item);
+  }
+  content.push(heading, list);
+}
+
+async function replaceSiStockImport() {
+  if (!siStockImportPayload || !siStockImportPreview?.ok || !canManageSiStockImport()) return;
+  const confirmation = window.prompt(
+    `Dieser Vorgang ersetzt ausschließlich SI-Artikel und SI-Bestand. Zum Fortfahren exakt eingeben: ${SI_STOCK_REPLACE_CONFIRMATION}`
+  );
+  if (confirmation === null) return;
+  if (confirmation.trim() !== SI_STOCK_REPLACE_CONFIRMATION) {
+    setSiStockStatus(`Bestandsersatz abgebrochen: Bestätigung muss exakt ${SI_STOCK_REPLACE_CONFIRMATION} lauten.`, "error");
+    return;
+  }
+
+  try {
+    elements.siStockReplaceButton.disabled = true;
+    setSiStockStatus("Geprüfter SI-Bestand wird transaktional ersetzt.");
+    const result = await apiJson("/api/articles/si-stock-import/replace", {
+      method: "POST",
+      body: JSON.stringify({ ...siStockImportPayload, confirmation })
+    });
+    await loadArticles("");
+    siStockImportPayload = null;
+    siStockImportPreview = null;
+    elements.siStockInput.value = "";
+    renderSiStockImportReplacementResult(result);
+    setSiStockStatus(
+      `SI-Bestand ersetzt: ${result.replaced?.articles || 0} Artikel und ${result.replaced?.stockRows || 0} Bestandszeile(n).`,
+      "ok"
+    );
+  } catch (error) {
+    elements.siStockReplaceButton.disabled = !siStockImportPreview?.ok;
+    setSiStockStatus(`SI-Bestandsersatz fehlgeschlagen: ${error.message}`, "error");
+  }
+}
+
+function renderSiStockImportReplacementResult(result) {
+  const message = document.createElement("p");
+  message.textContent = `Ersetzt: ${result.replaced?.articles || 0} Artikel und ${result.replaced?.stockRows || 0} Bestandszeile(n). Geschützte SSI-, Auftrags- und Historienzähler blieben unverändert.`;
+  elements.siStockPreview.replaceChildren(message);
+}
+
+function setSiStockStatus(message, type = "") {
+  if (elements.siStockStatus) HLogistikUi.setStatus(elements.siStockStatus, message, type);
 }
 
 function setDefaultBookingExportDates() {

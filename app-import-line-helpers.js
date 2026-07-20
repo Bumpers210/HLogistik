@@ -36,7 +36,9 @@
       quantity: String(source.quantity || "").trim(),
       quantityCorrection: String(source.quantityCorrection || "").trim(),
       storagePallet: String(source.storagePallet || "").trim(),
-      loadingSlip: String(source.loadingSlip || "").trim()
+      loadingSlip: String(source.loadingSlip || "").trim(),
+      sourceBinSystem: String(source.sourceBinSystem || "").trim(),
+      package: String(source.package || "").trim()
     };
   }
 
@@ -48,7 +50,7 @@
 
   function autoPositionNoteValues(line) {
     var notes = normalizeAutoPositionNotes(line && line.autoPositionNotes);
-    return [notes.destination, notes.quantity, notes.quantityCorrection, notes.storagePallet, notes.loadingSlip]
+    return [notes.destination, notes.quantity, notes.quantityCorrection, notes.storagePallet, notes.loadingSlip, notes.sourceBinSystem, notes.package]
       .map(function (value) {
         return String(value || "").trim();
       })
@@ -72,7 +74,7 @@
         seen.add(key);
         return true;
       })
-      .join("; ");
+      .join(" - ");
   }
 
   window.HLogistikImportLineHelpers = {

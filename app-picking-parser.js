@@ -12,14 +12,44 @@
     if (!additions.length) return lines;
 
     var result = lines.slice();
+    var seen = new Set(result
+      .filter(function (line) {
+        return line && line.lineType === "loading-slip" && String(line.barcode || "").trim();
+      })
+      .map(loadingSlipLineKey));
     additions.forEach(function (loadingSlipLine) {
-      var barcode = String(loadingSlipLine.barcode || "").trim();
-      var exists = result.some(function (line) {
-        return line && line.lineType === "loading-slip" && String(line.barcode || "").trim() === barcode;
-      });
-      if (!exists) result.push(loadingSlipLine);
+      var key = loadingSlipLineKey(loadingSlipLine);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      result.push(loadingSlipLine);
     });
     return result;
+  }
+
+  function appendAllLoadingSlipLines(lines, loadingSlipLines) {
+    if (!Array.isArray(lines)) return lines;
+    var additions = (Array.isArray(loadingSlipLines) ? loadingSlipLines : [])
+      .filter(function (line) {
+        return line && line.lineType === "loading-slip" && String(line.barcode || "").trim();
+      });
+    return additions.length ? lines.concat(additions) : lines;
+  }
+
+  function loadingSlipLineKey(line) {
+    if (!line || line.lineType !== "loading-slip") return "";
+    var barcode = String(line.barcode || "").trim();
+    if (!barcode) return "";
+    return [
+      barcode,
+      String(line.loadingSlipAttachmentId || "").trim(),
+      String(line.loadingSlipAttachmentPage || "").trim(),
+      String(line.loadingSlipBlockIndex || "").trim(),
+      String(line.loadingSlipPosition || "").trim(),
+      String(line.product || "").trim(),
+      String(line.description || "").replace(/\s+/g, " ").trim(),
+      String(line.targetQty || "").trim(),
+      String(line.unit || "").trim()
+    ].join("\u0001");
   }
 
   function countLoadingSlipLines(lines) {
@@ -53,11 +83,11 @@
       var added = [];
 
       parsedLines.forEach(function (line) {
-        var barcode = String((line && line.barcode) || "").trim();
-        if (!barcode || seen.has(barcode)) return;
-        seen.add(barcode);
+        var key = loadingSlipLineKey(line);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
         lines.push(line);
-        added.push(barcode);
+        added.push(key);
       });
 
       var audit = auditLoadingSlipImport(sourceLines, parsedLines, dependencies);
@@ -86,19 +116,11 @@
 
   function parseLoadingSlipLines(lines, dependencies) {
     var blocks = loadingSlipBlocksFrom(lines, dependencies);
-    var seen = new Set();
-
-    return blocks
-      .map(function (block) {
-        return parseLoadingSlipBlock(block, dependencies);
-      })
-      .filter(Boolean)
-      .filter(function (line) {
-        var barcode = String(line.barcode || "").trim();
-        if (!barcode || seen.has(barcode)) return false;
-        seen.add(barcode);
-        return true;
+    return blocks.flatMap(function (block, blockIndex) {
+      return parseLoadingSlipBlockLines(block, dependencies).map(function (line) {
+        return Object.assign({}, line, { loadingSlipBlockIndex: blockIndex + 1 });
       });
+    });
   }
 
   function auditLoadingSlipImport(lines, parsedLines, dependencies) {
@@ -113,35 +135,34 @@
     }
 
     var parsedBlocks = blocks.map(function (block, index) {
-      var line = parseLoadingSlipBlock(block, dependencies);
+      var parsedBlockLines = parseLoadingSlipBlockLines(block, dependencies);
       return {
         index: index + 1,
-        barcode: String((line && line.barcode) || extractLoadingSlipHeaderBarcode(block) || "").trim(),
-        parsed: Boolean(line)
+        barcode: String((parsedBlockLines[0] && parsedBlockLines[0].barcode) || extractLoadingSlipHeaderBarcode(block) || "").trim(),
+        lines: parsedBlockLines,
+        parsed: parsedBlockLines.length > 0
       };
     });
 
     var attached = countLoadingSlipLines(normalizedParsedLines);
+    var expected = parsedBlocks.reduce(function (total, entry) {
+      return total + Math.max(1, entry.lines.length);
+    }, 0);
     var issues = [];
     var missing = parsedBlocks.filter(function (entry) {
       return !entry.parsed || !entry.barcode;
     });
-    var duplicates = duplicateLoadingSlipBarcodes(parsedBlocks);
 
     if (missing.length) {
       issues.push(missing.length + " Ladeliste(n) erkannt, aber Barcode/Position konnte nicht eindeutig gelesen werden (" + formatLoadingSlipIndexes(missing) + ").");
     }
 
-    if (duplicates.length) {
-      issues.push("Ladelisten-Barcode mehrfach erkannt: " + duplicates.slice(0, 3).join(", ") + ".");
-    }
-
-    if (attached !== blocks.length) {
-      issues.push(blocks.length + " Ladeliste(n) erkannt, aber " + attached + " Barcode-Position(en) erzeugt.");
+    if (attached !== expected) {
+      issues.push(expected + " Ladeschein-Position(en) erkannt, aber " + attached + " erzeugt.");
     }
 
     return {
-      expected: blocks.length,
+      expected: expected,
       attached: attached,
       issues: issues
     };
@@ -173,36 +194,43 @@
   }
 
   function parseLoadingSlipBlock(lines, dependencies) {
-    if (!isLikelyLoadingSlip(lines, dependencies)) return null;
+    return parseLoadingSlipBlockLines(lines, dependencies)[0] || null;
+  }
+
+  function parseLoadingSlipBlockLines(lines, dependencies) {
+    if (!isLikelyLoadingSlip(lines, dependencies)) return [];
 
     var collectBestellscheinRows = dependency(dependencies, "collectBestellscheinRows", function () { return []; });
     var createLine = dependency(dependencies, "createLine", function (overrides) { return overrides || {}; });
-    var setAutoPositionNote = dependency(dependencies, "setAutoPositionNote", function (notes, key, value) {
-      var next = Object.assign({}, notes || {});
-      next[key] = String(value || "").trim();
-      return next;
-    });
     var rows = collectBestellscheinRows(lines);
-    var row = rows[0] || parseStackedLoadingSlipRow(lines, dependencies) || parseCompactLoadingSlipRow(lines, dependencies);
-    if (!row) return null;
+    var groupedRows = parseGroupedLoadingSlipRows(lines, dependencies);
+    if (groupedRows.length > rows.length) rows = groupedRows;
+    var columnarRows = parseColumnarLoadingSlipRows(lines, dependencies);
+    if (columnarRows.length > rows.length) rows = columnarRows;
+    if (!rows.length) rows = parseStackedLoadingSlipRows(lines, dependencies);
+    if (!rows.length) rows = parseCompactLoadingSlipRows(lines, dependencies);
+    if (!rows.length) return [];
 
-    var barcode = extractLoadingSlipHeaderBarcode(lines) || row.fromHandlingUnit || "";
-    if (!barcode) return null;
+    var barcode = extractLoadingSlipHeaderBarcode(lines) || rows[0].fromHandlingUnit || "";
+    if (!barcode) return [];
 
-    return createLine({
-      lineType: "loading-slip",
-      warehouseOrder: "Ladeschein",
-      barcode: barcode,
-      product: row.product || "",
-      description: row.description || "Ladeschein",
-      targetQty: row.targetQty || "",
-      actualQty: row.targetQty || "",
-      unit: row.unit || "",
-      autoPositionNotes: setAutoPositionNote({}, "loadingSlip", rows.length > 1 ? "Ladeschein mit " + rows.length + " Positionen" : ""),
-      fromHandlingUnit: "",
-      fromHandlingUnitEditable: false,
-      fromBin: "",
-      toBin: ""
+    return rows.map(function (row, index) {
+      var targetQty = normalizeLoadingSlipQuantity(row.targetQty, dependencies);
+      return createLine({
+        lineType: "loading-slip",
+        warehouseOrder: "Ladeschein",
+        barcode: barcode,
+        loadingSlipPosition: index + 1,
+        product: row.product || "",
+        description: row.description || "Ladeschein",
+        targetQty: targetQty,
+        actualQty: targetQty,
+        unit: row.unit || "",
+        fromHandlingUnit: "",
+        fromHandlingUnitEditable: false,
+        fromBin: "",
+        toBin: ""
+      });
     });
   }
 
@@ -261,9 +289,139 @@
     var hasHeaderBarcode = sourceLines.some(isLoadingSlipHeaderBarcodeLine);
     return (hasLoadingSlipMarker || hasHeaderBarcode) && (
       collectBestellscheinRows(lines).length > 0
-        || Boolean(parseStackedLoadingSlipRow(lines, dependencies))
-        || Boolean(parseCompactLoadingSlipRow(lines, dependencies))
+        || parseGroupedLoadingSlipRows(lines, dependencies).length > 0
+        || parseColumnarLoadingSlipRows(lines, dependencies).length > 0
+        || parseStackedLoadingSlipRows(lines, dependencies).length > 0
+        || parseCompactLoadingSlipRows(lines, dependencies).length > 0
     );
+  }
+
+  function parseGroupedLoadingSlipRows(lines, dependencies) {
+    var normalized = normalizeLoadingSlipText(Array.isArray(lines) ? lines.join(" ") : String(lines || ""));
+    if (!/lad[ce](?:schein|liste)|lade(?:schein|liste)/i.test(normalized)) return [];
+
+    var products = Array.from(normalized.matchAll(/\b\d{6,8}\b/g));
+    var quantities = Array.from(normalized.matchAll(/(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:[,.]\d+)?)\s*(St(?:\u00fc|ue|u|ii|i)ck|STK?|PC|PCS|KG|G|KAR|PCK|PAK|VE|PAL)\b/gi));
+    var positionCount = Math.min(products.length, quantities.length);
+    if (!positionCount) return [];
+
+    var firstQuantityIndex = quantities[0].index || 0;
+    if (products[positionCount - 1].index >= firstQuantityIndex) return [];
+
+    return Array.from({ length: positionCount }, function (_, index) {
+      var product = products[index];
+      var nextProduct = products[index + 1];
+      var descriptionEnd = nextProduct ? nextProduct.index : firstQuantityIndex;
+      var description = cleanLoadingSlipDescription(normalized.slice((product.index || 0) + product[0].length, descriptionEnd));
+      return {
+        fromHandlingUnit: "",
+        fromBin: "",
+        product: product[0],
+        description: description,
+        targetQty: normalizeLoadingSlipQuantity(quantities[index][1], dependencies),
+        unit: normalizeUnit(quantities[index][2], dependencies),
+        toBin: ""
+      };
+    }).filter(function (row) {
+      return Boolean(row.description && row.targetQty);
+    });
+  }
+
+  function parseColumnarLoadingSlipRows(lines, dependencies) {
+    var sourceLines = (Array.isArray(lines) ? lines : String(lines || "").replace(/\r/g, "\n").split("\n"))
+      .map(normalizeLoadingSlipText)
+      .filter(Boolean);
+    var productIndexes = sourceLines
+      .map(function (line, index) { return /^\d{6,8}$/.test(line) ? index : -1; })
+      .filter(function (index) { return index >= 0; });
+    var quantityIndexes = sourceLines
+      .map(function (line, index) { return isLoadingSlipQuantityCell(line) ? index : -1; })
+      .filter(function (index) { return index >= 0; });
+    var unitIndexes = sourceLines
+      .map(function (line, index) { return isLoadingSlipUnitCell(line) ? index : -1; })
+      .filter(function (index) { return index >= 0; });
+    var positionCount = Math.min(productIndexes.length, quantityIndexes.length, unitIndexes.length);
+    if (!positionCount) return [];
+
+    var firstProductIndex = productIndexes[0];
+    var lastDataIndex = Math.max(
+      productIndexes[positionCount - 1],
+      quantityIndexes[positionCount - 1],
+      unitIndexes[positionCount - 1]
+    );
+    var descriptions = sourceLines
+      .slice(firstProductIndex, lastDataIndex + 1)
+      .filter(function (line) {
+        return !/^\d{6,8}$/.test(line)
+          && !isLoadingSlipQuantityCell(line)
+          && !isLoadingSlipUnitCell(line)
+          && !/^(?:Artikel|Bezeichnung|Menge|Verpackung)$/i.test(line)
+          && /[A-Za-z\u00c4\u00d6\u00dc\u00e4\u00f6\u00fc]/.test(line);
+      })
+      .map(cleanLoadingSlipDescription)
+      .filter(Boolean);
+    if (descriptions.length < positionCount) return [];
+
+    return Array.from({ length: positionCount }, function (_, index) {
+      return {
+        fromHandlingUnit: "",
+        fromBin: "",
+        product: sourceLines[productIndexes[index]],
+        description: descriptions[index],
+        targetQty: normalizeLoadingSlipQuantity(sourceLines[quantityIndexes[index]], dependencies),
+        unit: normalizeUnit(sourceLines[unitIndexes[index]], dependencies),
+        toBin: ""
+      };
+    }).filter(function (row) {
+      return Boolean(row.description && row.targetQty);
+    });
+  }
+
+  function isLoadingSlipQuantityCell(value) {
+    return /^\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?$|^\d+(?:[,.]\d+)?$/.test(String(value || "").trim());
+  }
+
+  function isLoadingSlipUnitCell(value) {
+    return /^(?:St(?:\u00fc|ue|u|ii|i)ck|STK?|PC|PCS|KG|G|KAR|PCK|PAK|VE|PAL)$/i.test(String(value || "").trim());
+  }
+
+  function parseStackedLoadingSlipRows(lines, dependencies) {
+    var normalized = normalizeLoadingSlipText(Array.isArray(lines) ? lines.join(" ") : String(lines || ""));
+    if (!/lad[ce](?:schein|liste)|lade(?:schein|liste)/i.test(normalized)) return [];
+
+    return Array.from(normalized.matchAll(/\b(\d{6,8})\b\s+(.+?)\s+(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:[,.]\d+)?)\s*(St(?:\u00fc|ue|u|ii|i)ck|STK?|PC|PCS|KG|G|KAR|PCK|PAK|VE|PAL)\b/gi))
+      .map(function (rowMatch) {
+        return loadingSlipRowFromMatch(rowMatch, dependencies);
+      })
+      .filter(Boolean);
+  }
+
+  function parseCompactLoadingSlipRows(lines, dependencies) {
+    var sourceLines = Array.isArray(lines) ? lines : String(lines || "").replace(/\r/g, "\n").split("\n");
+    return sourceLines
+      .map(function (line) {
+        return normalizeLoadingSlipText(line).match(/^(\d{6,8})\b\s+(.+?)\s+(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:[,.]\d+)?)\s*(St(?:\u00fc|ue|u|ii|i)ck|STK?|PC|PCS|KG|G|KAR|PCK|PAK|VE|PAL)\b/i);
+      })
+      .map(function (rowMatch) {
+        return rowMatch && loadingSlipRowFromMatch(rowMatch, dependencies);
+      })
+      .filter(Boolean);
+  }
+
+  function loadingSlipRowFromMatch(rowMatch, dependencies) {
+    var description = cleanLoadingSlipDescription(rowMatch[2]);
+    var targetQty = normalizeLoadingSlipQuantity(rowMatch[3], dependencies);
+    if (!description || !targetQty) return null;
+
+    return {
+      fromHandlingUnit: "",
+      fromBin: "",
+      product: rowMatch[1],
+      description: description,
+      targetQty: targetQty,
+      unit: normalizeUnit(rowMatch[4], dependencies),
+      toBin: ""
+    };
   }
 
   function parseStackedLoadingSlipRow(lines, dependencies) {
@@ -331,6 +489,9 @@
 
   function normalizeLoadingSlipQuantity(value, dependencies) {
     var raw = String(value || "").trim();
+    var parseQuantity = dependency(dependencies, "parseQuantity", function () { return NaN; });
+    var parsed = parseQuantity(raw);
+    if (Number.isFinite(parsed)) return String(parsed);
     var withoutDecimalZeros = raw.replace(/,\s*0+$/, "");
     if (/^\d{1,3}(?:[.\s]\d{3})+$/.test(withoutDecimalZeros)) {
       return withoutDecimalZeros.replace(/\s+/g, ".");
@@ -533,6 +694,8 @@
 
   window.HLogistikPickingParser = {
     appendLoadingSlipLines: appendLoadingSlipLines,
+    appendAllLoadingSlipLines: appendAllLoadingSlipLines,
+    loadingSlipLineKey: loadingSlipLineKey,
     countLoadingSlipLines: countLoadingSlipLines,
     appendLoadingSlipLinesToParsed: appendLoadingSlipLinesToParsed,
     collectLoadingSlipLinesFromOcrCandidates: collectLoadingSlipLinesFromOcrCandidates,
@@ -541,13 +704,16 @@
     duplicateLoadingSlipBarcodes: duplicateLoadingSlipBarcodes,
     formatLoadingSlipIndexes: formatLoadingSlipIndexes,
     parseLoadingSlipBlock: parseLoadingSlipBlock,
+    parseLoadingSlipBlockLines: parseLoadingSlipBlockLines,
     loadingSlipBlocksFrom: loadingSlipBlocksFrom,
     isLoadingSlipStartLine: isLoadingSlipStartLine,
     isLoadingSlipHeaderBarcodeLine: isLoadingSlipHeaderBarcodeLine,
     linesBeforeLoadingSlip: linesBeforeLoadingSlip,
     isLikelyLoadingSlip: isLikelyLoadingSlip,
     parseStackedLoadingSlipRow: parseStackedLoadingSlipRow,
+    parseStackedLoadingSlipRows: parseStackedLoadingSlipRows,
     parseCompactLoadingSlipRow: parseCompactLoadingSlipRow,
+    parseCompactLoadingSlipRows: parseCompactLoadingSlipRows,
     normalizeLoadingSlipText: normalizeLoadingSlipText,
     cleanLoadingSlipDescription: cleanLoadingSlipDescription,
     normalizeLoadingSlipQuantity: normalizeLoadingSlipQuantity,

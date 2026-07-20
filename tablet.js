@@ -34,6 +34,8 @@ let acceptedOrderGroupsById = new Map();
 let manualStorageCustomerEdited = false;
 let exportingPdf = false;
 
+registerTabletServiceWorker();
+
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
   bindEvents();
@@ -60,6 +62,15 @@ document.addEventListener("visibilitychange", () => {
     initialize({ showChecking: false });
   }
 });
+
+function registerTabletServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js", { updateViaCache: "none" })
+      .then((registration) => registration.update())
+      .catch((error) => console.warn("Service Worker konnte nicht aktualisiert werden:", error));
+  });
+}
 
 function bindElements() {
   [
@@ -92,6 +103,7 @@ function bindElements() {
     "lineList",
     "storageLineActions",
     "manualStorageMaterialInput",
+    "manualStorageBinInput",
     "manualStoragePositionCountInput",
     "manualStorageQuantityInput",
     "addStorageLineButton",
@@ -590,8 +602,11 @@ function normalizeAutoPositionNotes(notes) {
   return {
     destination: String(source.destination || "").trim(),
     quantity: String(source.quantity || "").trim(),
+    quantityCorrection: String(source.quantityCorrection || "").trim(),
     storagePallet: String(source.storagePallet || "").trim(),
     loadingSlip: String(source.loadingSlip || "").trim(),
+    sourceBinSystem: String(source.sourceBinSystem || "").trim(),
+    package: String(source.package || "").trim(),
   };
 }
 
@@ -601,7 +616,7 @@ function combinedPositionNote(line) {
 
 function autoPositionNoteValues(line) {
   const notes = normalizeAutoPositionNotes(line?.autoPositionNotes);
-  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip];
+  return [notes.destination, notes.quantity, notes.quantityCorrection, notes.storagePallet, notes.loadingSlip, notes.sourceBinSystem, notes.package];
 }
 
 function combineUniqueNoteParts(parts) {
@@ -615,7 +630,7 @@ function combineUniqueNoteParts(parts) {
       seen.add(key);
       return true;
     })
-    .join("; ");
+    .join(" - ");
 }
 
 function loadUser() {
@@ -800,11 +815,18 @@ async function loadOrder(id) {
   }
 
   if (!serverOnline) {
-    if (!window.OfflineStore) return;
+    if (!window.OfflineStore) {
+      handleOrderLoadFailure("Offline-Cache ist nicht verfuegbar.");
+      return;
+    }
     try {
       const cached = await OfflineStore.loadOrder(id);
-      if (!cached) {
-        setMessage("Offline: Dieser Auftrag ist nicht im lokalen Cache vorhanden.", true);
+      if (!isCompleteOrderDetail(cached, id)) {
+        handleOrderLoadFailure(
+          cached
+            ? "Im Offline-Cache fehlen die Positionsdaten."
+            : "Offline: Dieser Auftrag ist nicht im lokalen Cache vorhanden."
+        );
         return;
       }
       currentOrder = cached;
@@ -817,13 +839,17 @@ async function loadOrder(id) {
       renderOrder();
       setMessage("Offline: Auftrag aus Cache geladen. Änderungen werden bei Verbindung synchronisiert.", false);
     } catch (error) {
-      setMessage(`Cache-Fehler: ${error.message}`, true);
+      handleOrderLoadFailure(`Cache-Fehler: ${error.message}`);
     }
     return;
   }
 
   try {
     const order = await apiJson(`/api/orders/${encodeURIComponent(id)}`);
+    if (!isCompleteOrderDetail(order, id)) {
+      handleOrderLoadFailure("Vollstaendige Positionsdaten fehlen.");
+      return;
+    }
     const cachedOrder = restoreCachedOrderFor(order);
     currentOrder = cachedOrder ? mergeServerLoadingSlipLines(cachedOrder, order) : order;
     currentMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
@@ -850,7 +876,7 @@ async function loadOrder(id) {
     if (window.OfflineStore) {
       try {
         const cached = await OfflineStore.loadOrder(id);
-        if (cached) {
+        if (isCompleteOrderDetail(cached, id)) {
           currentOrder = cached;
           currentMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
           try {
@@ -862,12 +888,31 @@ async function loadOrder(id) {
           setMessage("Offline: Auftrag aus Cache geladen. Aenderungen werden bei Verbindung synchronisiert.", false);
           return;
         }
+        if (cached) {
+          handleOrderLoadFailure("Im Offline-Cache fehlen die Positionsdaten.");
+          return;
+        }
       } catch {
         // Fallback auf die urspruengliche Fehlermeldung.
       }
     }
-    setMessage(`Auftrag konnte nicht geladen werden: ${error.message}`, true);
+    handleOrderLoadFailure(error.message);
   }
+}
+
+function isCompleteOrderDetail(order, id) {
+  return Boolean(
+    order &&
+      typeof order === "object" &&
+      String(order.id || "") === String(id || "") &&
+      Array.isArray(order.lines)
+  );
+}
+
+function handleOrderLoadFailure(message) {
+  if (elements.orderSelect) elements.orderSelect.value = currentOrder?.id || "";
+  renderTakeOverButton();
+  setMessage(`Auftrag konnte nicht geladen werden: ${String(message || "Unbekannter Fehler")}`, true);
 }
 
 function renderOrder() {
@@ -899,6 +944,7 @@ function renderStorageLineActions() {
   elements.storageLineActions.hidden = !isStorage || !currentOrder;
   elements.addStorageLineButton.disabled = !isStorage || !currentOrder || !canEditCurrentOrder();
   if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.disabled = elements.addStorageLineButton.disabled;
+  if (elements.manualStorageBinInput) elements.manualStorageBinInput.disabled = elements.addStorageLineButton.disabled;
   if (elements.manualStoragePositionCountInput) {
     elements.manualStoragePositionCountInput.disabled = elements.addStorageLineButton.disabled;
     elements.manualStoragePositionCountInput.min = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_MIN);
@@ -953,17 +999,20 @@ async function addManualStorageLine() {
     elements.manualStorageQuantityInput?.focus();
     return;
   }
+  const binResult = readManualStorageBin();
+  if (!binResult.ok) {
+    setMessage(binResult.error, true);
+    elements.manualStorageBinInput?.focus();
+    return;
+  }
   const preset = await manualStorageLinePreset(elements.manualStorageMaterialInput?.value || "");
   currentOrder.lines = Array.isArray(currentOrder.lines) ? currentOrder.lines : [];
   for (let index = 0; index < countResult.value; index += 1) {
-    currentOrder.lines.push(createManualStorageLine(currentOrder.lines, preset, { actualQty: quantityResult.value }));
+    currentOrder.lines.push(createManualStorageLine(currentOrder.lines, preset, { actualQty: quantityResult.value, fromBin: binResult.value }));
   }
-  if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.value = "";
-  if (elements.manualStoragePositionCountInput) elements.manualStoragePositionCountInput.value = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT);
-  if (elements.manualStorageQuantityInput) elements.manualStorageQuantityInput.value = "1";
   markDirty();
   renderOrder();
-  saveOrder(false);
+  saveOrder(false, () => resetManualStoragePositionInputs());
 }
 
 function createManualStorageLine(lines, preset = {}, options = {}) {
@@ -976,7 +1025,7 @@ function createManualStorageLine(lines, preset = {}, options = {}) {
     fromHandlingUnitEditable: true,
     positionNote: "",
     autoPositionNotes: {},
-    fromBin: "",
+    fromBin: options.fromBin || "",
     product: preset.product || "",
     description: preset.description || "",
     targetQty: "",
@@ -1017,6 +1066,25 @@ function readManualStoragePositionQuantity() {
     };
   }
   return { ok: true, value: String(value), error: "" };
+}
+
+function readManualStorageBin() {
+  const raw = String(elements.manualStorageBinInput?.value || "").trim();
+  if (!raw) return { ok: true, value: "", error: "" };
+  const value = storageOrderUsesSsiCustomer()
+    ? window.HLogistikStorageBinRules?.normalizeSsiStorageBin(raw) || ""
+    : normalizeUppercaseText(raw);
+  if (!value) {
+    return { ok: false, value: "", error: `Stellplatz "${raw}" ist für SSI nicht bekannt.` };
+  }
+  return { ok: true, value, error: "" };
+}
+
+function resetManualStoragePositionInputs() {
+  if (elements.manualStorageMaterialInput) elements.manualStorageMaterialInput.value = "";
+  if (elements.manualStorageBinInput) elements.manualStorageBinInput.value = "";
+  if (elements.manualStoragePositionCountInput) elements.manualStoragePositionCountInput.value = String(MANUAL_STORAGE_POSITION_CREATE_COUNT_DEFAULT);
+  if (elements.manualStorageQuantityInput) elements.manualStorageQuantityInput.value = "1";
 }
 
 async function manualStorageLinePreset(material) {
@@ -1346,7 +1414,9 @@ function renderLine(line) {
     markDirty();
   }, { readOnly: !canEditOrder || missing || !isManualStorageLine, className: "short-input", ...numericInputOptions() }));
   const canEditBin = canEditOrder && !missing && (isStorage || Boolean(binWarningText));
-  top.appendChild(makeInput(isStorage ? "Stellplatz" : "Lagerplatz", line.fromBin, (value) => {
+  const fullFromBin = line.fromBin || "";
+  const displayedFromBin = !isStorage && !canEditBin ? formatPickingBinForDisplay(fullFromBin) : fullFromBin;
+  top.appendChild(makeInput(isStorage ? "Stellplatz" : "Lagerplatz", displayedFromBin, (value) => {
     line.fromBin = normalizeUppercaseText(value);
     if (shouldClearBinWarning(line, line.fromBin)) {
       line.binWarning = "";
@@ -1354,14 +1424,21 @@ function renderLine(line) {
       renderOrder();
     }
     markDirty();
-  }, { readOnly: !canEditBin, className: "short-input", warning: binWarningText, ...uppercaseInputOptions() }));
+  }, {
+    readOnly: !canEditBin,
+    className: "short-input",
+    warning: binWarningText,
+    title: binWarningText || (displayedFromBin !== fullFromBin ? fullFromBin : ""),
+    ...uppercaseInputOptions()
+  }));
   top.appendChild(makeInput(isStorage ? "Artikelbezeichnung" : "Produktbeschreibung", line.description, (value) => {
     line.description = value;
     markDirty();
   }, { readOnly: !canEditOrder || missing || !isManualStorageLine }));
   if (!isManualStorageLine) {
-    top.appendChild(makeInput("Soll", line.targetQty, (value) => {
+    top.appendChild(makeInput("Soll", formatLineQuantityForDisplay(line, line.targetQty), (value) => {
       line.targetQty = value;
+      line.quantitySourceText = "";
       markDirty();
       updateCounts();
     }, { readOnly: true, className: "short-input" }));
@@ -1369,9 +1446,10 @@ function renderLine(line) {
   top.appendChild(
     makeInput(
       isManualStorageLine ? "Stückzahl" : "Ist",
-      line.actualQty,
+      formatLineQuantityForDisplay(line, line.actualQty),
       (value) => {
         line.actualQty = value;
+        line.quantitySourceText = "";
         markDirty();
         updateCounts();
       },
@@ -1452,7 +1530,7 @@ function renderLoadingSlipLine(line) {
   top.appendChild(barcode);
   top.appendChild(makeInput("Artikelnummer", line.product, () => {}, { readOnly: true, className: "short-input" }));
   top.appendChild(makeInput("Produktbeschreibung", line.description, () => {}, { readOnly: true }));
-  top.appendChild(makeInput("Soll", line.targetQty, () => {}, { readOnly: true, className: "short-input" }));
+  top.appendChild(makeInput("Soll", formatLineQuantityForDisplay(line, line.targetQty), () => {}, { readOnly: true, className: "short-input" }));
   body.appendChild(top);
 
   const noteRow = document.createElement("div");
@@ -1581,7 +1659,8 @@ function makeInput(labelText, value, onChange, options = {}) {
   if (options.pattern) input.pattern = options.pattern;
   if (options.maxLength) input.maxLength = options.maxLength;
   if (options.autocapitalize) input.setAttribute("autocapitalize", options.autocapitalize);
-  if (options.warning) input.title = options.warning;
+  if (options.title) input.title = options.title;
+  else if (options.warning) input.title = options.warning;
   if (options.readOnly) {
     input.readOnly = true;
     input.setAttribute("readonly", "");
@@ -2080,6 +2159,7 @@ async function saveOrder(silent, onSuccess, options = {}) {
     return false;
   }
   const allowOffline = options?.allowOffline !== false;
+  normalizeOrderQuantitiesForSave(currentOrder);
   touchOrder();
   persistCurrentOrderCache();
   const revision = changeRevision;
@@ -2400,7 +2480,6 @@ function storageLineCompletionErrors(line) {
   const handlingUnit = String(line.fromHandlingUnit || "").trim();
   if (!product) errors.push("Artikelnummer fehlt");
   else if (!/^\d+$/.test(product)) errors.push("Artikelnummer darf nur Zahlen enthalten");
-  if (line.manual !== true && !String(line.description || "").trim()) errors.push("Artikelbezeichnung fehlt");
   if (!String(line.fromBin || "").trim()) errors.push("Stellplatz fehlt");
   if (requiresStorageHandlingUnit()) {
     if (usesSsiStorageHuPrefix()) {
@@ -2462,8 +2541,35 @@ function normalizePickingBinText(value) {
   return bin;
 }
 
+function formatPickingBinForDisplay(value) {
+  return String(value || "").replace(/^\d{3}-/, "");
+}
+
+function formatLineQuantityForDisplay(line, value) {
+  return window.HLogistikQuantityFormat?.displayLineQuantity(line, value) ?? String(value || "");
+}
+
+function normalizeOrderQuantitiesForSave(order) {
+  (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
+    if (!line || line.lineType === "loading-slip") return;
+    ["targetQty", "actualQty"].forEach((key) => {
+      const text = String(line[key] ?? "").trim();
+      if (!text) return;
+      const parsed = window.HLogistikQuantityFormat?.parse(text);
+      if (Number.isFinite(parsed)) line[key] = String(parsed);
+    });
+    const source = String(line.quantitySourceText || "").trim();
+    const effectiveQuantity = String(line.actualQty ?? "").trim() || line.targetQty;
+    if (source && window.HLogistikQuantityFormat?.parse(source) !== window.HLogistikQuantityFormat?.parse(effectiveQuantity)) {
+      line.quantitySourceText = "";
+    }
+  });
+  return order;
+}
+
 function readTabletQuantity(value) {
-  const number = Number(String(value || "").replace(/\./g, "").replace(",", "."));
+  const number = window.HLogistikQuantityFormat?.parse(value)
+    ?? Number(String(value || "").replace(/\./g, "").replace(",", "."));
   return Number.isFinite(number) && number > 0;
 }
 
