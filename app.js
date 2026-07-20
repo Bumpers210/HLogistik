@@ -4351,7 +4351,7 @@ async function nextStorageOrderNumber() {
 async function findDuplicateOrderForImport(orderNumber, orderType, text = "") {
   const normalizedOrderNumber = String(orderNumber || "").trim().toLowerCase();
   const checkOrderNumber = normalizedOrderNumber && !isReusableOrderNumber(normalizedOrderNumber);
-  const fingerprint = orderFingerprint(text);
+  const fingerprint = checkOrderNumber ? "" : orderFingerprint(text);
   if (!serverOnline || (!checkOrderNumber && !fingerprint)) return null;
   try {
     const params = new URLSearchParams();
@@ -4360,14 +4360,7 @@ async function findDuplicateOrderForImport(orderNumber, orderType, text = "") {
     if (fingerprint) params.set("fingerprint", fingerprint);
     const duplicate = await apiJson(`/api/orders/duplicate-check?${params}`);
     if (duplicate?.duplicate) return duplicate.order;
-
-    const orders = await apiJson("/api/orders?includeExported=1");
-    if (!checkOrderNumber) return null;
-    return orders.find((order) => {
-      if (state.id && order.id === state.id) return false;
-      return String(order.orderNumber || "").trim().toLowerCase() === normalizedOrderNumber &&
-        String(order.orderType || "picking").trim().toLowerCase() === String(orderType || "picking").toLowerCase();
-    }) || null;
+    return null;
   } catch {
     return null;
   }
@@ -4549,6 +4542,37 @@ function parseOrderText(text) {
   };
 }
 
+function pickingXlsxImportText(preview) {
+  const sheetName = String(preview?.sheetName || "Tabelle").trim() || "Tabelle";
+  const rows = (Array.isArray(preview?.lines) ? preview.lines : [])
+    .filter((line) => line?.lineType !== "loading-slip")
+    .map((line) => [
+    line?.sourceRow,
+    line?.warehouseOrder,
+    line?.fromHandlingUnit,
+    line?.fromBin,
+    line?.product,
+    line?.description,
+    line?.targetQty,
+    line?.unit,
+    line?.toBin
+    ].map((value) => String(value ?? "").trim()).join(" | "));
+  const source = rows.join("\n");
+  return [`XLSX-Blatt ${sheetName}`, `XLSX-Fingerprint: ${pickingXlsxFingerprint(source)}`, source]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function pickingXlsxFingerprint(source) {
+  let hash = 2166136261;
+  const text = String(source || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (`00000000${(hash >>> 0).toString(16)}`).slice(-8);
+}
+
 async function handlePickingXlsxUpload(file) {
   if (currentMode === "storage") {
     setImportStatus("XLSX-Kommissionierimporte sind nur im Modus Kommissionierung zulässig.", "error", 100);
@@ -4585,7 +4609,7 @@ async function handlePickingXlsxUpload(file) {
     ignoredRowCount: preview.ignoredRows.length,
     hardErrorCount: preview.hardErrors.length
   };
-  const result = await importText(`XLSX-Blatt ${preview.sheetName}`, file.name, parsed, diagnostics);
+  const result = await importText(pickingXlsxImportText(preview), file.name, parsed, diagnostics);
   if (result.cancelled) {
     setImportStatus(result.message || "XLSX-Import abgebrochen.", result.type || "warning", 100);
     return;

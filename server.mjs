@@ -1039,18 +1039,22 @@ function findDuplicateOrder(order, excludeId = "") {
   const checkOrderNumber = orderNumber && !isReusableOrderNumber(orderNumber);
   const orderType = String(order.orderType || "picking").trim().toLowerCase();
   if (orderType === "storage") return null;
+
+  const sameTypeOrders = readOrders().filter((entry) =>
+    (!excludeId || entry.id !== excludeId) &&
+      String(entry.orderType || "picking").trim().toLowerCase() === orderType
+  );
+  if (checkOrderNumber) {
+    return sameTypeOrders.find((entry) =>
+      String(entry.orderNumber || "").trim().toLowerCase() === orderNumber
+    ) || null;
+  }
+
   const fingerprint = orderFingerprint(order.rawText);
-  if (!checkOrderNumber && !fingerprint) return null;
-
-  return readOrders().find((entry) => {
-    if (excludeId && entry.id === excludeId) return false;
-    if (String(entry.orderType || "picking").trim().toLowerCase() !== orderType) return false;
-
-    const entryOrderNumber = String(entry.orderNumber || "").trim().toLowerCase();
-    if (checkOrderNumber && entryOrderNumber && entryOrderNumber === orderNumber) return true;
-
+  if (!fingerprint) return null;
+  return sameTypeOrders.find((entry) => {
     const entryFingerprint = orderFingerprint(entry.rawText);
-    return Boolean(fingerprint && entryFingerprint && entryFingerprint === fingerprint);
+    return Boolean(entryFingerprint && entryFingerprint === fingerprint);
   }) || null;
 }
 

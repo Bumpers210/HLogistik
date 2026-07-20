@@ -321,7 +321,9 @@ async function run() {
       pickingXlsxDraftRelease.saveStateCalls === 1 &&
       pickingXlsxDraftRelease.renderCalls === 1 &&
       pdfImportHandlerSource.includes("await importText(imported.text, file.name, imported.parsed, imported.diagnostics)") &&
-      xlsxImportHandlerSource.includes("await importText(`XLSX-Blatt ${preview.sheetName}`, file.name, parsed, diagnostics)") &&
+      xlsxImportHandlerSource.includes("await importText(pickingXlsxImportText(preview), file.name, parsed, diagnostics)") &&
+      pickingXlsxDraftRelease.sourceText.includes("XLSX-Fingerprint:") &&
+      pickingXlsxDraftRelease.sourceText.includes("101107234") &&
       importTextSource.includes("state.awaitingRelease = true") &&
       importTextSource.includes("saveStateWithoutServer()") &&
       importTextSource.includes("render()") &&
@@ -1411,6 +1413,117 @@ async function run() {
     });
   }
 
+  const duplicateImportBase = {
+    customerName: "QA Importkunde",
+    customerGroupKey: "QA IMPORTKUNDE",
+    orderDate: "2026-06-23",
+    orderTime: "10:10",
+    orderType: "picking",
+    lines: [{
+      position: "1",
+      product: `QA-DUP-${suffix}`,
+      description: "QA Dublettenpruefung",
+      targetQty: "1",
+      actualQty: "1",
+      unit: "ST",
+      fromBin: "002-H3-QA1",
+      fromHandlingUnit: "",
+      toBin: "9020-QA",
+      picked: false,
+      positionNote: ""
+    }]
+  };
+  const uniqueOrderA = {
+    ...duplicateImportBase,
+    orderNumber: `QA-DUP-A-${suffix}`,
+    rawText: "Gemeinsamer Importrohtext"
+  };
+  const uniqueOrderB = {
+    ...duplicateImportBase,
+    orderNumber: `QA-DUP-B-${suffix}`,
+    rawText: "Gemeinsamer Importrohtext"
+  };
+  const uniqueOrderCreateA = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(uniqueOrderA)
+  });
+  const uniqueOrderCreateB = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(uniqueOrderB)
+  });
+  const uniqueOrderRepeatB = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(uniqueOrderB)
+  });
+  const reusableXlsxLegacy = {
+    ...duplicateImportBase,
+    orderNumber: "SSI",
+    rawText: "XLSX-Blatt Data",
+    lines: [{
+      ...duplicateImportBase.lines[0],
+      warehouseOrder: `QA-OLD-${suffix}`,
+      product: `QA-OLD-${suffix}`,
+      toBin: "9021-0OUT"
+    }]
+  };
+  const reusableXlsxNew = {
+    ...duplicateImportBase,
+    orderNumber: "SSI",
+    rawText: `XLSX-Blatt Data\nXLSX-Fingerprint: qa${suffix}\nQA-NEW-${suffix} | 002-H3-QA2 | QA-NEW-${suffix} | 1 | ST | 9021-0OUT`,
+    lines: [{
+      ...duplicateImportBase.lines[0],
+      warehouseOrder: `QA-NEW-${suffix}`,
+      product: `QA-NEW-${suffix}`,
+      fromBin: "002-H3-QA2",
+      toBin: "9021-0OUT"
+    }]
+  };
+  const reusableXlsxLegacyCreate = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(reusableXlsxLegacy)
+  });
+  const reusableXlsxProbe = await request(`/api/orders/duplicate-check?orderType=picking&fingerprint=${encodeURIComponent(reusableXlsxNew.rawText)}`);
+  const reusableXlsxCreate = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(reusableXlsxNew)
+  });
+  const reusableXlsxRepeat = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(reusableXlsxNew)
+  });
+  check(
+    "picking import deduplication accepts distinct orders and blocks only the same import",
+    uniqueOrderCreateA.status === 200 &&
+      uniqueOrderCreateB.status === 200 &&
+      uniqueOrderRepeatB.status === 409 &&
+      reusableXlsxLegacyCreate.status === 200 &&
+      reusableXlsxProbe.status === 200 &&
+      reusableXlsxProbe.body?.duplicate === false &&
+      reusableXlsxCreate.status === 200 &&
+      reusableXlsxRepeat.status === 409,
+    JSON.stringify({
+      unique: [uniqueOrderCreateA.status, uniqueOrderCreateB.status, uniqueOrderRepeatB.status],
+      reusableXlsx: [reusableXlsxLegacyCreate.status, reusableXlsxProbe.status, reusableXlsxProbe.body, reusableXlsxCreate.status, reusableXlsxRepeat.status]
+    })
+  );
+  for (const id of [
+    uniqueOrderCreateA.body?.order?.id,
+    uniqueOrderCreateB.body?.order?.id,
+    reusableXlsxLegacyCreate.body?.order?.id,
+    reusableXlsxCreate.body?.order?.id
+  ].filter(Boolean)) {
+    await request(`/api/orders/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: ROLE_HEADERS
+    });
+  }
+
   for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/app-import-line-helpers.js", "/app-import-diagnostics.js", "/app-state-helpers.js", "/app-ui-helpers.js", "/app-picking-parser.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
     const response = await request(path);
     check(`static ${path}`, response.status === 200, `${response.status}`);
@@ -1430,6 +1543,7 @@ async function run() {
   const storageSource = await readFile(new URL("../server/storage.mjs", import.meta.url), "utf8");
   const tabletLegacyServiceWorkerSource = extractFunctionSource(tabletLegacySource, "function registerTabletServiceWorker(");
   const tabletModernServiceWorkerSource = extractFunctionSource(tabletModernSource, "function registerTabletServiceWorker(");
+  const duplicateImportSource = extractFunctionSource(appSource, "async function findDuplicateOrderForImport(");
   check(
     "tablet legacy detail loader validates complete orders without unsupported iPad syntax",
     tabletLegacySource.includes("function isCompleteOrderDetail(order, id)") &&
@@ -1439,6 +1553,15 @@ async function run() {
       tabletLegacySource.includes("xhr.ontimeout") &&
       !/=>|\?\.|\?\?|\basync\b|\bawait\b|\bconst\b|\blet\b/.test(tabletLegacySource),
     "legacy detail validation and Safari syntax"
+  );
+  check(
+    "picking import duplicate preflight delegates one matching rule to the server",
+    duplicateImportSource.includes('const fingerprint = checkOrderNumber ? "" : orderFingerprint(text);') &&
+      duplicateImportSource.includes("/api/orders/duplicate-check?") &&
+      !duplicateImportSource.includes("/api/orders?includeExported=1") &&
+      serverSource.includes("if (checkOrderNumber) {") &&
+      serverSource.includes("const fingerprint = orderFingerprint(order.rawText);"),
+    duplicateImportSource
   );
   check(
     "tablet PWA update hardening is explicit, versioned and non-disruptive",
@@ -3129,8 +3252,9 @@ async function pickingXlsxDraftReleaseFixture(lines, { release = false } = {}) {
     context.__renderReleaseButton();
   };
 
+  const sourceText = context.__pickingXlsxImportText({ sheetName: "Tabelle1", lines });
   const result = await context.__importText(
-    "XLSX-Blatt Tabelle1",
+    sourceText,
     "synthetic-picking.xlsx",
     { lines },
     { source: "xlsx", documentType: "picking-xlsx" }
@@ -3159,6 +3283,7 @@ async function pickingXlsxDraftReleaseFixture(lines, { release = false } = {}) {
   }
   return {
     result,
+    sourceText,
     state: JSON.parse(JSON.stringify(context.__state)),
     releaseButton: { ...context.__elements.releaseOrderButton },
     serverRequests,
@@ -3791,7 +3916,7 @@ async function createAppParserContext() {
   vm.runInContext(pickingParserCode, context, { filename: "app-picking-parser.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
-  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__shouldRunLoadingSlipOcrFallback = shouldRunLoadingSlipOcrFallback; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__fromBinReviewPatchForValue = fromBinReviewPatchForValue; globalThis.__isFromBinReviewConfirmedForValue = isFromBinReviewConfirmedForValue; globalThis.__canConfirmFromBinReview = canConfirmFromBinReview; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__importText = importText; globalThis.__state = state; globalThis.__currentUser = currentUser; globalThis.__elements = elements; globalThis.__renderReleaseButton = renderReleaseButton; globalThis.__setServerOnline = (value) => { serverOnline = Boolean(value); };`, context, { filename: "app.js" });
+  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__shouldRunLoadingSlipOcrFallback = shouldRunLoadingSlipOcrFallback; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__fromBinReviewPatchForValue = fromBinReviewPatchForValue; globalThis.__isFromBinReviewConfirmedForValue = isFromBinReviewConfirmedForValue; globalThis.__canConfirmFromBinReview = canConfirmFromBinReview; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__pickingXlsxImportText = pickingXlsxImportText; globalThis.__importText = importText; globalThis.__state = state; globalThis.__currentUser = currentUser; globalThis.__elements = elements; globalThis.__renderReleaseButton = renderReleaseButton; globalThis.__setServerOnline = (value) => { serverOnline = Boolean(value); };`, context, { filename: "app.js" });
   vm.runInContext("globalThis.__hasOpenFromBinReviewWarnings = hasOpenFromBinReviewWarnings; globalThis.__releaseCurrentOrder = releaseCurrentOrder; globalThis.__auditLoadingSlipImport = auditLoadingSlipImport;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__parseLoadingSlipLines = parseLoadingSlipLines; globalThis.__appendAllLoadingSlipLines = appendAllLoadingSlipLines; globalThis.__canAppendLoadingSlipToXlsxDraft = canAppendLoadingSlipToXlsxDraft; globalThis.__renderSaveOrderButton = renderSaveOrderButton;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__createManualStorageLine = createManualStorageLine; globalThis.__readManualStorageBin = readManualStorageBin;", context, { filename: "app.js" });
