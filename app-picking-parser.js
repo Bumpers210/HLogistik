@@ -202,11 +202,6 @@
 
     var collectBestellscheinRows = dependency(dependencies, "collectBestellscheinRows", function () { return []; });
     var createLine = dependency(dependencies, "createLine", function (overrides) { return overrides || {}; });
-    var setAutoPositionNote = dependency(dependencies, "setAutoPositionNote", function (notes, key, value) {
-      var next = Object.assign({}, notes || {});
-      next[key] = String(value || "").trim();
-      return next;
-    });
     var rows = collectBestellscheinRows(lines);
     var groupedRows = parseGroupedLoadingSlipRows(lines, dependencies);
     if (groupedRows.length > rows.length) rows = groupedRows;
@@ -231,7 +226,6 @@
         targetQty: targetQty,
         actualQty: targetQty,
         unit: row.unit || "",
-        autoPositionNotes: setAutoPositionNote({}, "loadingSlip", rows.length > 1 ? "Ladeschein mit " + rows.length + " Positionen" : ""),
         fromHandlingUnit: "",
         fromHandlingUnitEditable: false,
         fromBin: "",
