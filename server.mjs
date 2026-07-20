@@ -72,6 +72,7 @@ import { isPublicStaticFile, staticCacheHeaders } from "./server/config/static-f
 import { ROLE_PERMISSIONS, hasGroupPermission } from "./server/rules/permission-rules.mjs";
 import { WAREHOUSES } from "./server/rules/warehouse-rules.mjs";
 import { validateOrderCompletionForExport } from "./server/rules/export-rules.mjs";
+import { previewSiStockImportRows, replaceSiStockImportRows } from "./server/si-stock-import.mjs";
 import {
   SSI_STORAGE_HU_PREFIX,
   SSI_STORAGE_HU_SUFFIX_LENGTH,
@@ -106,6 +107,7 @@ const articleDatabaseFiles = [
 const port = Number(globalThis.process?.env?.PORT || 4174);
 const localHostname = readLocalHostname();
 const maxBodyBytes = 2 * 1024 * 1024;
+const siStockImportMaxBodyBytes = 25 * 1024 * 1024;
 const configuredArticleDeletePassword = String(globalThis.process?.env?.ARTICLE_DELETE_PASSWORD || "");
 const articleDeletePassword = configuredArticleDeletePassword || "HLogistik2026!";
 
@@ -324,6 +326,22 @@ async function route(request, response) {
   }
 
   // Articles — import
+  if (pathname === "/api/articles/si-stock-import/preview" && request.method === "POST") {
+    requireGroup(request, ROLE_PERMISSIONS.articleMutation);
+    requireSiWarehouse(warehouse);
+    const body = await readBody(request, siStockImportMaxBodyBytes);
+    sendJson(response, 200, { ok: true, preview: previewSiStockImportRows(body) });
+    return;
+  }
+
+  if (pathname === "/api/articles/si-stock-import/replace" && request.method === "POST") {
+    requireGroup(request, ROLE_PERMISSIONS.articleMutation);
+    requireSiWarehouse(warehouse);
+    const body = await readBody(request, siStockImportMaxBodyBytes);
+    sendJson(response, 200, replaceSiStockImportRows(body, { confirmation: body.confirmation }));
+    return;
+  }
+
   if (pathname === "/api/articles/import" && request.method === "POST") {
     requireGroup(request, ROLE_PERMISSIONS.articleMutation);
     const body = await readBody(request, maxBodyBytes);
@@ -616,6 +634,7 @@ async function route(request, response) {
     const discardExport = isQaDiscardExportRequest(request, order);
     const result = await exportPdf(order, exportDir, tempDir, requestOrigin(request), defaultExportDir, {
       discard: discardExport,
+      preserveTempArtifacts: isQaPreserveArtifactsRequest(request, order),
       exportedAt: new Date().toISOString(),
       warehouse: stockWarehouse
     });
@@ -1310,6 +1329,10 @@ function requireGroup(request, allowedGroups) {
   }
 }
 
+function requireSiWarehouse(warehouse) {
+  if (warehouse !== "SI") throw httpError(400, "SI-Bestandsersatz ist nur für Lager SI zulässig");
+}
+
 function requireArticleDeletePassword(password) {
   if (String(password || "") !== articleDeletePassword) {
     throw httpError(403, "Passwort ist falsch");
@@ -1406,6 +1429,10 @@ function requestOrigin(request) {
 
 function isQaDiscardExportRequest(request, order) {
   return isTruthyHeader(request.headers["x-qa-discard-export"]) && isLoopbackRequest(request) && isQaOrder(order);
+}
+
+function isQaPreserveArtifactsRequest(request, order) {
+  return isTruthyHeader(request.headers["x-qa-preserve-artifacts"]) && isLoopbackRequest(request) && isQaOrder(order);
 }
 
 function isTruthyHeader(value) {

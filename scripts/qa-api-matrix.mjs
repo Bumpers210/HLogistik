@@ -1,22 +1,36 @@
 import { normalizeSsiStorageBin } from "../server/helpers.mjs";
 import ExcelJS from "exceljs";
-import { exportPdf } from "../server/export.mjs";
 import { ORDER_EXCEL_HEADERS, ORDER_EXCEL_SHEET_NAME } from "../server/order-excel-export.mjs";
+import { printableHtml } from "../server/export.mjs";
+import {
+  detectSiStockColumns,
+  previewSiStockImportRows,
+  SI_STOCK_IMPORT_SHEET_NAME,
+  SI_STOCK_REPLACE_CONFIRMATION,
+} from "../server/si-stock-import.mjs";
 import {
   destinationCustomerNameForLines,
   MANUAL_STORAGE_POSITION_CREATE_COUNT_MAX,
   MANUAL_STORAGE_POSITION_PREFIX,
   normalizeManualStoragePositionCreateCount,
 } from "../server/rules/order-rules.mjs";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const BASE_URL = String(globalThis.process?.env?.QA_BASE_URL || "http://127.0.0.1:4175").replace(/\/+$/, "");
 const ALLOW_LIVE = globalThis.process?.env?.QA_ALLOW_LIVE === "1";
-const ROLE_HEADERS = { "content-type": "application/json; charset=utf-8", "x-user-group": "buero" };
-const TABLET_HEADERS = { "content-type": "application/json; charset=utf-8", "x-user-group": "tablet" };
+const ROLE_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "x-user-group": "buero",
+  "x-qa-preserve-artifacts": "1"
+};
+const TABLET_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "x-user-group": "tablet",
+  "x-qa-preserve-artifacts": "1"
+};
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const QA_EXPORT_HEADERS = { ...ROLE_HEADERS, "x-qa-discard-export": "1" };
 const QA_TABLET_EXPORT_HEADERS = { ...TABLET_HEADERS, "x-qa-discard-export": "1" };
@@ -39,6 +53,476 @@ async function run() {
   const appSource = await readFile(new URL("../app.js", import.meta.url), "utf8");
   const importDiagnosticsSource = await readFile(new URL("../app-import-diagnostics.js", import.meta.url), "utf8");
   const storageBinRulesSource = await readFile(new URL("../shared/storage-bin-rules.js", import.meta.url), "utf8");
+  const quantityFormatSource = await readFile(new URL("../shared/quantity-format.js", import.meta.url), "utf8");
+  const pickingXlsxSource = await readFile(new URL("../app-picking-xlsx-import.js", import.meta.url), "utf8");
+  const browserModuleContext = vm.createContext({ window: {} });
+  vm.runInContext(quantityFormatSource, browserModuleContext, { filename: "shared/quantity-format.js" });
+  vm.runInContext(pickingXlsxSource, browserModuleContext, { filename: "app-picking-xlsx-import.js" });
+  const quantityFormat = browserModuleContext.window.HLogistikQuantityFormat;
+  const pickingXlsx = browserModuleContext.window.HLogistikPickingXlsxImport;
+  const legacyTabletQuantityRender = await legacyTabletQuantityRenderFixture();
+
+  const storagePdfHtml = printableHtml({
+    orderNumber: `QA-PDF-ST-${suffix}`,
+    orderType: "storage",
+    lines: [
+      {
+        warehouseOrder: "10",
+        product: materialnummer,
+        description: "Nicht in der Einlagerliste anzeigen",
+        fromHandlingUnit: "340063810001234567",
+        fromBin: "002-H4-SH4C4",
+        targetQty: "5",
+        actualQty: "5",
+        unit: "ST",
+        picked: true,
+        manual: true
+      },
+      {
+        warehouseOrder: "20",
+        product: `${materialnummer}-ABW`,
+        fromHandlingUnit: "340063810009999999",
+        fromBin: "002-H4-SH4C5",
+        targetQty: "5",
+        actualQty: "4",
+        unit: "ST",
+        picked: true
+      }
+    ]
+  }, "QA-Einlagerung.pdf");
+  const pickingPdfHtml = printableHtml({
+    orderNumber: `QA-PDF-PK-${suffix}`,
+    orderType: "picking",
+    lines: [{
+      warehouseOrder: "10",
+      product: materialnummer,
+      fromHandlingUnit: "340063810001234567",
+      fromBin: "002-H4-SH4C4",
+      toBin: "9021-0OUT",
+      targetQty: "5",
+      actualQty: "5",
+      unit: "ST",
+      picked: true
+    }, {
+      lineType: "loading-slip",
+      barcode: "QA-LS-PDF",
+      product: "QA-LS-PDF-MARKER",
+      description: "Diese Ladeliste darf nicht im PDF stehen",
+      targetQty: "9",
+      actualQty: "9",
+      unit: "ST",
+      picked: true
+    }]
+  }, "QA-Kommissionierung.pdf");
+  const storagePdfHeaders = tableHeadersFromHtml(storagePdfHtml);
+
+  check("quantity parser reads German thousands", quantityFormat.parse("85.000") === 85000, String(quantityFormat.parse("85.000")));
+  check(
+    "legacy tablet renders all quantity lines without Intl or Number.isFinite",
+    legacyTabletQuantityRender.numberIsFiniteAvailable === false &&
+      legacyTabletQuantityRender.intlAvailable === false &&
+      legacyTabletQuantityRender.renderedLineCount === 2 &&
+      legacyTabletQuantityRender.inputValues.includes("15.960"),
+    JSON.stringify(legacyTabletQuantityRender)
+  );
+  check(
+    "storage PDF uses portrait A4 with exactly the six storage columns",
+    storagePdfHtml.includes("@page { size: A4 portrait; margin: 10mm; }") &&
+      JSON.stringify(storagePdfHeaders) === JSON.stringify(["Pos.", "Artikelnummer", "HU / LE", "Soll", "Ist", "Einlagerplatz"]),
+    JSON.stringify(storagePdfHeaders)
+  );
+  check(
+    "storage PDF excludes article description and picking columns",
+    !storagePdfHtml.includes("Artikelbezeichnung") &&
+      !["Lagerauftrag", "Von-HU", "Nach-Lagerplatz", "Beschreibung"].some((header) => storagePdfHeaders.includes(header)),
+    JSON.stringify(storagePdfHeaders)
+  );
+  check(
+    "picking PDF remains landscape A4",
+    pickingPdfHtml.includes("@page { size: A4 landscape; margin: 12mm; }") &&
+      tableHeadersFromHtml(pickingPdfHtml).includes("Lagerauftrag"),
+    JSON.stringify(tableHeadersFromHtml(pickingPdfHtml))
+  );
+  check(
+    "picking PDF excludes loading-slip positions, their totals and attachments",
+    !pickingPdfHtml.includes("QA-LS-PDF") &&
+      !pickingPdfHtml.includes("Ladeliste darf nicht") &&
+      pickingPdfHtml.includes("Erledigt:</strong> 1/1") &&
+      !pickingPdfHtml.includes("loading-slip"),
+    pickingPdfHtml
+  );
+  check(
+    "storage PDF keeps full bin, deviation marker and white manual rows",
+    storagePdfHtml.includes("002-H4-SH4C4") &&
+      storagePdfHtml.includes('<tr class="manual-line">') &&
+      storagePdfHtml.includes('<tr class="changed-qty">') &&
+      storagePdfHtml.includes(".storage-table .manual-line:not(.changed-qty):not(.missing-line) td { background: #fff; }") &&
+      storagePdfHtml.includes(".storage-table .changed-qty td:nth-child(5) { border: 2px solid #111; }"),
+    storagePdfHtml
+  );
+  check("quantity parser reads decimal comma", quantityFormat.parse("4,5") === 4.5, String(quantityFormat.parse("4,5")));
+  check(
+    "quantity parser supports x X and multiplication sign",
+    quantityFormat.parse("4x85000") === 340000 &&
+      quantityFormat.parse("4 X 85000") === 340000 &&
+      quantityFormat.parse("4\u00d785000") === 340000,
+    [quantityFormat.parse("4x85000"), quantityFormat.parse("4 X 85000"), quantityFormat.parse("4\u00d785000")].join(",")
+  );
+  check(
+    "quantity formatter groups large integers in German notation",
+    [1000, 85000, 720000].map(quantityFormat.format).join("|") === "1.000|85.000|720.000",
+    [1000, 85000, 720000].map(quantityFormat.format).join("|")
+  );
+  check(
+    "quantity display preserves matching multiplication source",
+    quantityFormat.displayLineQuantity({ quantitySourceText: "4x85000", targetQty: "340000" }, "340000") === "4x85000",
+    quantityFormat.displayLineQuantity({ quantitySourceText: "4x85000", targetQty: "340000" }, "340000")
+  );
+  check(
+    "quantity display ignores stale multiplication source",
+    quantityFormat.displayLineQuantity({ quantitySourceText: "4x85000", targetQty: "340001" }, "340001") === "340.001",
+    quantityFormat.displayLineQuantity({ quantitySourceText: "4x85000", targetQty: "340001" }, "340001")
+  );
+  check(
+    "quantity formatter leaves non-quantity text unchanged",
+    Number.isNaN(quantityFormat.parse("Position A1")) && quantityFormat.format("Position A1") === "Position A1",
+    quantityFormat.format("Position A1")
+  );
+  const quantityRegressionPosition = { position: "001", quantitySourceText: "4x85000", targetQty: "340000" };
+  check(
+    "quantity regression covers grouped display, source formula and unchanged position values",
+    quantityFormat.format(999) === "999" &&
+      quantityFormat.format(1000) === "1.000" &&
+      quantityFormat.format(85000) === "85.000" &&
+      quantityFormat.format(720000) === "720.000" &&
+      quantityFormat.displayLineQuantity(quantityRegressionPosition, "340000") === "4x85000" &&
+      quantityFormat.displayLineQuantity({ quantitySourceText: "4x85000", targetQty: "340001" }, "340001") === "340.001" &&
+      quantityRegressionPosition.position === "001",
+    JSON.stringify({
+      values: [999, 1000, 85000, 720000].map(quantityFormat.format),
+      source: quantityFormat.displayLineQuantity(quantityRegressionPosition, "340000"),
+      stale: quantityFormat.displayLineQuantity({ quantitySourceText: "4x85000", targetQty: "340001" }, "340001"),
+      position: quantityRegressionPosition.position
+    })
+  );
+
+  let sheetToJsonOptions = null;
+  browserModuleContext.window.XLSX = {
+    utils: {
+      sheet_to_json: (sheet, options) => {
+        sheetToJsonOptions = { ...options };
+        return sheet;
+      }
+    }
+  };
+  const pickingXlsxRows = [
+    ["Lageraufgabe", "Von-Handling-Unit", "Von-Lagerplatz", "Produkt", "HU-Lageraufgabe", "Von-Zielmenge BME", "Basismengeneinheit", "Produktbeschreibung", "Nach-Lagerplatz"],
+    ["000000000001", "000000000000000101", "002-H3-S01A1", "000000012345", "HU-AUF-1", "3882", "ST", "Produktbeschreibung 1", "9021-0OUT"],
+    ["000000000002", "000000000000000102", "002-H3-S01A1", "000000012345", "HU-AUF-2", "150", "ST", "Produktbeschreibung 2", "9021-0OUT"],
+    ["000000000003", "000000000000000103", "002-H3-S01A1", "000000012345", "HU-AUF-3", "400", "ST", "Produktbeschreibung 3", "9021-0OUT"],
+    ["000000000004", "000000000000000104", "002-H3-S01A1", "000000012345", "HU-AUF-4", "300", "ST", "Produktbeschreibung 4", "9021-0OUT"],
+    ["", "", "002-H3-S01A1", "000000012345", "HU-AUF-SUMME", "4732", "ST", "Pruefsumme", "9021-0OUT"]
+  ];
+  const pickingXlsxWorkbook = {
+    SheetNames: ["Hinweise", "Data"],
+    Sheets: { Hinweise: [["Keine Importdaten"]], Data: pickingXlsxRows }
+  };
+  const pickingXlsxSourceBefore = JSON.stringify(pickingXlsxWorkbook);
+  const pickingXlsxHeader = pickingXlsx.findHeader(pickingXlsxRows);
+  const pickingXlsxPreview = pickingXlsx.previewWorkbook(pickingXlsxWorkbook);
+  const pickingXlsxQuantityWorkbook = new ExcelJS.Workbook();
+  const pickingXlsxQuantitySheet = pickingXlsxQuantityWorkbook.addWorksheet("Tabelle1");
+  const numeric1700Cell = pickingXlsxQuantitySheet.getCell("F2");
+  numeric1700Cell.value = 1700;
+  numeric1700Cell.numFmt = "#,##0";
+  const numeric675Cell = pickingXlsxQuantitySheet.getCell("F3");
+  numeric675Cell.value = 675;
+  numeric675Cell.numFmt = "#,##0";
+  const formula1700Cell = pickingXlsxQuantitySheet.getCell("F7");
+  formula1700Cell.value = { formula: "1700", result: 1700 };
+  const pickingXlsxNumericRows = [
+    pickingXlsxRows[0],
+    ["101107234", "", "022-H4-R3", "1011054", "", numeric1700Cell.value, "ST", "Teil 1700", "9020-DETTELSAU"],
+    ["101107235", "340063810001948463", "002-H4-SJ1B3", "1014812", "", numeric675Cell.value, "ST", "Teil 675", "9020-DETTELSAU"],
+    ["101107236", "340063810001948464", "002-H4-SJ1B4", "1014813", "", "1.700", "ST", "Text deutsch", "9020-DETTELSAU"],
+    ["101107237", "340063810001948465", "002-H4-SJ1B5", "1014814", "", "1,7", "ST", "Text komma", "9020-DETTELSAU"],
+    ["101107238", "340063810001948466", "002-H4-SJ1B6", "1014815", "", "4x85000", "ST", "Text multiplikation", "9020-DETTELSAU"],
+    ["101107239", "340063810001948467", "002-H4-SJ1B7", "1014816", "", formula1700Cell.value, "ST", "Formel", "9020-DETTELSAU"]
+  ];
+  const pickingXlsxNumericSourceBefore = JSON.stringify(pickingXlsxNumericRows);
+  const pickingXlsxNumericPreview = pickingXlsx.previewRows(pickingXlsxNumericRows, pickingXlsx.findHeader([pickingXlsxNumericRows[0]]));
+  const pickingXlsxDraftRelease = await pickingXlsxDraftReleaseFixture(pickingXlsxNumericPreview.lines.slice(0, 2));
+  const loadingSlipXlsxAttachment = await loadingSlipXlsxAttachmentFixture(pickingXlsxNumericPreview.lines.slice(0, 1));
+  const loadingSlipXlsxDraftRelease = await pickingXlsxDraftReleaseFixture(loadingSlipXlsxAttachment.lines, { release: true });
+  const pdfImportHandlerSource = extractFunctionSource(appSource, "async function handlePdfUpload(");
+  const xlsxImportHandlerSource = extractFunctionSource(appSource, "async function handlePickingXlsxUpload(");
+  const loadingSlipAttachmentHandlerSource = extractFunctionSource(appSource, "async function handleLoadingSlipPdfUpload(");
+  const loadingSlipAttachmentReaderSource = extractFunctionSource(appSource, "async function readLoadingSlipAttachmentPdf(");
+  const loadingSlipAppendButtonSource = extractFunctionSource(appSource, "function renderSaveOrderButton(");
+  const importTextSource = extractFunctionSource(appSource, "async function importText(");
+  const releaseButtonSource = extractFunctionSource(appSource, "function renderReleaseButton(");
+  const releaseActionSource = extractFunctionSource(appSource, "async function releaseCurrentOrder(");
+  const pickingXlsxLegacyRows = [
+    ["Lagerauftrag", "Von HU", "Von Lagerplatz", "Materialnummer", "Beschreibung", "Menge", "Einheit", "Nach Lagerplatz"],
+    ["1", "", "002-H3-S1A1", "100", "Teil A", "4x85000", "", "9021-0OUT"],
+    ["2", "4711", "002-H3-S1A2", "100", "Teil A", "12", "ST", "9021-0OUT"],
+    [],
+    ["Gesamt"]
+  ];
+  const pickingXlsxLegacyHeader = pickingXlsx.findHeader(pickingXlsxLegacyRows);
+  const pickingXlsxLegacyPreview = pickingXlsx.previewRows(pickingXlsxLegacyRows, pickingXlsxLegacyHeader);
+  const unusualXlsxBin = "XLSX-Sonderplatz/42";
+  const pickingXlsxUnusualBinPreview = pickingXlsx.previewRows([
+    pickingXlsxLegacyRows[0],
+    ["3", "", unusualXlsxBin, "100", "Sonderplatz unveraendert", "7", "ST", "9021-0OUT"]
+  ], pickingXlsxLegacyHeader);
+  const pickingXlsxUnusualBinRelease = await pickingXlsxDraftReleaseFixture(pickingXlsxUnusualBinPreview.lines, { release: true });
+  const pickingPdfBinReview = await pickingPdfBinReviewFixture("002-H4-XYZ");
+  const pickingXlsxInvalid = pickingXlsx.previewRows([
+    pickingXlsxLegacyRows[0],
+    ["1", "", "", "100", "Teil A", "0", "ST", ""]
+  ], pickingXlsx.findHeader([pickingXlsxLegacyRows[0]]));
+  const mandatoryPickingKeys = ["fromHandlingUnit", "fromBin", "product", "targetQty", "description", "toBin"];
+  check(
+    "picking XLSX maps SAP Data headers, raw quantities and source data safely",
+    pickingXlsxPreview.sheetName === "Data" &&
+      pickingXlsxHeader.index === 0 &&
+      mandatoryPickingKeys.every((key) => pickingXlsxHeader.mapping[key] != null) &&
+      pickingXlsxHeader.mapping.targetQty === 5 &&
+      pickingXlsxHeader.missingRequired.length === 0 &&
+      pickingXlsxPreview.ok === true &&
+      !pickingXlsxPreview.hardErrors.some((error) => error.errors.some((message) => message.includes("Pflichtspalten fehlen: targetQty"))) &&
+      !Object.values(pickingXlsxHeader.labels).includes("HU-Lageraufgabe") &&
+      pickingXlsxLegacyHeader.missingRequired.length === 0 &&
+      pickingXlsx.normalizeHeader("  VON\u2011ZIELMENGE   BME  ") === "vonzielmengebme" &&
+      JSON.stringify(pickingXlsxWorkbook) === pickingXlsxSourceBefore &&
+      sheetToJsonOptions?.raw === true &&
+      numeric1700Cell.value === 1700 && numeric1700Cell.numFmt === "#,##0" &&
+      numeric675Cell.value === 675 && numeric675Cell.numFmt === "#,##0" &&
+      pickingXlsxNumericPreview.lines.map((line) => line.targetQty).join(",") === "1700,675,1700,1.7,340000,1700" &&
+      pickingXlsxNumericPreview.lines.map((line) => line.actualQty).join(",") === "1700,675,1700,1.7,340000,1700" &&
+      pickingXlsxNumericPreview.lines[0]?.quantitySourceText === "" &&
+      pickingXlsxNumericPreview.lines[1]?.quantitySourceText === "" &&
+      pickingXlsxNumericPreview.lines[4]?.quantitySourceText === "4x85000" &&
+      pickingXlsxNumericPreview.lines[5]?.quantitySourceText === "" &&
+      quantityFormat.format(pickingXlsxNumericPreview.lines[0]?.targetQty) === "1.700" &&
+      JSON.stringify(pickingXlsxNumericRows) === pickingXlsxNumericSourceBefore &&
+      pickingXlsxDraftRelease.result?.cancelled !== true &&
+      pickingXlsxDraftRelease.state.lines?.length === 2 &&
+      pickingXlsxDraftRelease.state.id === "" &&
+      pickingXlsxDraftRelease.state.awaitingRelease === true &&
+      pickingXlsxDraftRelease.state.activeUser === "" &&
+      pickingXlsxDraftRelease.state.acceptedBy === "" &&
+      pickingXlsxDraftRelease.state.completedAt === "" &&
+      pickingXlsxDraftRelease.state.exportedAt === "" &&
+      pickingXlsxDraftRelease.releaseButton.hidden === false &&
+      pickingXlsxDraftRelease.releaseButton.disabled === false &&
+      pickingXlsxDraftRelease.serverRequests === 0 &&
+      pickingXlsxDraftRelease.saveStateCalls === 1 &&
+      pickingXlsxDraftRelease.renderCalls === 1 &&
+      pdfImportHandlerSource.includes("await importText(imported.text, file.name, imported.parsed, imported.diagnostics)") &&
+      xlsxImportHandlerSource.includes("await importText(`XLSX-Blatt ${preview.sheetName}`, file.name, parsed, diagnostics)") &&
+      importTextSource.includes("state.awaitingRelease = true") &&
+      importTextSource.includes("saveStateWithoutServer()") &&
+      importTextSource.includes("render()") &&
+      releaseButtonSource.includes("state.awaitingRelease") &&
+      releaseActionSource.includes("saveOrderNow(false, { allowDraftRelease: true, touch: false })"),
+    JSON.stringify({
+      sheetName: pickingXlsxPreview.sheetName,
+      header: pickingXlsxHeader,
+      mapping: pickingXlsxPreview.mapping,
+      sheetToJsonOptions,
+      excelCells: {
+        numeric1700: { value: numeric1700Cell.value, numberFormat: numeric1700Cell.numFmt },
+        numeric675: { value: numeric675Cell.value, numberFormat: numeric675Cell.numFmt },
+        formula1700: formula1700Cell.value
+      },
+      numericLines: pickingXlsxNumericPreview.lines,
+      draftRelease: pickingXlsxDraftRelease
+    })
+  );
+  check(
+    "picking XLSX keeps source rows as separate positions",
+    pickingXlsxPreview.lines.length === 4 &&
+      pickingXlsxPreview.lines.every((line) => line.product === "000000012345" && line.fromBin === "002-H3-S01A1" && line.toBin === "9021-0OUT"),
+    JSON.stringify(pickingXlsxPreview.lines)
+  );
+  check(
+    "picking XLSX draft appends every loading-slip position without server save or deduplication",
+    loadingSlipXlsxAttachment.button.textContent === "Ladeliste anhängen" &&
+      !loadingSlipXlsxAttachment.button.textContent.includes("Entwurf lokal speichern") &&
+      loadingSlipXlsxAttachment.canAppend === true &&
+      loadingSlipXlsxAttachment.pages.map((page) => page.rotation).join(",") === "0,90" &&
+      loadingSlipXlsxAttachment.loadingSlipCount === 3 &&
+      loadingSlipXlsxAttachment.lines.length === 5 &&
+      loadingSlipXlsxAttachment.regularLinesUnchanged === true &&
+      loadingSlipXlsxAttachment.loadingLines.every((line) => line.lineType === "loading-slip") &&
+      loadingSlipXlsxAttachment.loadingLines.map((line) => line.product).join(",") === "1066526,1066526,1072595,1072598" &&
+      new Set(loadingSlipXlsxAttachment.loadingLines.map((line) => line.loadingSlipAttachmentId)).size === 1 &&
+      loadingSlipXlsxAttachment.loadingLines.map((line) => line.loadingSlipAttachmentPage).join(",") === "1,1,2,2" &&
+      loadingSlipXlsxDraftRelease.result?.cancelled !== true &&
+      loadingSlipXlsxDraftRelease.releaseRequests === 1 &&
+      loadingSlipXlsxDraftRelease.savedLines?.length === 5 &&
+      loadingSlipXlsxDraftRelease.savedLines?.slice(1).every((line) => line.lineType === "loading-slip") &&
+      loadingSlipAttachmentHandlerSource.includes("appendAllLoadingSlipLines(state.lines, attachment.lines)") &&
+      !loadingSlipAttachmentHandlerSource.includes("saveStateWithoutServer()") &&
+      !loadingSlipAttachmentHandlerSource.includes("saveOrderNow(") &&
+      !loadingSlipAttachmentHandlerSource.includes("releaseCurrentOrder(") &&
+      loadingSlipAttachmentReaderSource.includes("for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1)") &&
+      loadingSlipAttachmentReaderSource.includes("for (const rotation of OCR_ROTATIONS)") &&
+      loadingSlipAppendButtonSource.includes("Ladeliste anhängen") &&
+      loadingSlipAppendButtonSource.includes("canAppend"),
+    JSON.stringify({
+      attachment: loadingSlipXlsxAttachment,
+      release: loadingSlipXlsxDraftRelease,
+      handler: loadingSlipAttachmentHandlerSource,
+      reader: loadingSlipAttachmentReaderSource,
+      button: loadingSlipAppendButtonSource
+    })
+  );
+  check(
+    "picking XLSX preserves multiplication source text",
+    pickingXlsxLegacyPreview.lines[0]?.targetQty === "340000" && pickingXlsxLegacyPreview.lines[0]?.quantitySourceText === "4x85000",
+    JSON.stringify(pickingXlsxLegacyPreview.lines[0])
+  );
+  check(
+    "picking XLSX accounts for blank and summary rows",
+    pickingXlsxPreview.inputRowCount === 5 &&
+      pickingXlsxPreview.accountedRowCount === 5 &&
+      pickingXlsxPreview.ignoredRows.length === 1 &&
+      pickingXlsxPreview.ignoredRows[0]?.reason.includes("Lageraufgabe") &&
+      pickingXlsxLegacyPreview.inputRowCount === 4 &&
+      pickingXlsxLegacyPreview.accountedRowCount === 4 &&
+      pickingXlsxLegacyPreview.ignoredRows.length === 2,
+    JSON.stringify(pickingXlsxPreview)
+  );
+  check(
+    "picking XLSX reports invalid required cells as hard errors",
+    pickingXlsxInvalid.lines.length === 0 && pickingXlsxInvalid.hardErrors.length === 1 && pickingXlsxInvalid.hardErrors[0].errors.length === 3,
+    JSON.stringify(pickingXlsxInvalid)
+  );
+  check(
+    "picking XLSX marks missing HU editable",
+    pickingXlsxLegacyPreview.lines[0]?.fromHandlingUnitEditable === true && pickingXlsxLegacyPreview.lines[1]?.fromHandlingUnitEditable === false,
+    JSON.stringify(pickingXlsxLegacyPreview.lines)
+  );
+  check(
+    "picking XLSX defaults missing unit to Stk",
+    pickingXlsxLegacyPreview.lines[0]?.unit === "Stk" && pickingXlsxLegacyPreview.lines[1]?.unit === "ST",
+    JSON.stringify(pickingXlsxLegacyPreview.lines)
+  );
+  check(
+    "picking XLSX retains original worksheet row numbers",
+    pickingXlsxPreview.lines.map((line) => line.sourceRow).join(",") === "2,3,4,5" &&
+      pickingXlsxPreview.lines.map((line) => line.targetQty).join(",") === "3882,150,400,300" &&
+      pickingXlsxPreview.lines.map((line) => line.warehouseOrder).join(",") === "000000000001,000000000002,000000000003,000000000004" &&
+      pickingXlsxPreview.lines.map((line) => line.fromHandlingUnit).join(",") === "000000000000000101,000000000000000102,000000000000000103,000000000000000104" &&
+      pickingXlsxPreview.lines.map((line) => line.description).join("|") === "Produktbeschreibung 1|Produktbeschreibung 2|Produktbeschreibung 3|Produktbeschreibung 4",
+    JSON.stringify(pickingXlsxPreview.lines)
+  );
+  check(
+    "picking XLSX keeps unusual source bins without review and permits release",
+    pickingXlsxUnusualBinPreview.hardErrors.length === 0 &&
+      pickingXlsxUnusualBinPreview.lines[0]?.fromBin === unusualXlsxBin &&
+      pickingXlsxUnusualBinRelease.importedLine?.fromBin === unusualXlsxBin &&
+      pickingXlsxUnusualBinRelease.storageBinOptions?.allowSiFromBinFill === false &&
+      !pickingXlsxUnusualBinRelease.importedLine?.binWarning &&
+      pickingXlsxUnusualBinRelease.importedLine?.fromBinReviewRequired !== true &&
+      pickingXlsxUnusualBinRelease.hasOpenReviewBeforeRelease === false &&
+      pickingXlsxUnusualBinRelease.releaseRequests === 1 &&
+      pickingXlsxUnusualBinRelease.savedLine?.fromBin === unusualXlsxBin &&
+      !pickingXlsxUnusualBinRelease.savedLine?.binWarning &&
+      pickingXlsxUnusualBinRelease.savedLine?.fromBinReviewRequired !== true,
+    JSON.stringify(pickingXlsxUnusualBinRelease)
+  );
+  check(
+    "picking PDF and OCR source-bin review remains active",
+    pickingPdfBinReview.review.fromBinReviewRequired === true && pickingPdfBinReview.blocked === true,
+    JSON.stringify(pickingPdfBinReview)
+  );
+
+  const siStockHeader = ["Datum", "Bereich", "Material", "Materialbezeichnung", "Menge", "Lagerplatz", "LE", "Paletten"];
+  const siStockRows = [
+    siStockHeader,
+    ["2026-07-17", "SI", "100", "Teil A", "10", "001-A", "4711", "1"],
+    ["2026-07-17", "SI", "100", "Teil A", "10", "001-A", "4711", "1"],
+    ["2026-07-17", "SI", "200", "Teil B", "4", "002-B", "", "1"],
+    ["2026-07-17", "SI", "200", "Teil B", "6", "002-B", "", "2"],
+    ["2026-07-17", "SI", "300", "Teil C", "3", "003-C", "LE-X", "0"]
+  ];
+  const siStockPreview = previewSiStockImportRows({ sheetName: SI_STOCK_IMPORT_SHEET_NAME, fileName: "synthetic.xlsx", rows: siStockRows });
+  const siWrongSheet = previewSiStockImportRows({ sheetName: "Data", fileName: "synthetic.xlsx", rows: siStockRows });
+  const siColumnDetection = detectSiStockColumns(siStockHeader);
+  const siConflictingLe = previewSiStockImportRows({
+    sheetName: SI_STOCK_IMPORT_SHEET_NAME,
+    rows: [siStockHeader,
+      ["2026-07-17", "SI", "400", "Teil D", "5", "004-D", "9900", "1"],
+      ["2026-07-17", "SI", "400", "Teil D", "6", "004-D", "9900", "1"]]
+  });
+  const siConflictingEmptyLe = previewSiStockImportRows({
+    sheetName: SI_STOCK_IMPORT_SHEET_NAME,
+    rows: [siStockHeader,
+      ["2026-07-17", "SI", "500", "Teil E", "5", "005-E", "", "1"],
+      ["2026-07-17", "SI", "500", "Teil F", "6", "005-E", "", "1"]]
+  });
+  const siArticleConflict = previewSiStockImportRows({
+    sheetName: SI_STOCK_IMPORT_SHEET_NAME,
+    rows: [siStockHeader,
+      ["2026-07-17", "SI", "600", "Teil G", "5", "006-G", "1", "1"],
+      ["2026-07-17", "SI", "600", "Teil H", "6", "006-H", "2", "1"]]
+  });
+  check(
+    "SI preview rejects a workbook without Bestandsdetail",
+    siWrongSheet.ok === false && siWrongSheet.hardErrors.some((error) => error.code === "sheet"),
+    JSON.stringify(siWrongSheet.hardErrors)
+  );
+  check(
+    "SI preview detects required Bestandsdetail columns",
+    siColumnDetection.missing.length === 0 && siColumnDetection.columns.le === 6,
+    JSON.stringify(siColumnDetection)
+  );
+  check(
+    "SI preview discards and reports exact non-empty LE duplicate",
+    siStockPreview.counts.discardedExactDuplicates === 1 && siStockPreview.discardedExactDuplicates[0]?.keptRowNumber === 2,
+    JSON.stringify(siStockPreview.discardedExactDuplicates)
+  );
+  check(
+    "SI preview blocks conflicting non-empty LE duplicate",
+    siConflictingLe.ok === false && siConflictingLe.hardErrors.some((error) => error.code === "conflicting-le"),
+    JSON.stringify(siConflictingLe.hardErrors)
+  );
+  check(
+    "SI preview permits blank LE with warning",
+    siStockPreview.warnings.filter((warning) => warning.code === "missing-le").length === 2,
+    JSON.stringify(siStockPreview.warnings)
+  );
+  check(
+    "SI preview merges structurally equal blank-LE rows",
+    siStockPreview.counts.mergedEmptyLeGroups === 1 && siStockPreview.stockRows.find((row) => row.materialnummer === "200")?.mengeStueck === 10,
+    JSON.stringify(siStockPreview.mergedEmptyLeGroups)
+  );
+  check(
+    "SI preview blocks structurally conflicting blank-LE rows",
+    siConflictingEmptyLe.ok === false && siConflictingEmptyLe.hardErrors.some((error) => error.code === "conflicting-empty-le"),
+    JSON.stringify(siConflictingEmptyLe.hardErrors)
+  );
+  check(
+    "SI preview preserves unusual nonnumeric LE as warning",
+    siStockPreview.stockRows.find((row) => row.materialnummer === "300")?.leNummer === "LE-X" &&
+      siStockPreview.warnings.some((warning) => warning.code === "unusual-le"),
+    JSON.stringify(siStockPreview.warnings)
+  );
+  check(
+    "SI preview blocks conflicting article descriptions",
+    siArticleConflict.ok === false && siArticleConflict.hardErrors.some((error) => error.code === "article-conflict"),
+    JSON.stringify(siArticleConflict.hardErrors)
+  );
+  check(
+    "SI preview balances source, duplicate and merged row counts",
+    siStockPreview.ok === true && siStockPreview.counts.validSourceRows === 5 &&
+      siStockPreview.counts.importStockRows === 3 && siStockPreview.counts.importArticles === 3,
+    JSON.stringify(siStockPreview.counts)
+  );
   check("ssi H3 O-Y shorthand normalizes to direct H3 bin", normalizeSsiStorageBin("H3T1") === "002-H3-T1", normalizeSsiStorageBin("H3T1"));
   check("ssi H3 O-Y shorthand accepts hyphen", normalizeSsiStorageBin("H3-T1") === "002-H3-T1", normalizeSsiStorageBin("H3-T1"));
   check("ssi H3 direct bin remains stable", normalizeSsiStorageBin("002-H3-T1") === "002-H3-T1", normalizeSsiStorageBin("002-H3-T1"));
@@ -96,6 +580,37 @@ async function run() {
     tabletModernMissingDescriptionCompletion.missingProductErrors.some((error) => /Artikelnummer fehlt/i.test(error)) &&
       tabletLegacyMissingDescriptionCompletion.missingProductErrors.some((error) => /Artikelnummer fehlt/i.test(error)),
     JSON.stringify({ modern: tabletModernMissingDescriptionCompletion, legacy: tabletLegacyMissingDescriptionCompletion })
+  );
+
+  const tabletModernDetailLoading = await tabletDetailLoadingFixture("tablet.js");
+  const tabletLegacyDetailLoading = await tabletDetailLoadingFixture("tablet-legacy.js");
+  check(
+    "tablet order summaries load a complete detail with rendered positions and an active takeover",
+    [tabletModernDetailLoading, tabletLegacyDetailLoading].every((result) =>
+      result.summaryHasNoLines === true &&
+      result.detailRequestPath === "/api/orders/qa-tablet-detail" &&
+      result.loadedOrderId === "qa-tablet-detail" &&
+      result.renderedLineCount === 3 &&
+      result.takeOver.hidden === false &&
+      result.takeOver.disabled === false &&
+      result.loadedAcceptedBy === ""
+    ),
+    JSON.stringify({ modern: tabletModernDetailLoading, legacy: tabletLegacyDetailLoading })
+  );
+  check(
+    "tablet detail API error preserves the previous rendered order instead of a false empty selection",
+    [tabletModernDetailLoading, tabletLegacyDetailLoading].every((result) =>
+      result.failure.selectedOrderId === "qa-tablet-detail" &&
+      result.failure.currentOrderId === "qa-tablet-detail" &&
+      result.failure.renderedLineCount === 3 &&
+      /Auftrag konnte nicht geladen werden: Detailtest fehlgeschlagen/.test(result.failure.message)
+    ),
+    JSON.stringify({ modern: tabletModernDetailLoading.failure, legacy: tabletLegacyDetailLoading.failure })
+  );
+  check(
+    "tablet modern and legacy keep identical takeover status rules",
+    JSON.stringify(tabletModernDetailLoading.statusRules) === JSON.stringify(tabletLegacyDetailLoading.statusRules),
+    JSON.stringify({ modern: tabletModernDetailLoading.statusRules, legacy: tabletLegacyDetailLoading.statusRules })
   );
 
   const orderHintSameLine = await parsePickingTextFixture(pickingTextFixture("Bestellhinweis: Service Ecke"));
@@ -244,6 +759,35 @@ async function run() {
       loadingSlipFromSecondaryOcr.loadingLine?.product === "1076846" &&
       loadingSlipFromSecondaryOcr.loadingLine?.targetQty === "12",
     JSON.stringify(loadingSlipFromSecondaryOcr)
+  );
+
+  const loadingSlipThreePositions = await loadingSlipThreePositionsFixture();
+  check(
+    "picking loading slip keeps three consecutive positions with one barcode",
+    loadingSlipThreePositions.normalCount === 1 &&
+      loadingSlipThreePositions.loadingLines.length === 3 &&
+      loadingSlipThreePositions.loadingLines.every((line) => line.lineType === "loading-slip") &&
+      loadingSlipThreePositions.loadingLines.map((line) => line.product).join(",") === "1066526,1072595,1072598" &&
+      loadingSlipThreePositions.loadingLines.map((line) => line.description).join("|") === "Sicherheitsstreifen fuer 7015-01|PET-Etui fuer 7015/02-05|PET-Etui fuer 7015-01" &&
+      loadingSlipThreePositions.loadingLines.map((line) => line.targetQty).join(",") === "15960,5625,5625" &&
+      loadingSlipThreePositions.loadingLines.map((line) => line.actualQty).join(",") === "15960,5625,5625" &&
+      loadingSlipThreePositions.loadingLines.map((line) => line.loadingSlipPosition).join(",") === "1,2,3" &&
+      loadingSlipThreePositions.audit.expected === 3 &&
+      loadingSlipThreePositions.audit.attached === 3 &&
+      loadingSlipThreePositions.audit.issues.length === 0 &&
+      loadingSlipThreePositions.reappendedLineCount === 4,
+    JSON.stringify(loadingSlipThreePositions)
+  );
+
+  const rotatedLoadingSlipFallback = await rotatedLoadingSlipFallbackFixture();
+  check(
+    "picking import starts rotated loading-slip OCR for an unrecognised second page",
+    rotatedLoadingSlipFallback.fallbackNeeded === true &&
+      rotatedLoadingSlipFallback.normalCount === 1 &&
+      rotatedLoadingSlipFallback.loadingLines.length === 3 &&
+      rotatedLoadingSlipFallback.loadingLines.map((line) => line.product).join(",") === "1066526,1072595,1072598" &&
+      rotatedLoadingSlipFallback.loadingLines.map((line) => line.targetQty).join(",") === "15960,5625,5625",
+    JSON.stringify(rotatedLoadingSlipFallback)
   );
 
   const mergedBestellscheinHu = await mergeBestellscheinHuFixture();
@@ -856,9 +1400,107 @@ async function run() {
 
   const tabletLegacySource = await readFile(new URL("../tablet-legacy.js", import.meta.url), "utf8");
   const tabletModernSource = await readFile(new URL("../tablet.js", import.meta.url), "utf8");
+  const serviceWorkerSource = await readFile(new URL("../service-worker.js", import.meta.url), "utf8");
+  const manifestSource = await readFile(new URL("../manifest.webmanifest", import.meta.url), "utf8");
   const exportSource = await readFile(new URL("../server/export.mjs", import.meta.url), "utf8");
   const indexHtmlSource = await readFile(new URL("../index.html", import.meta.url), "utf8");
   const tabletHtmlSource = await readFile(new URL("../tablet.html", import.meta.url), "utf8");
+  const articleHtmlSource = await readFile(new URL("../artikel.html", import.meta.url), "utf8");
+  const articleJsSource = await readFile(new URL("../artikel.js", import.meta.url), "utf8");
+  const serverSource = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  const storageSource = await readFile(new URL("../server/storage.mjs", import.meta.url), "utf8");
+  const tabletLegacyServiceWorkerSource = extractFunctionSource(tabletLegacySource, "function registerTabletServiceWorker(");
+  const tabletModernServiceWorkerSource = extractFunctionSource(tabletModernSource, "function registerTabletServiceWorker(");
+  check(
+    "tablet legacy detail loader validates complete orders without unsupported iPad syntax",
+    tabletLegacySource.includes("function isCompleteOrderDetail(order, id)") &&
+      tabletLegacySource.includes("function handleOrderLoadFailure(message)") &&
+      tabletLegacySource.includes("isCompleteOrderDetail(cached, id)") &&
+      tabletLegacySource.includes("xhr.onerror") &&
+      tabletLegacySource.includes("xhr.ontimeout") &&
+      !/=>|\?\.|\?\?|\basync\b|\bawait\b|\bconst\b|\blet\b/.test(tabletLegacySource),
+    "legacy detail validation and Safari syntax"
+  );
+  check(
+    "tablet PWA update hardening is explicit, versioned and non-disruptive",
+    tabletLegacyServiceWorkerSource.includes("updateViaCache: \"none\"") &&
+      tabletModernServiceWorkerSource.includes("updateViaCache: \"none\"") &&
+      countSourceOccurrences(tabletLegacyServiceWorkerSource, "registration.update()") === 1 &&
+      countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
+      tabletHtmlSource.includes("tablet-legacy.js?v=20260720-1") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.190\"") &&
+      manifestSource.includes("\"version\": \"1.5.190\"") &&
+      !tabletLegacyServiceWorkerSource.includes("location.reload") &&
+      !tabletModernServiceWorkerSource.includes("location.reload") &&
+      !tabletLegacyServiceWorkerSource.includes("unregister") &&
+      !tabletModernServiceWorkerSource.includes("unregister") &&
+      !tabletLegacyServiceWorkerSource.includes("setInterval") &&
+      !tabletModernServiceWorkerSource.includes("setInterval") &&
+      countSourceOccurrences(serviceWorkerSource, "caches.delete(") === 1 &&
+      countSourceOccurrences(serviceWorkerSource, "skipWaiting()") === 2 &&
+      !tabletLegacySource.includes("indexedDB.deleteDatabase") &&
+      !tabletModernSource.includes("indexedDB.deleteDatabase"),
+    JSON.stringify({
+      legacy: tabletLegacyServiceWorkerSource,
+      modern: tabletModernServiceWorkerSource,
+      cacheVersion: serviceWorkerSource.match(/CACHE_VERSION\s*=\s*"([^"]+)"/)?.[1] || "",
+      manifestVersion: JSON.parse(manifestSource).version,
+      legacyAsset: tabletHtmlSource.match(/tablet-legacy\.js\?v=[^"]+/)?.[0] || ""
+    })
+  );
+  check(
+    "quantity and picking XLSX browser modules load before their consumers",
+    indexHtmlSource.indexOf("shared/quantity-format.js") < indexHtmlSource.indexOf("app.js") &&
+      indexHtmlSource.indexOf("app-picking-xlsx-import.js") < indexHtmlSource.indexOf("app.js") &&
+      tabletHtmlSource.indexOf("shared/quantity-format.js") < tabletHtmlSource.indexOf("tablet-legacy.js"),
+    "browser module order"
+  );
+  check(
+    "XLSX draft exposes the loading-slip PDF chooser without changing normal actions",
+    indexHtmlSource.includes('id="loadingSlipPdfInput"') &&
+      indexHtmlSource.includes('accept=".pdf,application/pdf"') &&
+      appSource.includes("handleSaveOrderButtonClick") &&
+      appSource.includes("handleLoadingSlipPdfUpload") &&
+      appSource.includes("canAppendLoadingSlipToXlsxDraft") &&
+      storageSource.includes('if (line?.lineType === "loading-slip") return;') &&
+      appSource.includes("refreshOrdersButton") &&
+      appSource.includes("discardDraftButton") &&
+      appSource.includes("releaseOrderButton"),
+    "loading-slip XLSX draft controls"
+  );
+  check(
+    "desktop and both tablet clients share quantity display rules",
+    appSource.includes("HLogistikQuantityFormat?.displayLineQuantity") &&
+      tabletModernSource.includes("HLogistikQuantityFormat?.displayLineQuantity") &&
+      tabletLegacySource.includes("HLogistikQuantityFormat.displayLineQuantity"),
+    "shared quantity formatter markers"
+  );
+  check(
+    "short picking bin display keeps full value for DOM synchronization",
+    appSource.includes("map.fromBin.dataset.fullValue") &&
+      appSource.includes("binInput.readOnly && binInput.dataset.fullValue") &&
+      appSource.includes("? binInput.dataset.fullValue"),
+    "full source-bin preservation markers"
+  );
+  check(
+    "SI article UI enforces preview and exact confirmation before replace",
+    articleHtmlSource.includes("siStockImportPanel") &&
+      articleHtmlSource.includes(SI_STOCK_REPLACE_CONFIRMATION) &&
+      articleJsSource.includes("currentWarehouse() === \"SI\"") &&
+      articleJsSource.includes("/api/articles/si-stock-import/preview") &&
+      articleJsSource.includes("/api/articles/si-stock-import/replace") &&
+      articleJsSource.indexOf("previewSiStockImportFile") < articleJsSource.indexOf("replaceSiStockImport"),
+    "SI article UI markers"
+  );
+  check(
+    "SI API routes are role-gated, warehouse-gated and use dedicated body limit",
+    serverSource.includes("siStockImportMaxBodyBytes = 25 * 1024 * 1024") &&
+      countSourceOccurrences(serverSource, "requireSiWarehouse(warehouse)") === 3 &&
+      serverSource.includes("previewSiStockImportRows(body)") &&
+      serverSource.includes("replaceSiStockImportRows(body") &&
+      serverSource.indexOf("requireGroup(request, ROLE_PERMISSIONS.articleMutation)", serverSource.indexOf("/api/articles/si-stock-import/preview")) > 0,
+    "SI route guard markers"
+  );
   check(
     "tablet export scripts require online save and export guard",
       tabletLegacySource.includes("allowOffline: false") &&
@@ -916,23 +1558,177 @@ async function run() {
     })
   );
   check(
-    "manual storage create fields keep new bins empty and quantity explicit",
+    "manual storage create fields keep an empty common bin and quantity explicit",
     indexHtmlSource.includes("manualStorageQuantityInput") &&
       tabletHtmlSource.includes("manualStorageQuantityInput") &&
       appSource.includes("manualStorageQuantityInput") &&
-      appSource.includes("fromBin: \"\"") &&
+      appSource.includes("fromBin: options.fromBin || \"\"") &&
       !appSource.includes("preset.fromBin") &&
       tabletModernSource.includes("manualStorageQuantityInput") &&
-      tabletModernSource.includes("fromBin: \"\"") &&
+      tabletModernSource.includes("fromBin: options.fromBin || \"\"") &&
       !tabletModernSource.includes("preset.fromBin") &&
       tabletLegacySource.includes("manualStorageQuantityInput") &&
-      tabletLegacySource.includes("fromBin: \"\"") &&
+      tabletLegacySource.includes("fromBin: options.fromBin || \"\"") &&
       !tabletLegacySource.includes("preset.fromBin"),
     JSON.stringify({
       desktopQuantityInput: indexHtmlSource.includes("manualStorageQuantityInput") && appSource.includes("manualStorageQuantityInput"),
       tabletQuantityInput: tabletHtmlSource.includes("manualStorageQuantityInput") && tabletModernSource.includes("manualStorageQuantityInput") && tabletLegacySource.includes("manualStorageQuantityInput"),
-      desktopEmptyBin: appSource.includes("fromBin: \"\"") && !appSource.includes("preset.fromBin"),
-      tabletEmptyBin: tabletModernSource.includes("fromBin: \"\"") && tabletLegacySource.includes("fromBin: \"\"") && !tabletModernSource.includes("preset.fromBin") && !tabletLegacySource.includes("preset.fromBin")
+      desktopEmptyBin: appSource.includes("fromBin: options.fromBin || \"\"") && !appSource.includes("preset.fromBin"),
+      tabletEmptyBin: tabletModernSource.includes("fromBin: options.fromBin || \"\"") && tabletLegacySource.includes("fromBin: options.fromBin || \"\"") && !tabletModernSource.includes("preset.fromBin") && !tabletLegacySource.includes("preset.fromBin")
+    })
+  );
+  const manualStorageSharedBin = await manualStorageSharedBinFixture();
+  check(
+    "manual storage common bin initializes desktop and tablets independently",
+    indexHtmlSource.includes("manualStorageBinInput") &&
+      tabletHtmlSource.includes("manualStorageBinInput") &&
+      tabletHtmlSource.indexOf("shared/storage-bin-rules.js") < tabletHtmlSource.indexOf("tablet-legacy.js") &&
+      manualStorageSharedBin.desktop.valid.value === "002-H4-SH4C4" &&
+      manualStorageSharedBin.desktop.full.value === "002-H4-SH4C4" &&
+      manualStorageSharedBin.desktop.empty.value === "" &&
+      manualStorageSharedBin.desktop.invalid.ok === false &&
+      manualStorageSharedBin.desktop.invalidKeepsExistingLines &&
+      manualStorageSharedBin.desktop.lines.length === 5 &&
+      manualStorageSharedBin.desktop.lines.every((line) => line.product === "1051515" && line.fromBin === "002-H4-SH4C4" && line.actualQty === "5000" && line.targetQty === "" && line.manual === true) &&
+      new Set(manualStorageSharedBin.desktop.lines.map((line) => line.id)).size === 5 &&
+      manualStorageSharedBin.desktop.lines.map((line) => line.warehouseOrder).join("|") === "M1|M2|M3|M4|M5" &&
+      manualStorageSharedBin.desktop.emptyLine.fromBin === "" &&
+      manualStorageSharedBin.desktop.articleBinIgnored &&
+      manualStorageSharedBin.desktop.individualChangeIndependent &&
+      appSource.includes("(map.targetQty.closest(\"label\") || map.targetQty).remove()") &&
+      [manualStorageSharedBin.modern, manualStorageSharedBin.legacy].every((tablet) =>
+        tablet.valid.value === "002-H4-SH4C4" &&
+        tablet.full.value === "002-H4-SH4C4" &&
+        tablet.empty.value === "" &&
+        tablet.si.value === "SI-A1" &&
+        tablet.invalid.ok === false &&
+        tablet.lines.length === 5 &&
+        tablet.lines.every((line) => line.product === "1051515" && line.fromBin === "002-H4-SH4C4" && line.actualQty === "5000" && line.targetQty === "" && line.manual === true) &&
+        tablet.emptyLine.fromBin === "" &&
+        tablet.articleBinIgnored &&
+        tablet.individualChangeIndependent &&
+        tablet.queuePayloadHasAllBins
+      ) &&
+      JSON.stringify(manualStorageSharedBin.modern.lines.map((line) => ({ product: line.product, fromBin: line.fromBin, targetQty: line.targetQty, actualQty: line.actualQty, manual: line.manual }))) === JSON.stringify(manualStorageSharedBin.legacy.lines.map((line) => ({ product: line.product, fromBin: line.fromBin, targetQty: line.targetQty, actualQty: line.actualQty, manual: line.manual }))),
+    JSON.stringify(manualStorageSharedBin)
+  );
+
+  const siApiMaterialA = `SI-A-${suffix}`;
+  const siApiMaterialB = `SI-B-${suffix}`;
+  const siApiPayload = {
+    fileName: `qa-si-${suffix}.xlsx`,
+    sheetName: SI_STOCK_IMPORT_SHEET_NAME,
+    rows: [
+      siStockHeader,
+      ["2026-07-17", "SI", siApiMaterialA, "SI API Teil A", "5", "001-QA", `LE-${suffix}`, "1"],
+      ["2026-07-17", "SI", siApiMaterialA, "SI API Teil A", "5", "001-QA", `LE-${suffix}`, "1"],
+      ["2026-07-17", "SI", siApiMaterialB, "SI API Teil B", "4", "002-QA", "", "1"],
+      ["2026-07-17", "SI", siApiMaterialB, "SI API Teil B", "6", "002-QA", "", "2"]
+    ]
+  };
+  const siPreviewRoleGuard = await request("/api/articles/si-stock-import/preview?warehouse=SI", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(siApiPayload)
+  });
+  check(
+    "SI preview API rejects missing article role",
+    siPreviewRoleGuard.status === 403,
+    `${siPreviewRoleGuard.status} ${JSON.stringify(siPreviewRoleGuard.body)}`
+  );
+  const siPreviewWarehouseGuard = await request("/api/articles/si-stock-import/preview?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(siApiPayload)
+  });
+  check(
+    "SI preview API rejects SSI warehouse context",
+    siPreviewWarehouseGuard.status === 400 && /nur.*SI/i.test(siPreviewWarehouseGuard.body?.error || ""),
+    `${siPreviewWarehouseGuard.status} ${JSON.stringify(siPreviewWarehouseGuard.body)}`
+  );
+  const siWrongSheetApi = await request("/api/articles/si-stock-import/preview?warehouse=SI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ ...siApiPayload, sheetName: "Data" })
+  });
+  check(
+    "SI preview API returns auditable hard error for wrong sheet",
+    siWrongSheetApi.status === 200 && siWrongSheetApi.body?.ok === true && siWrongSheetApi.body?.preview?.ok === false &&
+      siWrongSheetApi.body?.preview?.hardErrors?.some((error) => error.code === "sheet"),
+    `${siWrongSheetApi.status} ${JSON.stringify(siWrongSheetApi.body)}`
+  );
+  const siPreviewApi = await request("/api/articles/si-stock-import/preview?warehouse=SI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(siApiPayload)
+  });
+  check(
+    "SI preview API reports duplicate, merge and replacement counts",
+    siPreviewApi.status === 200 && siPreviewApi.body?.ok === true && siPreviewApi.body?.preview?.ok === true &&
+      siPreviewApi.body?.preview?.counts?.discardedExactDuplicates === 1 &&
+      siPreviewApi.body?.preview?.counts?.mergedEmptyLeGroups === 1 &&
+      siPreviewApi.body?.preview?.counts?.importArticles === 2 &&
+      siPreviewApi.body?.preview?.counts?.importStockRows === 2,
+    `${siPreviewApi.status} ${JSON.stringify(siPreviewApi.body?.preview?.counts || siPreviewApi.body)}`
+  );
+  const siWrongConfirmation = await request("/api/articles/si-stock-import/replace?warehouse=SI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ ...siApiPayload, confirmation: "si-bestand ersetzen" })
+  });
+  check(
+    "SI replace API requires exact confirmation phrase",
+    siWrongConfirmation.status === 400 && siWrongConfirmation.body?.error?.includes(SI_STOCK_REPLACE_CONFIRMATION),
+    `${siWrongConfirmation.status} ${JSON.stringify(siWrongConfirmation.body)}`
+  );
+
+  const siProtectedMaterial = `SI-PROTECT-${suffix}`;
+  const siProtectedArticle = await request("/api/articles?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({
+      materialnummer: siProtectedMaterial,
+      materialbezeichnung: "SSI Schutzartikel",
+      gebindeArt: "STK",
+      mengeProKarton: 0,
+      mengeProPalette: 0
+    })
+  });
+  const siProtectedReceipt = await request("/api/storage/receipts?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({
+      materialnummer: siProtectedMaterial,
+      lagerplatz: "002-H3-SQA",
+      leNummer: `SI-PROTECT-HU-${suffix}`,
+      mengeStueck: 9,
+      referenz: `SI protection ${suffix}`
+    })
+  });
+  const siReplaceApi = await request("/api/articles/si-stock-import/replace?warehouse=SI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ ...siApiPayload, confirmation: SI_STOCK_REPLACE_CONFIRMATION })
+  });
+  const siArticlesAfterReplace = await request("/api/articles?warehouse=SI");
+  const ssiArticlesAfterReplace = await request("/api/articles?warehouse=SSI");
+  const ssiLocationsAfterReplace = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(siProtectedMaterial)}`);
+  const protectedCountKeys = ["ssiStock", "orders", "movements", "issueErrors", "ssiArticles"];
+  check(
+    "SI replace API swaps only SI article and stock data transactionally",
+    siProtectedArticle.status === 200 && siProtectedReceipt.status === 200 &&
+      siReplaceApi.status === 200 && siReplaceApi.body?.replaced?.articles === 2 && siReplaceApi.body?.replaced?.stockRows === 2 &&
+      protectedCountKeys.every((key) => siReplaceApi.body?.before?.[key] === siReplaceApi.body?.after?.[key]) &&
+      Array.isArray(siArticlesAfterReplace.body) && siArticlesAfterReplace.body.length === 2 &&
+      [siApiMaterialA, siApiMaterialB].every((material) => siArticlesAfterReplace.body.some((article) => article.materialnummer === material)) &&
+      Array.isArray(ssiArticlesAfterReplace.body) && ssiArticlesAfterReplace.body.some((article) => article.materialnummer === siProtectedMaterial) &&
+      Array.isArray(ssiLocationsAfterReplace.body) && ssiLocationsAfterReplace.body.some((location) => Number(location.mengeStueck) === 9),
+    JSON.stringify({
+      protectedArticle: siProtectedArticle.status,
+      protectedReceipt: siProtectedReceipt.status,
+      replace: siReplaceApi.body,
+      siArticles: siArticlesAfterReplace.body,
+      protectedLocations: ssiLocationsAfterReplace.body
     })
   );
 
@@ -1096,10 +1892,51 @@ async function run() {
     headers: ROLE_HEADERS,
     body: JSON.stringify(orderPayload)
   });
+  const xlsxExplicitReleasePayload = {
+    orderNumber: `QA-XLSX-RELEASE-${suffix}`,
+    customerName: "9020-DETTELSAU",
+    orderDate: "2026-06-22",
+    orderTime: "07:36",
+    orderType: "picking",
+    orderWarehouse: "SSI",
+    lines: pickingXlsxDraftRelease.state.lines.map((line, index) => ({
+      position: String(index + 1),
+      product: line.product,
+      description: line.description,
+      targetQty: line.targetQty,
+      actualQty: line.actualQty,
+      unit: line.unit,
+      fromBin: line.fromBin,
+      fromHandlingUnit: line.fromHandlingUnit,
+      toBin: line.toBin,
+      picked: false
+    }))
+  };
+  const xlsxExplicitRelease = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(xlsxExplicitReleasePayload)
+  });
+  const xlsxExplicitReleaseReload = xlsxExplicitRelease.body.order?.id
+    ? await request(`/api/orders/${encodeURIComponent(xlsxExplicitRelease.body.order.id)}`)
+    : { status: 0, body: null };
   check(
-    "order create with 9021-0OUT customer rule",
-    orderCreate.status === 200 && orderCreate.body.order.customerName === "9021-0OUT" && orderCreate.body.order.orderNumber === "SSI",
-    `${orderCreate.status} ${JSON.stringify(orderCreate.body)}`
+    "order create preserves destination rules and explicit XLSX draft release state",
+    orderCreate.status === 200 && orderCreate.body.order.customerName === "9021-0OUT" && orderCreate.body.order.orderNumber === "SSI" &&
+      xlsxExplicitRelease.status === 200 &&
+      xlsxExplicitReleaseReload.status === 200 &&
+      xlsxExplicitReleaseReload.body?.lines?.length === 2 &&
+      xlsxExplicitReleaseReload.body?.lines?.map((line) => String(line.targetQty)).join(",") === "1700,675" &&
+      xlsxExplicitReleaseReload.body?.lines?.map((line) => String(line.actualQty)).join(",") === "1700,675" &&
+      !xlsxExplicitReleaseReload.body?.acceptedBy &&
+      !xlsxExplicitReleaseReload.body?.activeUser &&
+      !xlsxExplicitReleaseReload.body?.completedAt &&
+      !xlsxExplicitReleaseReload.body?.exportedAt,
+    JSON.stringify({
+      orderCreate: orderCreate.body,
+      xlsxExplicitRelease: xlsxExplicitRelease.body,
+      xlsxExplicitReleaseReload: xlsxExplicitReleaseReload.body
+    })
   );
 
   const mixedDestinationPayload = {
@@ -1524,7 +2361,6 @@ async function run() {
       storageExcelWorkbook.rows[0].quantityIsNumber === true,
     JSON.stringify(storageExcelWorkbook)
   );
-  await cleanupExportResponseArtifacts(storageExcelExport.body);
 
   const pickingExcelPayload = {
     ...orderPayload,
@@ -1567,9 +2403,13 @@ async function run() {
     headers: ROLE_HEADERS,
     body: JSON.stringify({ order: pickingExcelPayload })
   }));
+  const pickingExcelReload = pickingExcelId
+    ? await request(`/api/orders/${encodeURIComponent(pickingExcelId)}`)
+    : { status: 0, body: null };
   const pickingExcelWorkbook = pickingExcelExport.body?.xlsxPath
     ? await readOrderExportWorkbook(pickingExcelExport.body)
     : { sheetName: "", headers: [], rows: [], error: "xlsxPath fehlt" };
+  const pickingExcelPdfHtml = printableHtml(pickingExcelPayload, "QA-XLSX-Picking.pdf");
   check(
     "picking order XLSX uses source bin, keeps SSI LE empty and skips loading-slip lines",
     pickingExcelCreate.status === 200 &&
@@ -1581,20 +2421,22 @@ async function run() {
       pickingExcelWorkbook.rows[0].bin === "002-H3-SQA" &&
       pickingExcelWorkbook.rows[0].handlingUnit === "" &&
       pickingExcelWorkbook.rows[0].quantity === 1 &&
-      !pickingExcelWorkbook.rows.some((row) => row.product === `QA-LS-${suffix}`),
-    JSON.stringify({ export: pickingExcelExport.body, workbook: pickingExcelWorkbook })
+      !pickingExcelWorkbook.rows.some((row) => row.product === `QA-LS-${suffix}`) &&
+      pickingExcelReload.status === 200 &&
+      pickingExcelReload.body?.lines?.length === 2 &&
+      pickingExcelReload.body?.lines?.some((line) => line.lineType === "loading-slip" && line.product === `QA-LS-${suffix}`) &&
+      !pickingExcelPdfHtml.includes(`QA-LS-${suffix}`) &&
+      !pickingExcelPdfHtml.includes("Ladeliste nicht in Excel") &&
+      pickingExcelPdfHtml.includes("Erledigt:</strong> 1/1"),
+    JSON.stringify({ export: pickingExcelExport.body, workbook: pickingExcelWorkbook, reload: pickingExcelReload.body, pdfHtml: pickingExcelPdfHtml })
   );
-  await cleanupExportResponseArtifacts(pickingExcelExport.body);
-
-  const excelFailure = await excelArtifactFailureFixture();
   check(
-    "XLSX failure leaves no final PDF/XLSX artifacts",
-    excelFailure.failed === true &&
-      excelFailure.finalPdfExists === false &&
-      excelFailure.finalXlsxExists === false &&
-      excelFailure.tempPdfExists === false &&
-      excelFailure.tempXlsxExists === false,
-    JSON.stringify(excelFailure)
+    "QA export mode preserves temporary artifacts without changing default cleanup",
+    exportSource.includes("const preserveTempArtifacts = options?.preserveTempArtifacts === true") &&
+      exportSource.includes("if (!preserveTempArtifacts)") &&
+      serverSource.includes("isQaPreserveArtifactsRequest(request, order)") &&
+      serverSource.includes("isLoopbackRequest(request) && isQaOrder(order)"),
+    "QA artifact preservation markers"
   );
 
   const exportedStorageDelete = await request(`/api/orders/${encodeURIComponent(storageOrderId)}`, {
@@ -1809,8 +2651,8 @@ async function run() {
 
   const exportArtifacts = await findQaExportArtifacts();
   check(
-    "QA export tests leave no durable PDF/XLSX/CSV/HTML artifacts",
-    exportArtifacts.length === 0,
+    "QA export artifacts remain inside the isolated workspace",
+    exportArtifacts.length >= 2 && exportArtifacts.every((filePath) => isPathInside(filePath, repoRootDir())),
     JSON.stringify(exportArtifacts)
   );
 
@@ -1974,13 +2816,15 @@ async function runOriginalArchiveChecks() {
       `${invalidCreate.status} ${JSON.stringify(invalidCreate.body)}`
     );
   } finally {
-    await cleanupOriginalArchiveArtifacts(context, cleanupPaths);
+    // QA-Artefakte bleiben gemaess Wiederherstellungsvorgabe in der isolierten Arbeitskopie erhalten.
   }
 
   const leftovers = await findOriginalArchiveArtifacts(context);
   check(
-    "original archive QA files are cleaned up",
-    leftovers.length === 0,
+    "original archive QA files remain auditable in isolated directories",
+    leftovers.length >= 4 && leftovers.every((filePath) =>
+      isPathInside(filePath, context.importDir) || isPathInside(filePath, context.archiveDir)
+    ),
     JSON.stringify(leftovers)
   );
 }
@@ -2024,14 +2868,6 @@ async function writeOriginalImportFile(context, fileName, content) {
   const filePath = path.join(context.importDir, fileName);
   await writeFile(filePath, `QA ${suffix} ${content}`, "utf8");
   return filePath;
-}
-
-async function cleanupOriginalArchiveArtifacts(context, explicitPaths = new Set()) {
-  for (const filePath of explicitPaths) {
-    await rm(filePath, { force: true });
-  }
-  const artifacts = await findOriginalArchiveArtifacts(context);
-  await Promise.all(artifacts.map((filePath) => rm(filePath, { force: true })));
 }
 
 async function findOriginalArchiveArtifacts(context) {
@@ -2093,70 +2929,6 @@ async function readOrderExportWorkbook(exportBody) {
   return { sheetName: worksheet.name, headers, rows };
 }
 
-async function cleanupExportResponseArtifacts(exportBody) {
-  const paths = new Set([
-    exportBody?.path,
-    exportBody?.copyPath,
-    exportBody?.xlsxPath,
-    exportBody?.xlsxCopyPath
-  ].filter(Boolean));
-  for (const filePath of paths) {
-    await rm(filePath, { force: true });
-  }
-}
-
-async function excelArtifactFailureFixture() {
-  const root = repoRootDir();
-  const fixtureRoot = path.join(root, "tmp", `xlsx-failure-${suffix}`);
-  const exportDir = path.join(fixtureRoot, "exports");
-  const tempDir = path.join(fixtureRoot, "temp");
-  await mkdir(exportDir, { recursive: true });
-  await mkdir(tempDir, { recursive: true });
-  const order = {
-    orderNumber: `QA-XLSX-FAIL-${suffix}`,
-    customerName: "QA-XLSX-FEHLER",
-    orderDate: "2026-06-22",
-    orderTime: "09:01",
-    orderType: "picking",
-    orderWarehouse: "SSI",
-    lines: [{
-      position: "1",
-      product: materialnummer,
-      description: "QA Excel Fehler",
-      targetQty: "1",
-      actualQty: "1",
-      unit: "ST",
-      fromBin: "002-H3-SQA",
-      fromHandlingUnit: hu,
-      toBin: "QA-ZIEL",
-      picked: true
-    }]
-  };
-  const fileBase = `${order.orderNumber}-${order.customerName}-${order.orderDate}-${order.orderTime.replace(":", "-")}`;
-  const finalPdf = path.join(exportDir, `${fileBase}.pdf`);
-  const finalXlsx = path.join(exportDir, `${fileBase}.xlsx`);
-  const tempPdf = path.join(tempDir, `${fileBase}.pdf`);
-  const tempXlsx = path.join(tempDir, `${fileBase}.xlsx`);
-  let failed = false;
-  let message = "";
-  try {
-    await exportPdf(order, exportDir, tempDir, "", "", { exportedAt: "kein-datum", warehouse: "SSI" });
-  } catch (error) {
-    failed = true;
-    message = error.message || String(error);
-  }
-  const result = {
-    failed,
-    message,
-    finalPdfExists: await pathExists(finalPdf),
-    finalXlsxExists: await pathExists(finalXlsx),
-    tempPdfExists: await pathExists(tempPdf),
-    tempXlsxExists: await pathExists(tempXlsx)
-  };
-  await rm(fixtureRoot, { recursive: true, force: true });
-  return result;
-}
-
 async function request(path, options = {}) {
   const response = await fetch(`${BASE_URL}${path}`, {
     ...options,
@@ -2170,6 +2942,12 @@ async function request(path, options = {}) {
     body = text;
   }
   return { status: response.status, body };
+}
+
+function tableHeadersFromHtml(html) {
+  const table = String(html || "").match(/<table\b[^>]*>([\s\S]*?)<\/table>/i)?.[1] || "";
+  return [...table.matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi)]
+    .map((match) => match[1].replace(/<[^>]+>/g, "").trim());
 }
 
 function check(name, condition, detail = "") {
@@ -2277,6 +3055,167 @@ async function parsePickingTextFixture(text) {
   return appParserContext.__parseOrderText(String(text || ""));
 }
 
+async function pickingXlsxDraftReleaseFixture(lines, { release = false } = {}) {
+  const context = await createAppParserContext();
+  let serverRequests = 0;
+  let saveStateCalls = 0;
+  let renderCalls = 0;
+  let storageBinOptions = null;
+  context.__currentUser.name = "QA Buero";
+  context.__currentUser.group = "buero";
+  context.HLogistikUi = {
+    currentWarehouse: () => "SSI",
+    normalizeWarehouse: (value, fallback = "") => {
+      const normalized = String(value || "").trim().toUpperCase();
+      return normalized === "SI" || normalized === "SSI" ? normalized : fallback;
+    }
+  };
+  context.__elements.releaseOrderButton = { hidden: true, disabled: true };
+  context.__setServerOnline(true);
+  context.apiJson = async () => {
+    serverRequests += 1;
+    throw new Error("XLSX-Entwurf darf vor ausdruecklicher Freigabe keinen Serverrequest senden.");
+  };
+  context.findDuplicateOrderForImport = async () => null;
+  context.detectPickingWarehouse = async () => ({ warehouse: "SSI", type: "ok", shortMessage: "" });
+  context.applyWarehouseHint = () => {
+    context.__state.orderWarehouse = "SSI";
+  };
+  context.isSiSystemFromBinFillContext = () => false;
+  context.applyStorageBinsFromArticleStock = async (nextLines, options = {}) => {
+    storageBinOptions = { ...options };
+    return { lines: nextLines, applied: 0 };
+  };
+  context.applyPackageNotesForImportedLines = async (nextLines) => nextLines;
+  context.buildPickingImportLineDiagnostics = () => ({ source: "qa-xlsx" });
+  context.logPickingImportLineDiagnostics = () => {};
+  context.applyDefaultDestinationCustomer = () => {
+    context.__state.customerName = "9020-DETTELSAU";
+    context.__state.customerGroupKey = "9020-DETTELSAU";
+    return true;
+  };
+  context.applyCustomerOrderNumberRule = () => {};
+  context.saveStateWithoutServer = () => {
+    saveStateCalls += 1;
+  };
+  context.render = () => {
+    renderCalls += 1;
+    context.__renderReleaseButton();
+  };
+
+  const result = await context.__importText(
+    "XLSX-Blatt Tabelle1",
+    "synthetic-picking.xlsx",
+    { lines },
+    { source: "xlsx", documentType: "picking-xlsx" }
+  );
+  const importedLine = cloneJson(context.__state.lines?.[0] || {});
+  const hasOpenReviewBeforeRelease = context.__hasOpenFromBinReviewWarnings(context.__state.lines);
+  let savedLine = null;
+  let savedLines = null;
+  let releaseRequests = 0;
+  if (release) {
+    context.__state.lines.forEach((line) => {
+      line.picked = true;
+    });
+    context.apiJson = async (_url, options = {}) => {
+      releaseRequests += 1;
+      const payload = JSON.parse(options.body || "{}");
+      savedLine = cloneJson(payload.order?.lines?.[0] || {});
+      savedLines = cloneJson(payload.order?.lines || []);
+      return { order: { id: "qa-xlsx-release" } };
+    };
+    context.setImportStatus = () => {};
+    context.setServerStatus = () => {};
+    context.resetCurrentOrderView = () => {};
+    context.loadOrderList = async () => {};
+    await context.__releaseCurrentOrder();
+  }
+  return {
+    result,
+    state: JSON.parse(JSON.stringify(context.__state)),
+    releaseButton: { ...context.__elements.releaseOrderButton },
+    serverRequests,
+    saveStateCalls,
+    renderCalls,
+    importedLine,
+    storageBinOptions,
+    hasOpenReviewBeforeRelease,
+    releaseRequests,
+    savedLine,
+    savedLines
+  };
+}
+
+async function loadingSlipXlsxAttachmentFixture(xlsxLines) {
+  const context = await createAppParserContext();
+  const regularLines = cloneJson(xlsxLines);
+  const pages = [
+    {
+      pageNumber: 1,
+      rotation: 0,
+      text: [
+        "Ladeschein",
+        "Nummer: V26009624/0",
+        "1066526 Sicherheitsstreifen fuer 7015-01 10 Stueck",
+        "Ladeschein",
+        "Nummer: V26009625/0",
+        "1066526 Sicherheitsstreifen fuer 7015-01 10 Stueck"
+      ].join("\n")
+    },
+    {
+      pageNumber: 2,
+      rotation: 90,
+      text: [
+        "Ladeschein",
+        "Nummer: V26009626/0",
+        "1072595 PET-Etui fuer 7015/02-05 5 Stueck",
+        "1072598 PET-Etui fuer 7015-01 6 Stueck"
+      ].join("\n")
+    }
+  ];
+  const attachmentId = "qa-loading-slip-attachment";
+  const loadingLines = pages.flatMap((page) => context.__parseLoadingSlipLines(page.text.split("\n"))
+    .map((line) => ({
+      ...line,
+      loadingSlipAttachmentId: attachmentId,
+      loadingSlipAttachmentPage: page.pageNumber
+    })));
+  Object.assign(context.__state, {
+    id: "",
+    orderType: "picking",
+    originalFileName: "synthetic-picking.xlsx",
+    awaitingRelease: true,
+    lines: cloneJson(regularLines)
+  });
+  context.__elements.saveOrderButton = { textContent: "", title: "" };
+  context.__renderSaveOrderButton();
+  const lines = context.__appendAllLoadingSlipLines(context.__state.lines, loadingLines);
+  const regularAfterAppend = lines.filter((line) => line.lineType !== "loading-slip");
+  const loadingAfterAppend = lines.filter((line) => line.lineType === "loading-slip");
+  const loadingSlipCount = new Set(loadingAfterAppend.map((line) => `${line.loadingSlipAttachmentPage}:${line.loadingSlipBlockIndex || 1}`)).size;
+  return {
+    canAppend: context.__canAppendLoadingSlipToXlsxDraft(),
+    button: { ...context.__elements.saveOrderButton },
+    pages: pages.map(({ pageNumber, rotation }) => ({ pageNumber, rotation })),
+    lines,
+    loadingLines: loadingAfterAppend,
+    loadingSlipCount,
+    regularLinesUnchanged: JSON.stringify(regularAfterAppend) === JSON.stringify(regularLines)
+  };
+}
+
+async function pickingPdfBinReviewFixture(fromBin) {
+  const context = await createAppParserContext();
+  context.__state.orderType = "picking";
+  context.__state.originalFileName = "source.pdf";
+  context.__state.lines = [{ id: "pdf-bin-review", fromBin }];
+  return {
+    review: context.__fromBinReviewDiagnosticForValue(fromBin),
+    blocked: context.__hasOpenFromBinReviewWarnings(context.__state.lines)
+  };
+}
+
 async function storageMissingDescriptionCompletionFixture() {
   if (!appParserContext) appParserContext = await createAppParserContext();
   const context = appParserContext;
@@ -2342,8 +3281,303 @@ async function tabletMissingDescriptionCompletionFixture(fileName) {
   return { fileName, completeErrors, missingProductErrors, exportMessage };
 }
 
-async function createTabletValidationContext(fileName) {
-  const context = vm.createContext({
+async function tabletDetailLoadingFixture(fileName) {
+  const detailId = "qa-tablet-detail";
+  const detailOrder = {
+    id: detailId,
+    orderNumber: "QA-Tablet-Detail",
+    customerName: "SSI",
+    orderType: "picking",
+    acceptedBy: "",
+    lines: [
+      { id: "detail-1", product: "100001", fromBin: "002-H3-S01A1", targetQty: "1", actualQty: "1", unit: "ST", picked: false },
+      { id: "detail-2", product: "100002", fromBin: "002-H3-S01A2", targetQty: "2", actualQty: "2", unit: "ST", picked: false },
+      { id: "detail-3", product: "100003", fromBin: "002-H3-S01A3", targetQty: "3", actualQty: "3", unit: "ST", picked: false }
+    ]
+  };
+  const summary = {
+    id: detailId,
+    orderNumber: detailOrder.orderNumber,
+    customerName: detailOrder.customerName,
+    orderType: "picking",
+    acceptedBy: "",
+    total: detailOrder.lines.length,
+    picked: 0
+  };
+  const responses = [
+    { status: 200, body: detailOrder },
+    { status: 500, body: { ok: false, error: "Detailtest fehlgeschlagen" } }
+  ];
+  const requests = [];
+  const context = await createTabletValidationContext(fileName);
+  configureTabletDetailTransport(context, fileName, responses, requests);
+  configureTabletDetailDom(context);
+  context.__setTabletOnline(true);
+  context.__rememberTabletOrders([summary]);
+  context.__elements.orderSelect.value = detailId;
+  await context.__loadTabletOrder(detailId);
+
+  const loaded = {
+    loadedOrderId: context.__getTabletOrder()?.id || "",
+    loadedAcceptedBy: context.__getTabletOrder()?.acceptedBy || "",
+    renderedLineCount: context.__elements.lineList.children.length,
+    takeOver: buttonState(context.__elements.takeOverButton),
+    detailRequestPath: requestPath(requests[0]?.url)
+  };
+
+  context.__elements.orderSelect.value = "qa-tablet-detail-error";
+  await context.__loadTabletOrder("qa-tablet-detail-error");
+  const failure = {
+    selectedOrderId: context.__elements.orderSelect.value,
+    currentOrderId: context.__getTabletOrder()?.id || "",
+    renderedLineCount: context.__elements.lineList.children.length,
+    message: context.__elements.message.innerHTML
+  };
+
+  context.__setTabletOnline(true);
+  const statusRules = [
+    { name: "frei", acceptedBy: "" },
+    { name: "eigen", acceptedBy: "QA Tablet" },
+    { name: "fremd", acceptedBy: "Andere Person" },
+    { name: "abgeschlossen", acceptedBy: "", completedAt: "2026-07-20T10:00:00.000Z" },
+    { name: "exportiert", acceptedBy: "", exportedAt: "2026-07-20T10:00:00.000Z" }
+  ].map((status) => {
+    context.__setTabletOrder({
+      id: `qa-status-${status.name}`,
+      orderType: "picking",
+      acceptedBy: status.acceptedBy,
+      completedAt: status.completedAt || "",
+      exportedAt: status.exportedAt || "",
+      lines: [{ id: `qa-status-line-${status.name}`, product: "100001", targetQty: "1", actualQty: "1", picked: false }]
+    });
+    context.__renderTabletTakeOver();
+    return {
+      name: status.name,
+      takeOver: buttonState(context.__elements.takeOverButton),
+      saveDisabled: context.__elements.saveButton.disabled,
+      exportDisabled: context.__elements.exportPdfButton.disabled
+    };
+  });
+
+  return {
+    fileName,
+    summaryHasNoLines: Array.isArray(summary.lines) === false,
+    ...loaded,
+    failure,
+    statusRules
+  };
+}
+
+function configureTabletDetailTransport(context, fileName, responses, requests) {
+  let responseIndex = 0;
+  const nextResponse = () => responses[responseIndex++] || { status: 500, body: { ok: false, error: "Unerwarteter Detailabruf" } };
+  context.fetch = async (url, options = {}) => {
+    const response = nextResponse();
+    requests.push({ url: String(url), method: options.method || "GET" });
+    return {
+      ok: response.status >= 200 && response.status < 300,
+      status: response.status,
+      json: async () => response.body
+    };
+  };
+  if (fileName !== "tablet-legacy.js") return;
+  context.XMLHttpRequest = function FakeXmlHttpRequest() {
+    this.open = (method, url) => {
+      this.method = method;
+      this.url = url;
+    };
+    this.setRequestHeader = () => {};
+    this.send = () => {
+      const response = nextResponse();
+      requests.push({ url: this.url, method: this.method || "GET" });
+      this.status = response.status;
+      this.responseText = JSON.stringify(response.body);
+      this.readyState = 4;
+      this.onreadystatechange();
+    };
+  };
+}
+
+function configureTabletDetailDom(context) {
+  const element = () => ({
+    value: "",
+    innerHTML: "",
+    textContent: "",
+    className: "",
+    hidden: false,
+    disabled: false,
+    title: "",
+    setAttribute() {},
+    removeAttribute() {},
+    focus() {}
+  });
+  const lineList = element();
+  lineList.children = [];
+  Object.defineProperty(lineList, "innerHTML", {
+    get() { return this._innerHtml || ""; },
+    set(value) {
+      this._innerHtml = value;
+      this.children = [];
+    }
+  });
+  lineList.appendChild = (child) => {
+    lineList.children.push(child);
+    return child;
+  };
+  Object.assign(context.__elements, {
+    connectionStatus: element(),
+    userNameInput: { ...element(), value: "QA Tablet" },
+    orderSelect: element(),
+    sortModeSelect: { ...element(), value: "fromBin" },
+    takeOverButton: element(),
+    leaveOrderButton: element(),
+    discardOrderButton: element(),
+    deleteStorageOrderButton: element(),
+    saveButton: element(),
+    exportPdfButton: element(),
+    tabletListPanel: element(),
+    pickHeader: element(),
+    lineList,
+    message: element()
+  });
+  vm.runInContext(`
+    updateModeUi = function () {};
+    renderCompletionFields = function () {};
+    renderManualStorageStartButton = function () {};
+    renderStorageLineActions = function () {};
+    renderAcceptedGroupInfo = function () {};
+    updateCounts = function () {};
+    renderLine = function (line) { return { product: line.product }; };
+  `, context, { filename: "tablet-detail-test-dom.js" });
+}
+
+function buttonState(button) {
+  return { hidden: Boolean(button.hidden), disabled: Boolean(button.disabled) };
+}
+
+function requestPath(url) {
+  return new URL(String(url || ""), "http://127.0.0.1:4175").pathname;
+}
+
+async function manualStorageSharedBinFixture() {
+  const desktop = await createAppParserContext();
+  const desktopInput = createInput("H4C4");
+  Object.assign(desktop.__elements, { manualStorageBinInput: desktopInput });
+  Object.assign(desktop.__state, {
+    orderType: "storage",
+    customerName: "SSI",
+    customerGroupKey: "SSI",
+    lines: [{ id: "existing-desktop", warehouseOrder: "Alt", fromBin: "BESTAND", product: "0000000" }]
+  });
+  const desktopValid = desktop.__readManualStorageBin();
+  desktopInput.value = "002-H4-SH4C4";
+  const desktopFull = desktop.__readManualStorageBin();
+  desktopInput.value = "";
+  const desktopEmpty = desktop.__readManualStorageBin();
+  const desktopLineCountBeforeInvalid = desktop.__state.lines.length;
+  desktopInput.value = "INVALID!";
+  const desktopInvalid = desktop.__readManualStorageBin();
+  const desktopInvalidKeepsExistingLines = desktop.__state.lines.length === desktopLineCountBeforeInvalid;
+  desktopInput.value = "H4C4";
+  const desktopBin = desktop.__readManualStorageBin();
+  const desktopPreset = { product: "1051515", description: "QA Artikel", fromBin: "ARTIKELSTAMM" };
+  for (let index = 0; index < 5; index += 1) {
+    desktop.__state.lines.push(desktop.__createManualStorageLine(desktopPreset, { actualQty: "5000", fromBin: desktopBin.value }));
+  }
+  const desktopLines = desktop.__state.lines.filter((line) => line.manual === true);
+  const desktopEmptyLine = desktop.__createManualStorageLine(desktopPreset, { actualQty: "5000", fromBin: desktopEmpty.value });
+  const desktopArticleBinIgnored = desktopLines.every((line) => line.fromBin !== desktopPreset.fromBin) && desktopEmptyLine.fromBin === "";
+  const desktopBeforeIndividualChange = cloneJson(desktopLines);
+  desktopLines[1].fromBin = "EINZELN";
+  desktopLines[1].fromHandlingUnit = "340063810001234567";
+  const desktopIndividualChangeIndependent = desktopLines[0].fromBin === desktopBin.value &&
+    desktopLines[2].fromBin === desktopBin.value &&
+    desktopLines[0].fromHandlingUnit !== desktopLines[1].fromHandlingUnit &&
+    new Set(desktopLines).size === 5;
+
+  return {
+    desktop: {
+      valid: desktopValid,
+      full: desktopFull,
+      empty: desktopEmpty,
+      invalid: desktopInvalid,
+      invalidKeepsExistingLines: desktopInvalidKeepsExistingLines,
+      lines: desktopBeforeIndividualChange,
+      emptyLine: cloneJson(desktopEmptyLine),
+      articleBinIgnored: desktopArticleBinIgnored,
+      individualChangeIndependent: desktopIndividualChangeIndependent
+    },
+    modern: await manualStorageSharedBinTabletFixture("tablet.js"),
+    legacy: await manualStorageSharedBinTabletFixture("tablet-legacy.js")
+  };
+}
+
+async function manualStorageSharedBinTabletFixture(fileName) {
+  const context = await createTabletValidationContext(fileName);
+  const binInput = createInput("H4C4");
+  Object.assign(context.__elements, { manualStorageBinInput: binInput });
+  context.__setTabletOrder({ orderType: "storage", customerName: "SSI", customerGroupKey: "SSI", lines: [] });
+  const valid = context.__readManualStorageBin();
+  binInput.value = "002-H4-SH4C4";
+  const full = context.__readManualStorageBin();
+  binInput.value = "";
+  const empty = context.__readManualStorageBin();
+  binInput.value = "INVALID!";
+  const invalid = context.__readManualStorageBin();
+  context.__setTabletOrder({ orderType: "storage", customerName: "SI", customerGroupKey: "SI", lines: [] });
+  binInput.value = "si-a1";
+  const si = context.__readManualStorageBin();
+  const existingLine = { id: "existing-tablet", warehouseOrder: "Alt", fromBin: "BESTAND", product: "0000000" };
+  context.__setTabletOrder({ orderType: "storage", customerName: "SSI", customerGroupKey: "SSI", lines: [existingLine] });
+  binInput.value = "H4C4";
+  const bin = context.__readManualStorageBin();
+  const preset = { product: "1051515", description: "QA Artikel", fromBin: "ARTIKELSTAMM" };
+  for (let index = 0; index < 5; index += 1) {
+    context.__setTabletOrder(context.__getTabletOrder());
+    context.__getTabletOrder().lines.push(context.__createManualStorageLine(context.__getTabletOrder().lines, preset, { actualQty: "5000", fromBin: bin.value }));
+  }
+  const lines = context.__getTabletOrder().lines.filter((line) => line.manual === true);
+  const emptyLine = context.__createManualStorageLine(context.__getTabletOrder().lines, preset, { actualQty: "5000", fromBin: empty.value });
+  const articleBinIgnored = lines.every((line) => line.fromBin !== preset.fromBin) && emptyLine.fromBin === "";
+  const serializedLines = cloneJson(lines);
+  lines[1].fromBin = "EINZELN";
+  lines[1].fromHandlingUnit = "340063810001234567";
+  const individualChangeIndependent = lines[0].fromBin === bin.value &&
+    lines[2].fromBin === bin.value &&
+    lines[0].fromHandlingUnit !== lines[1].fromHandlingUnit &&
+    new Set(lines).size === 5;
+  const queuePayload = JSON.stringify({ order: { lines: serializedLines }, userName: "QA Tablet" });
+  return {
+    fileName,
+    valid,
+    full,
+    empty,
+    invalid,
+    si,
+    lines: serializedLines,
+    emptyLine: cloneJson(emptyLine),
+    articleBinIgnored,
+    individualChangeIndependent,
+    queuePayloadHasAllBins: JSON.parse(queuePayload).order.lines.every((line) => line.fromBin === bin.value)
+  };
+}
+
+function createInput(value) {
+  return {
+    value,
+    focused: false,
+    focus() {
+      this.focused = true;
+    }
+  };
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+async function createTabletValidationContext(fileName, options = {}) {
+  const globals = {
     console,
     Date,
     Math,
@@ -2367,20 +3601,122 @@ async function createTabletValidationContext(fileName) {
     navigator: { onLine: true },
     location: { href: "http://127.0.0.1:4175/tablet.html" },
     fetch: async () => ({ ok: true, json: async () => ({}) })
-  });
+  };
+  if (options.legacySafari === true) {
+    globals.Number = function LegacySafariNumber(value) {
+      return Number(value);
+    };
+    globals.Intl = undefined;
+  }
+  const context = vm.createContext(globals);
   context.window = context;
   context.globalThis = context;
 
   const storageHuRulesCode = await readFile(new URL("../shared/storage-hu-rules.js", import.meta.url), "utf8");
   vm.runInContext(storageHuRulesCode, context, { filename: "shared/storage-hu-rules.js" });
+  const storageBinRulesCode = await readFile(new URL("../shared/storage-bin-rules.js", import.meta.url), "utf8");
+  vm.runInContext(storageBinRulesCode, context, { filename: "shared/storage-bin-rules.js" });
+  const quantityFormatCode = await readFile(new URL("../shared/quantity-format.js", import.meta.url), "utf8");
+  vm.runInContext(quantityFormatCode, context, { filename: "shared/quantity-format.js" });
   const manualStorageRulesCode = await readFile(new URL("../shared/manual-storage-rules.js", import.meta.url), "utf8");
   vm.runInContext(manualStorageRulesCode, context, { filename: "shared/manual-storage-rules.js" });
   const tabletCode = await readFile(new URL(`../${fileName}`, import.meta.url), "utf8");
   vm.runInContext(`${tabletCode}
 globalThis.__setTabletOrder = (order) => { currentOrder = order; currentMode = order?.orderType || "picking"; };
+globalThis.__getTabletOrder = () => currentOrder;
 globalThis.__storageLineCompletionErrors = storageLineCompletionErrors;
-globalThis.__storageOrderExportMessage = storageOrderExportMessage;`, context, { filename: fileName });
+globalThis.__storageOrderExportMessage = storageOrderExportMessage;
+globalThis.__createManualStorageLine = createManualStorageLine;
+globalThis.__readManualStorageBin = readManualStorageBin;
+globalThis.__elements = elements;
+globalThis.__loadTabletOrder = loadOrder;
+globalThis.__rememberTabletOrders = rememberListedOrders;
+globalThis.__setTabletOnline = (value) => { serverOnline = Boolean(value); };
+globalThis.__renderTabletTakeOver = renderTakeOverButton;`, context, { filename: fileName });
   return context;
+}
+
+async function legacyTabletQuantityRenderFixture() {
+  const context = await createTabletValidationContext("tablet-legacy.js", { legacySafari: true });
+  const lineList = createLegacyDomElement("section");
+  Object.defineProperty(lineList, "innerHTML", {
+    get() { return this._innerHtml || ""; },
+    set(value) {
+      this._innerHtml = value;
+      this.children = [];
+    }
+  });
+  context.document.createElement = createLegacyDomElement;
+  context.document.createTextNode = (value) => ({ nodeName: "#text", textContent: String(value) });
+  Object.assign(context.__elements, {
+    lineList,
+    userNameInput: { ...createLegacyDomElement("input"), value: "QA Tablet" },
+    sortModeSelect: { ...createLegacyDomElement("select"), value: "fromBin", options: [] },
+    takeOverButton: createLegacyDomElement("button"),
+    saveButton: createLegacyDomElement("button"),
+    exportPdfButton: createLegacyDomElement("button"),
+    doneCount: createLegacyDomElement("strong"),
+    openCount: createLegacyDomElement("strong"),
+    changedCount: createLegacyDomElement("strong")
+  });
+  context.__setTabletOrder({
+    id: "qa-legacy-quantity-render",
+    orderType: "picking",
+    acceptedBy: "",
+    lines: [
+      { id: "legacy-quantity-1", product: "100001", fromBin: "002-H3-S01A1", targetQty: "15960", actualQty: "15960", unit: "ST", picked: false },
+      { id: "legacy-quantity-2", product: "100002", fromBin: "002-H3-S01A2", targetQty: "5625", actualQty: "5625", unit: "ST", picked: false }
+    ]
+  });
+  vm.runInContext("renderOrder();", context, { filename: "tablet-legacy-quantity-render.js" });
+  return {
+    numberIsFiniteAvailable: typeof context.Number.isFinite === "function",
+    intlAvailable: Boolean(context.Intl),
+    renderedLineCount: lineList.children.length,
+    inputValues: collectLegacyDomInputValues(lineList)
+  };
+}
+
+function createLegacyDomElement(tagName) {
+  return {
+    tagName,
+    className: "",
+    value: "",
+    textContent: "",
+    innerHTML: "",
+    hidden: false,
+    disabled: false,
+    readOnly: false,
+    title: "",
+    children: [],
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+    setAttribute() {},
+    removeAttribute() {},
+    querySelector(selector) {
+      if (selector !== "input") return null;
+      return findLegacyDomElement(this, "input");
+    }
+  };
+}
+
+function findLegacyDomElement(element, tagName) {
+  const children = Array.isArray(element && element.children) ? element.children : [];
+  for (const child of children) {
+    if (child && child.tagName === tagName) return child;
+    const nested = findLegacyDomElement(child, tagName);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function collectLegacyDomInputValues(element, values = []) {
+  if (element && element.tagName === "input") values.push(element.value);
+  const children = Array.isArray(element && element.children) ? element.children : [];
+  for (const child of children) collectLegacyDomInputValues(child, values);
+  return values;
 }
 
 async function createAppParserContext() {
@@ -2429,7 +3765,10 @@ async function createAppParserContext() {
   vm.runInContext(pickingParserCode, context, { filename: "app-picking-parser.js" });
 
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
-  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__fromBinReviewPatchForValue = fromBinReviewPatchForValue; globalThis.__isFromBinReviewConfirmedForValue = isFromBinReviewConfirmedForValue; globalThis.__canConfirmFromBinReview = canConfirmFromBinReview; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__importText = importText; globalThis.__state = state;`, context, { filename: "app.js" });
+  vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__shouldRunLoadingSlipOcrFallback = shouldRunLoadingSlipOcrFallback; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__fromBinReviewPatchForValue = fromBinReviewPatchForValue; globalThis.__isFromBinReviewConfirmedForValue = isFromBinReviewConfirmedForValue; globalThis.__canConfirmFromBinReview = canConfirmFromBinReview; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__importText = importText; globalThis.__state = state; globalThis.__currentUser = currentUser; globalThis.__elements = elements; globalThis.__renderReleaseButton = renderReleaseButton; globalThis.__setServerOnline = (value) => { serverOnline = Boolean(value); };`, context, { filename: "app.js" });
+  vm.runInContext("globalThis.__hasOpenFromBinReviewWarnings = hasOpenFromBinReviewWarnings; globalThis.__releaseCurrentOrder = releaseCurrentOrder; globalThis.__auditLoadingSlipImport = auditLoadingSlipImport;", context, { filename: "app.js" });
+  vm.runInContext("globalThis.__parseLoadingSlipLines = parseLoadingSlipLines; globalThis.__appendAllLoadingSlipLines = appendAllLoadingSlipLines; globalThis.__canAppendLoadingSlipToXlsxDraft = canAppendLoadingSlipToXlsxDraft; globalThis.__renderSaveOrderButton = renderSaveOrderButton;", context, { filename: "app.js" });
+  vm.runInContext("globalThis.__createManualStorageLine = createManualStorageLine; globalThis.__readManualStorageBin = readManualStorageBin;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__storageLineCompletionErrors = storageLineCompletionErrors; globalThis.__storageOrderExportMessage = storageOrderExportMessage;", context, { filename: "app.js" });
   return context;
 }
@@ -2800,6 +4139,78 @@ async function loadingSlipFromSecondaryOcrCandidateFixture() {
     loadingCount: loadingLines.length,
     loadingLine: loadingLines[0] || null,
     diagnostics: loadingSlipResult.diagnostics
+  };
+}
+
+async function loadingSlipThreePositionsFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const sourceText = [
+    "Ladeschein",
+    "Nummer: V260009624/0",
+    "1066526 Sicherheitsstreifen fuer 7015-01 1072595 PET-Etui fuer 7015/02-05 1072598 PET-Etui fuer 7015-01 15.960,00 Stueck 5.625,00 Stueck 5.625,00 Stueck"
+  ].join("\n");
+  const loadingSlipResult = appParserContext.__collectLoadingSlipLinesFromOcrCandidates([{
+    key: "loading-slip-three-positions",
+    label: "loading slip three positions",
+    scale: 6,
+    dpi: "1000",
+    rotation: 90,
+    text: sourceText
+  }]);
+  const parsed = appParserContext.__appendLoadingSlipLinesToParsed({
+    lines: [{ id: "normal-position", product: "1060000", targetQty: "1", actualQty: "1", unit: "ST" }]
+  }, loadingSlipResult.lines);
+  const loadingLines = parsed.lines.filter((line) => line.lineType === "loading-slip");
+  const audit = appParserContext.__auditLoadingSlipImport(sourceText.split("\n"), parsed.lines);
+  const reappended = appParserContext.__appendLoadingSlipLinesToParsed(parsed, loadingSlipResult.lines);
+  return {
+    normalCount: parsed.lines.filter((line) => line.lineType !== "loading-slip").length,
+    loadingLines,
+    audit,
+    reappendedLineCount: reappended.lines.length
+  };
+}
+
+async function rotatedLoadingSlipFallbackFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const pickingPage = [
+    "Lageraufgabe Von-Handling-Unit Von-Lagerplatz Produkt Menge Basis Produktbeschreibung Nach-Lagerplatz",
+    "80019999 340063810002111 002-H4-SAA8C3 1063588 938 ST Regranulat 9021-0OUT",
+    "MMS 00 000 vT",
+    "UI9Y9IS9IpP"
+  ].join("\n");
+  const rotatedLoadingSlipPage = [
+    "Ladeschein",
+    "Nummer: V260009624/0",
+    "1066526 Sicherheitsstreifen fuer 7015-01 1072595 PET-Etui fuer 7015/02-05 1072598 PET-Etui fuer 7015-01 15.960,00 Stueck 5.625,00 Stueck 5.625,00 Stueck"
+  ].join("\n");
+  const uprightCandidate = appParserContext.__buildPickingOcrCandidate({
+    key: "upright-picking-with-missing-page",
+    label: "upright picking with missing page",
+    scale: 6,
+    dpi: "1000",
+    rotation: 0,
+    pages: [pickingPage, ""],
+    pageRawLines: [4, 0]
+  });
+  const rotatedLoadingSlipCandidate = appParserContext.__buildPickingOcrCandidate({
+    key: "rotated-loading-slip-page",
+    label: "rotated loading slip page",
+    scale: 6,
+    dpi: "1000",
+    rotation: 90,
+    pages: ["", rotatedLoadingSlipPage],
+    pageRawLines: [0, 3]
+  });
+  const loadingSlipResult = appParserContext.__collectLoadingSlipLinesFromOcrCandidates([uprightCandidate, rotatedLoadingSlipCandidate]);
+  const parsed = appParserContext.__appendLoadingSlipLinesToParsed(uprightCandidate.parsed, loadingSlipResult.lines);
+  return {
+    fallbackNeeded: appParserContext.__shouldRunLoadingSlipOcrFallback({
+      best: uprightCandidate,
+      candidates: [uprightCandidate]
+    }),
+    normalCount: parsed.lines.filter((line) => line.lineType !== "loading-slip").length,
+    loadingLines: parsed.lines.filter((line) => line.lineType === "loading-slip")
   };
 }
 
