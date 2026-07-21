@@ -5900,6 +5900,19 @@ function combinedPositionNote(line) {
   return window.HLogistikImportLineHelpers.combinedPositionNote(line);
 }
 
+function manualPositionNoteFromInput(value, line) {
+  return window.HLogistikImportLineHelpers.manualPositionNoteFromInput(value, line);
+}
+
+function normalizePositionNotesForSave(order) {
+  (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
+    if (!line) return;
+    line.autoPositionNotes = normalizeAutoPositionNotes(line.autoPositionNotes);
+    line.positionNote = manualPositionNoteFromInput(line.positionNote, line);
+  });
+  return order;
+}
+
 // eslint-disable-next-line no-unused-vars
 function combineUniqueNoteParts(parts) {
   return window.HLogistikImportLineHelpers.combineUniqueNoteParts(parts);
@@ -6185,7 +6198,7 @@ function render() {
       if (useSsiStorageHuPrefix) map.fromHandlingUnit.value = normalizeSsiStorageHandlingUnit(map.fromHandlingUnit.value);
       updateLine(line.id, { fromHandlingUnit: map.fromHandlingUnit.value, fromHandlingUnitEditable: canEditHandlingUnit }, false);
     });
-    map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
+    map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: manualPositionNoteFromInput(map.positionNote.value, line) }, false));
     map.fromBin.addEventListener("input", () => {
       const skipFromBinReview = isPickingXlsxOrder();
       if (canEditBin && !skipFromBinReview) map.fromBin.value = map.fromBin.value.toUpperCase();
@@ -7087,7 +7100,7 @@ function renderLoadingSlipLine(item, map, line) {
   removeClosestLabelOrElement(map.unit);
   removeClosestLabelOrElement(map.fromHandlingUnit);
   map.positionNote.value = combinedPositionNote(line);
-  map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
+  map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: manualPositionNoteFromInput(map.positionNote.value, line) }, false));
 
   map.picked.setAttribute("aria-pressed", line.picked ? "true" : "false");
   map.picked.addEventListener("click", (event) => {
@@ -7130,7 +7143,7 @@ function syncLineFieldsFromDom() {
     if (pickedButton) line.picked = pickedButton.getAttribute("aria-pressed") === "true";
 
     const noteInput = item.querySelector(".position-note-input");
-    if (noteInput) line.positionNote = noteInput.value;
+    if (noteInput) line.positionNote = manualPositionNoteFromInput(noteInput.value, line);
 
     if (line.lineType === "loading-slip") return;
 
@@ -7894,7 +7907,7 @@ function currentOrderPayload({ touch = true } = {}) {
   if (touch) markOrderTouched();
   const orderType = state.orderType || currentMode;
   const orderWarehouse = normalizeOptionalWarehouse(state.orderWarehouse) || currentWarehouse();
-  const lines = normalizeStorageHandlingUnits(state.lines, isSsiStorageOrderContext(orderType, state.customerName));
+  const lines = normalizePositionNotesForSave(normalizeStorageHandlingUnits(state.lines, isSsiStorageOrderContext(orderType, state.customerName)));
   const destinationCustomerName = orderType === "picking" ? defaultDestinationCustomerName(lines) : "";
   const customerName = destinationCustomerName || state.customerName;
   const customerGroupKey = destinationCustomerName
@@ -7936,6 +7949,7 @@ function currentOrderPayload({ touch = true } = {}) {
 }
 
 function saveStateWithoutServer() {
+  normalizePositionNotesForSave(state);
   writeLocalState(STORAGE_KEY, state);
   persistCurrentOrderCache();
 }
@@ -7957,6 +7971,7 @@ function saveAndRender() {
 }
 
 function saveState() {
+  normalizePositionNotesForSave(state);
   writeLocalState(STORAGE_KEY, state);
   persistCurrentOrderCache();
   scheduleServerSave();

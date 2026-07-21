@@ -58,10 +58,50 @@
   }
 
   function combinedPositionNote(line) {
-    return combineUniqueNoteParts([line && line.positionNote].concat(autoPositionNoteValues(line)));
+    return combineUniqueNoteParts([manualPositionNoteFromInput(line && line.positionNote, line)].concat(autoPositionNoteValues(line)));
+  }
+
+  function manualPositionNoteFromInput(value, line) {
+    var manual = String(value || "").trim();
+    var automaticParts = uniqueNoteParts(autoPositionNoteValues(line));
+    var automaticSequence = automaticParts.join(" - ");
+    if (!manual || !automaticSequence) return manual;
+
+    var previous = null;
+    while (manual && manual !== previous) {
+      previous = manual;
+      if (manual === automaticSequence) {
+        manual = "";
+        continue;
+      }
+      if (manual.slice(-(automaticSequence.length + 3)) === ` - ${automaticSequence}`) {
+        manual = manual.slice(0, -(automaticSequence.length + 3)).trim();
+        continue;
+      }
+      if (manual.slice(0, automaticSequence.length + 3) === `${automaticSequence} - `) {
+        manual = manual.slice(automaticSequence.length + 3).trim();
+        continue;
+      }
+      for (var index = automaticParts.length - 1; index >= 0; index -= 1) {
+        var automaticPart = automaticParts[index];
+        if (manual === automaticPart) {
+          manual = "";
+          break;
+        }
+        if (manual.slice(-(automaticPart.length + 3)) === ` - ${automaticPart}`) {
+          manual = manual.slice(0, -(automaticPart.length + 3)).trim();
+          break;
+        }
+      }
+    }
+    return manual;
   }
 
   function combineUniqueNoteParts(parts) {
+    return uniqueNoteParts(parts).join(" - ");
+  }
+
+  function uniqueNoteParts(parts) {
     var seen = new Set();
     return parts
       .map(function (part) {
@@ -73,8 +113,7 @@
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
-      })
-      .join(" - ");
+      });
   }
 
   window.HLogistikImportLineHelpers = {
@@ -87,6 +126,7 @@
     normalizeAutoPositionNotes: normalizeAutoPositionNotes,
     autoPositionNoteValues: autoPositionNoteValues,
     setAutoPositionNote: setAutoPositionNote,
+    manualPositionNoteFromInput: manualPositionNoteFromInput,
     combinedPositionNote: combinedPositionNote
   };
 })();

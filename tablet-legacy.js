@@ -675,7 +675,43 @@ function normalizeAutoPositionNotes(notes) {
 }
 
 function combinedPositionNote(line) {
-  return combineUniqueNoteParts([line && line.positionNote].concat(autoPositionNoteValues(line)));
+  return combineUniqueNoteParts([manualPositionNoteFromInput(line && line.positionNote, line)].concat(autoPositionNoteValues(line)));
+}
+
+function manualPositionNoteFromInput(value, line) {
+  var manual = String(value || "").trim();
+  var automaticParts = uniqueNoteParts(autoPositionNoteValues(line));
+  var automaticSequence = automaticParts.join(" - ");
+  if (!manual || !automaticSequence) return manual;
+
+  var previous = null;
+  while (manual && manual !== previous) {
+    previous = manual;
+    if (manual === automaticSequence) {
+      manual = "";
+      continue;
+    }
+    if (manual.slice(-(automaticSequence.length + 3)) === " - " + automaticSequence) {
+      manual = manual.slice(0, -(automaticSequence.length + 3)).trim();
+      continue;
+    }
+    if (manual.slice(0, automaticSequence.length + 3) === automaticSequence + " - ") {
+      manual = manual.slice(automaticSequence.length + 3).trim();
+      continue;
+    }
+    for (var index = automaticParts.length - 1; index >= 0; index -= 1) {
+      var automaticPart = automaticParts[index];
+      if (manual === automaticPart) {
+        manual = "";
+        break;
+      }
+      if (manual.slice(-(automaticPart.length + 3)) === " - " + automaticPart) {
+        manual = manual.slice(0, -(automaticPart.length + 3)).trim();
+        break;
+      }
+    }
+  }
+  return manual;
 }
 
 function autoPositionNoteValues(line) {
@@ -684,6 +720,10 @@ function autoPositionNoteValues(line) {
 }
 
 function combineUniqueNoteParts(parts) {
+  return uniqueNoteParts(parts).join(" - ");
+}
+
+function uniqueNoteParts(parts) {
   var seen = {};
   var result = [];
   (parts || []).forEach(function (part) {
@@ -693,7 +733,17 @@ function combineUniqueNoteParts(parts) {
     seen[key] = true;
     result.push(text);
   });
-  return result.join(" - ");
+  return result;
+}
+
+function normalizePositionNotesForSave(order) {
+  var lines = order && Array.isArray(order.lines) ? order.lines : [];
+  lines.forEach(function (line) {
+    if (!line) return;
+    line.autoPositionNotes = normalizeAutoPositionNotes(line.autoPositionNotes);
+    line.positionNote = manualPositionNoteFromInput(line.positionNote, line);
+  });
+  return order;
 }
 
 function loadUser() {
@@ -1572,7 +1622,7 @@ function renderLine(line) {
     markDirty();
   }, !canEditOrder || missing || !canEditHu, "", useSsiStorageHuPrefix ? ssiStorageHuInputOptions() : null));
   var noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), function (value) {
-    line.positionNote = value;
+    line.positionNote = manualPositionNoteFromInput(value, line);
     markDirty();
   }, !canEditOrder || missing || (isStorage && !isManualStorageLine), "");
   locationRow.appendChild(noteInput);
@@ -1625,7 +1675,7 @@ function renderLoadingSlipLine(line) {
   var noteRow = document.createElement("div");
   noteRow.className = "location-row loading-slip-note-row";
   var noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), function (value) {
-    line.positionNote = value;
+    line.positionNote = manualPositionNoteFromInput(value, line);
     markDirty();
   }, !canEditOrder, "");
   noteRow.appendChild(noteInput);
@@ -2794,6 +2844,7 @@ function formatLineQuantityForDisplay(line, value) {
 }
 
 function normalizeOrderQuantitiesForSave(order) {
+  normalizePositionNotesForSave(order);
   var lines = order && Array.isArray(order.lines) ? order.lines : [];
   lines.forEach(function (line) {
     if (!line || line.lineType === "loading-slip") return;

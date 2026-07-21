@@ -611,7 +611,43 @@ function normalizeAutoPositionNotes(notes) {
 }
 
 function combinedPositionNote(line) {
-  return combineUniqueNoteParts([line?.positionNote, ...autoPositionNoteValues(line)]);
+  return combineUniqueNoteParts([manualPositionNoteFromInput(line?.positionNote, line), ...autoPositionNoteValues(line)]);
+}
+
+function manualPositionNoteFromInput(value, line) {
+  let manual = String(value || "").trim();
+  const automaticParts = uniqueNoteParts(autoPositionNoteValues(line));
+  const automaticSequence = automaticParts.join(" - ");
+  if (!manual || !automaticSequence) return manual;
+
+  let previous = null;
+  while (manual && manual !== previous) {
+    previous = manual;
+    if (manual === automaticSequence) {
+      manual = "";
+      continue;
+    }
+    if (manual.endsWith(` - ${automaticSequence}`)) {
+      manual = manual.slice(0, -(automaticSequence.length + 3)).trim();
+      continue;
+    }
+    if (manual.startsWith(`${automaticSequence} - `)) {
+      manual = manual.slice(automaticSequence.length + 3).trim();
+      continue;
+    }
+    for (let index = automaticParts.length - 1; index >= 0; index -= 1) {
+      const automaticPart = automaticParts[index];
+      if (manual === automaticPart) {
+        manual = "";
+        break;
+      }
+      if (manual.endsWith(` - ${automaticPart}`)) {
+        manual = manual.slice(0, -(automaticPart.length + 3)).trim();
+        break;
+      }
+    }
+  }
+  return manual;
 }
 
 function autoPositionNoteValues(line) {
@@ -620,6 +656,10 @@ function autoPositionNoteValues(line) {
 }
 
 function combineUniqueNoteParts(parts) {
+  return uniqueNoteParts(parts).join(" - ");
+}
+
+function uniqueNoteParts(parts) {
   const seen = new Set();
   return (parts || [])
     .map((part) => String(part || "").trim())
@@ -629,8 +669,16 @@ function combineUniqueNoteParts(parts) {
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    })
-    .join(" - ");
+    });
+}
+
+function normalizePositionNotesForSave(order) {
+  (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
+    if (!line) return;
+    line.autoPositionNotes = normalizeAutoPositionNotes(line.autoPositionNotes);
+    line.positionNote = manualPositionNoteFromInput(line.positionNote, line);
+  });
+  return order;
 }
 
 function loadUser() {
@@ -1481,7 +1529,7 @@ function renderLine(line) {
     )
   );
   const noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), (value) => {
-    line.positionNote = value;
+    line.positionNote = manualPositionNoteFromInput(value, line);
     markDirty();
   }, { readOnly: !canEditOrder || missing || (isStorage && !isManualStorageLine) });
   locationRow.appendChild(noteInput);
@@ -1536,7 +1584,7 @@ function renderLoadingSlipLine(line) {
   const noteRow = document.createElement("div");
   noteRow.className = "location-row loading-slip-note-row";
   const noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), (value) => {
-    line.positionNote = value;
+    line.positionNote = manualPositionNoteFromInput(value, line);
     markDirty();
   }, { readOnly: !canEditOrder });
   noteRow.appendChild(noteInput);
@@ -2550,6 +2598,7 @@ function formatLineQuantityForDisplay(line, value) {
 }
 
 function normalizeOrderQuantitiesForSave(order) {
+  normalizePositionNotesForSave(order);
   (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
     if (!line || line.lineType === "loading-slip") return;
     ["targetQty", "actualQty"].forEach((key) => {

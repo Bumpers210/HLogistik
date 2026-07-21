@@ -52,15 +52,31 @@ async function run() {
 
   const appSource = await readFile(new URL("../app.js", import.meta.url), "utf8");
   const importDiagnosticsSource = await readFile(new URL("../app-import-diagnostics.js", import.meta.url), "utf8");
+  const importLineHelpersSource = await readFile(new URL("../app-import-line-helpers.js", import.meta.url), "utf8");
   const storageBinRulesSource = await readFile(new URL("../shared/storage-bin-rules.js", import.meta.url), "utf8");
   const quantityFormatSource = await readFile(new URL("../shared/quantity-format.js", import.meta.url), "utf8");
   const pickingXlsxSource = await readFile(new URL("../app-picking-xlsx-import.js", import.meta.url), "utf8");
   const browserModuleContext = vm.createContext({ window: {} });
   vm.runInContext(quantityFormatSource, browserModuleContext, { filename: "shared/quantity-format.js" });
+  vm.runInContext(importLineHelpersSource, browserModuleContext, { filename: "app-import-line-helpers.js" });
   vm.runInContext(pickingXlsxSource, browserModuleContext, { filename: "app-picking-xlsx-import.js" });
   const quantityFormat = browserModuleContext.window.HLogistikQuantityFormat;
+  const importLineHelpers = browserModuleContext.window.HLogistikImportLineHelpers;
   const pickingXlsx = browserModuleContext.window.HLogistikPickingXlsxImport;
   const legacyTabletQuantityRender = await legacyTabletQuantityRenderFixture();
+  const desktopPositionNoteDedupe = await desktopPositionNoteDedupeFixture();
+  const tabletModernPositionNoteDedupe = await tabletPositionNoteDedupeFixture("tablet.js");
+  const tabletLegacyPositionNoteDedupe = await tabletPositionNoteDedupeFixture("tablet-legacy.js");
+  const sharedPositionNoteDedupe = positionNoteDedupeScenario({
+    combinedPositionNote: importLineHelpers.combinedPositionNote,
+    manualPositionNoteFromInput: importLineHelpers.manualPositionNoteFromInput,
+    normalizePositionNotesForSave: (order) => {
+      (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
+        line.positionNote = importLineHelpers.manualPositionNoteFromInput(line.positionNote, line);
+      });
+      return order;
+    }
+  });
 
   const storagePdfHtml = printableHtml({
     orderNumber: `QA-PDF-ST-${suffix}`,
@@ -124,6 +140,29 @@ async function run() {
       legacyTabletQuantityRender.renderedLineCount === 2 &&
       legacyTabletQuantityRender.inputValues.includes("15.960"),
     JSON.stringify(legacyTabletQuantityRender)
+  );
+  check(
+    "automatic position notes stay separate from manual text and deduplicate idempotently",
+    [sharedPositionNoteDedupe, desktopPositionNoteDedupe, tabletModernPositionNoteDedupe, tabletLegacyPositionNoteDedupe].every((result) =>
+      result.automaticText === "com - 3A1" &&
+        result.afterInputManual === "" &&
+        result.afterInputText === "com - 3A1" &&
+        result.appendedManualStored === "Bitte pruefen" &&
+        result.appendedManualText === "Bitte pruefen - com - 3A1" &&
+        result.duplicateStored === "" &&
+        result.duplicateText === "com - 3A1" &&
+        result.manualStored === "Bitte prüfen" &&
+        result.manualText === "Bitte prüfen - com - 3A1" &&
+        result.repeatedStored === result.manualStored &&
+        result.repeatedText === result.manualText &&
+        result.automaticOrder === "Ziel - Menge - Korrektur - Palette - System - Gebinde"
+    ),
+    JSON.stringify({
+      shared: sharedPositionNoteDedupe,
+      desktop: desktopPositionNoteDedupe,
+      modern: tabletModernPositionNoteDedupe,
+      legacy: tabletLegacyPositionNoteDedupe
+    })
   );
   check(
     "storage PDF uses portrait A4 with exactly the six storage columns",
@@ -1595,10 +1634,10 @@ async function run() {
       tabletModernServiceWorkerSource.includes("updateViaCache: \"none\"") &&
       countSourceOccurrences(tabletLegacyServiceWorkerSource, "registration.update()") === 1 &&
       countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
-      tabletHtmlSource.includes("tablet-legacy.js?v=20260720-1") &&
+      tabletHtmlSource.includes("tablet-legacy.js?v=20260721-2") &&
       tabletHtmlSource.includes("tablet.css?v=20260720-1") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.191\"") &&
-      manifestSource.includes("\"version\": \"1.5.191\"") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.192\"") &&
+      manifestSource.includes("\"version\": \"1.5.192\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&
@@ -3791,6 +3830,74 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function positionNoteDedupeScenario(api) {
+  const autoNotes = { quantity: "com", package: "3A1" };
+  const inputLine = { positionNote: "", autoPositionNotes: cloneJson(autoNotes) };
+  const automaticText = api.combinedPositionNote(inputLine);
+  inputLine.positionNote = api.manualPositionNoteFromInput(automaticText, inputLine);
+  const afterInputManual = inputLine.positionNote;
+  const afterInputText = api.combinedPositionNote(inputLine);
+
+  const appendedManualLine = { positionNote: "", autoPositionNotes: cloneJson(autoNotes) };
+  appendedManualLine.positionNote = api.manualPositionNoteFromInput("com - 3A1 - Bitte pruefen", appendedManualLine);
+  const appendedManualStored = appendedManualLine.positionNote;
+  const appendedManualText = api.combinedPositionNote(appendedManualLine);
+
+  const duplicateLine = { positionNote: "com - 3A1 - com - 3A1", autoPositionNotes: cloneJson(autoNotes) };
+  api.normalizePositionNotesForSave({ lines: [duplicateLine] });
+  const duplicateStored = duplicateLine.positionNote;
+  const duplicateText = api.combinedPositionNote(duplicateLine);
+
+  const manualLine = { positionNote: "Bitte prüfen - com - 3A1", autoPositionNotes: cloneJson(autoNotes) };
+  api.normalizePositionNotesForSave({ lines: [manualLine] });
+  const manualStored = manualLine.positionNote;
+  const manualText = api.combinedPositionNote(manualLine);
+  api.normalizePositionNotesForSave({ lines: [manualLine] });
+
+  return {
+    automaticText,
+    afterInputManual,
+    afterInputText,
+    appendedManualStored,
+    appendedManualText,
+    duplicateStored,
+    duplicateText,
+    manualStored,
+    manualText,
+    repeatedStored: manualLine.positionNote,
+    repeatedText: api.combinedPositionNote(manualLine),
+    automaticOrder: api.combinedPositionNote({
+      positionNote: "",
+      autoPositionNotes: {
+        destination: "Ziel",
+        quantity: "Menge",
+        quantityCorrection: "Korrektur",
+        storagePallet: "Palette",
+        sourceBinSystem: "System",
+        package: "Gebinde"
+      }
+    })
+  };
+}
+
+async function desktopPositionNoteDedupeFixture() {
+  const context = await createAppParserContext();
+  return positionNoteDedupeScenario({
+    combinedPositionNote: context.__combinedPositionNote,
+    manualPositionNoteFromInput: context.__manualPositionNoteFromInput,
+    normalizePositionNotesForSave: context.__normalizePositionNotesForSave
+  });
+}
+
+async function tabletPositionNoteDedupeFixture(fileName) {
+  const context = await createTabletValidationContext(fileName);
+  return positionNoteDedupeScenario({
+    combinedPositionNote: context.__combinedPositionNote,
+    manualPositionNoteFromInput: context.__manualPositionNoteFromInput,
+    normalizePositionNotesForSave: context.__normalizePositionNotesForSave
+  });
+}
+
 async function createTabletValidationContext(fileName, options = {}) {
   const globals = {
     console,
@@ -3843,6 +3950,9 @@ globalThis.__storageLineCompletionErrors = storageLineCompletionErrors;
 globalThis.__storageOrderExportMessage = storageOrderExportMessage;
 globalThis.__createManualStorageLine = createManualStorageLine;
 globalThis.__readManualStorageBin = readManualStorageBin;
+globalThis.__combinedPositionNote = combinedPositionNote;
+globalThis.__manualPositionNoteFromInput = manualPositionNoteFromInput;
+globalThis.__normalizePositionNotesForSave = normalizePositionNotesForSave;
 globalThis.__elements = elements;
 globalThis.__loadTabletOrder = loadOrder;
 globalThis.__rememberTabletOrders = rememberListedOrders;
@@ -3983,6 +4093,7 @@ async function createAppParserContext() {
   vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__shouldRunLoadingSlipOcrFallback = shouldRunLoadingSlipOcrFallback; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__fromBinReviewPatchForValue = fromBinReviewPatchForValue; globalThis.__isFromBinReviewConfirmedForValue = isFromBinReviewConfirmedForValue; globalThis.__canConfirmFromBinReview = canConfirmFromBinReview; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__pickingXlsxImportText = pickingXlsxImportText; globalThis.__importText = importText; globalThis.__state = state; globalThis.__currentUser = currentUser; globalThis.__elements = elements; globalThis.__renderReleaseButton = renderReleaseButton; globalThis.__setServerOnline = (value) => { serverOnline = Boolean(value); };`, context, { filename: "app.js" });
   vm.runInContext("globalThis.__hasOpenFromBinReviewWarnings = hasOpenFromBinReviewWarnings; globalThis.__releaseCurrentOrder = releaseCurrentOrder; globalThis.__auditLoadingSlipImport = auditLoadingSlipImport;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__annotateDestinationExceptions = annotateDestinationExceptions; globalThis.__createLine = createLine;", context, { filename: "app.js" });
+  vm.runInContext("globalThis.__combinedPositionNote = combinedPositionNote; globalThis.__manualPositionNoteFromInput = manualPositionNoteFromInput; globalThis.__normalizePositionNotesForSave = normalizePositionNotesForSave;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__parseLoadingSlipLines = parseLoadingSlipLines; globalThis.__appendAllLoadingSlipLines = appendAllLoadingSlipLines; globalThis.__canAppendLoadingSlipToXlsxDraft = canAppendLoadingSlipToXlsxDraft; globalThis.__renderSaveOrderButton = renderSaveOrderButton;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__createManualStorageLine = createManualStorageLine; globalThis.__readManualStorageBin = readManualStorageBin;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__storageLineCompletionErrors = storageLineCompletionErrors; globalThis.__storageOrderExportMessage = storageOrderExportMessage;", context, { filename: "app.js" });
