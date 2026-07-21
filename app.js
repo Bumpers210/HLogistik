@@ -4597,7 +4597,7 @@ async function handlePickingXlsxUpload(file) {
     orderNumber: "",
     customerName: "",
     customerGroupKey: "",
-    lines: preview.lines.map((line) => createLine(line))
+    lines: annotateDestinationExceptions(preview.lines).map((line) => createLine(line))
   };
   const diagnostics = {
     source: "xlsx",

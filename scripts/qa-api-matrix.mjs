@@ -252,6 +252,15 @@ async function run() {
   const pickingXlsxNumericSourceBefore = JSON.stringify(pickingXlsxNumericRows);
   const pickingXlsxNumericPreview = pickingXlsx.previewRows(pickingXlsxNumericRows, pickingXlsx.findHeader([pickingXlsxNumericRows[0]]));
   const pickingXlsxDraftRelease = await pickingXlsxDraftReleaseFixture(pickingXlsxNumericPreview.lines.slice(0, 2));
+  const pickingXlsxSsiDestinationPreview = pickingXlsx.previewRows([
+    pickingXlsxRows[0],
+    ["101107240", "340063810001948468", "002-H4-SJ1B8", "1014816", "", "12", "ST", "XLSX abweichendes Ziel", "9020-ANSBACH"],
+    ["101107241", "340063810001948469", "002-H4-SJ1B9", "1014817", "", "24", "ST", "XLSX SSI-Standardziel", "9021-0OUT"]
+  ], pickingXlsx.findHeader([pickingXlsxRows[0]]));
+  const pickingXlsxSsiDestinationDraftRelease = await pickingXlsxDraftReleaseFixture(
+    pickingXlsxSsiDestinationPreview.lines,
+    { release: true, applyDestinationExceptions: true }
+  );
   const loadingSlipXlsxAttachment = await loadingSlipXlsxAttachmentFixture(pickingXlsxNumericPreview.lines.slice(0, 1));
   const loadingSlipXlsxDraftRelease = await pickingXlsxDraftReleaseFixture(loadingSlipXlsxAttachment.lines, { release: true });
   const pdfImportHandlerSource = extractFunctionSource(appSource, "async function handlePdfUpload(");
@@ -348,6 +357,23 @@ async function run() {
     pickingXlsxPreview.lines.length === 4 &&
       pickingXlsxPreview.lines.every((line) => line.product === "000000012345" && line.fromBin === "002-H3-S01A1" && line.toBin === "9021-0OUT"),
     JSON.stringify(pickingXlsxPreview.lines)
+  );
+  check(
+    "picking XLSX stores only SSI destination exceptions and retains them after release",
+    pickingXlsxSsiDestinationDraftRelease.result?.cancelled !== true &&
+      pickingXlsxSsiDestinationDraftRelease.releaseRequests === 1 &&
+      pickingXlsxSsiDestinationDraftRelease.savedOrder?.customerName === "9021-0OUT" &&
+      pickingXlsxSsiDestinationDraftRelease.savedOrder?.orderNumber === "SSI" &&
+      pickingXlsxSsiDestinationDraftRelease.savedLines?.length === 2 &&
+      pickingXlsxSsiDestinationDraftRelease.savedLines?.[0]?.toBin === "9020-ANSBACH" &&
+      pickingXlsxSsiDestinationDraftRelease.savedLines?.[0]?.autoPositionNotes?.destination === "9020-ANSBACH" &&
+      pickingXlsxSsiDestinationDraftRelease.savedLines?.[0]?.positionNote === "" &&
+      !pickingXlsxSsiDestinationDraftRelease.savedLines?.[1]?.autoPositionNotes?.destination &&
+      pickingXlsxSsiDestinationDraftRelease.savedLines?.[1]?.toBin === "9021-0OUT" &&
+      pickingXlsxSsiDestinationDraftRelease.reopenedOrder?.lines?.[0]?.autoPositionNotes?.destination === "9020-ANSBACH" &&
+      !pickingXlsxSsiDestinationDraftRelease.reopenedOrder?.lines?.[1]?.autoPositionNotes?.destination &&
+      countSourceOccurrences(xlsxImportHandlerSource, "annotateDestinationExceptions(preview.lines)") === 1,
+    JSON.stringify(pickingXlsxSsiDestinationDraftRelease)
   );
   check(
     "picking XLSX draft appends every loading-slip position without server save or deduplication",
@@ -2069,6 +2095,21 @@ async function run() {
   const xlsxExplicitReleaseReload = xlsxExplicitRelease.body.order?.id
     ? await request(`/api/orders/${encodeURIComponent(xlsxExplicitRelease.body.order.id)}`)
     : { status: 0, body: null };
+  const xlsxSsiDestinationReleasePayload = {
+    ...pickingXlsxSsiDestinationDraftRelease.savedOrder,
+    id: "",
+    orderNumber: "SSI",
+    customerName: "9021-0OUT",
+    orderWarehouse: "SSI"
+  };
+  const xlsxSsiDestinationRelease = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(xlsxSsiDestinationReleasePayload)
+  });
+  const xlsxSsiDestinationReleaseReload = xlsxSsiDestinationRelease.body.order?.id
+    ? await request(`/api/orders/${encodeURIComponent(xlsxSsiDestinationRelease.body.order.id)}`)
+    : { status: 0, body: null };
   check(
     "order create preserves destination rules and explicit XLSX draft release state",
     orderCreate.status === 200 && orderCreate.body.order.customerName === "9021-0OUT" && orderCreate.body.order.orderNumber === "SSI" &&
@@ -2085,6 +2126,20 @@ async function run() {
       orderCreate: orderCreate.body,
       xlsxExplicitRelease: xlsxExplicitRelease.body,
       xlsxExplicitReleaseReload: xlsxExplicitReleaseReload.body
+    })
+  );
+  check(
+    "released SSI XLSX destination exception persists after reopening",
+    xlsxSsiDestinationRelease.status === 200 &&
+      xlsxSsiDestinationReleaseReload.status === 200 &&
+      xlsxSsiDestinationReleaseReload.body?.customerName === "9021-0OUT" &&
+      xlsxSsiDestinationReleaseReload.body?.orderNumber === "SSI" &&
+      xlsxSsiDestinationReleaseReload.body?.lines?.[0]?.toBin === "9020-ANSBACH" &&
+      xlsxSsiDestinationReleaseReload.body?.lines?.[0]?.autoPositionNotes?.destination === "9020-ANSBACH" &&
+      !xlsxSsiDestinationReleaseReload.body?.lines?.[1]?.autoPositionNotes?.destination,
+    JSON.stringify({
+      created: xlsxSsiDestinationRelease.body,
+      reopened: xlsxSsiDestinationReleaseReload.body
     })
   );
 
@@ -3204,7 +3259,7 @@ async function parsePickingTextFixture(text) {
   return appParserContext.__parseOrderText(String(text || ""));
 }
 
-async function pickingXlsxDraftReleaseFixture(lines, { release = false } = {}) {
+async function pickingXlsxDraftReleaseFixture(lines, { release = false, applyDestinationExceptions = false } = {}) {
   const context = await createAppParserContext();
   let serverRequests = 0;
   let saveStateCalls = 0;
@@ -3238,12 +3293,14 @@ async function pickingXlsxDraftReleaseFixture(lines, { release = false } = {}) {
   context.applyPackageNotesForImportedLines = async (nextLines) => nextLines;
   context.buildPickingImportLineDiagnostics = () => ({ source: "qa-xlsx" });
   context.logPickingImportLineDiagnostics = () => {};
-  context.applyDefaultDestinationCustomer = () => {
-    context.__state.customerName = "9020-DETTELSAU";
-    context.__state.customerGroupKey = "9020-DETTELSAU";
-    return true;
-  };
-  context.applyCustomerOrderNumberRule = () => {};
+  if (!applyDestinationExceptions) {
+    context.applyDefaultDestinationCustomer = () => {
+      context.__state.customerName = "9020-DETTELSAU";
+      context.__state.customerGroupKey = "9020-DETTELSAU";
+      return true;
+    };
+    context.applyCustomerOrderNumberRule = () => {};
+  }
   context.saveStateWithoutServer = () => {
     saveStateCalls += 1;
   };
@@ -3253,16 +3310,20 @@ async function pickingXlsxDraftReleaseFixture(lines, { release = false } = {}) {
   };
 
   const sourceText = context.__pickingXlsxImportText({ sheetName: "Tabelle1", lines });
+  const importedLines = applyDestinationExceptions
+    ? context.__annotateDestinationExceptions(lines).map((line) => context.__createLine(line))
+    : lines;
   const result = await context.__importText(
     sourceText,
     "synthetic-picking.xlsx",
-    { lines },
+    { lines: importedLines },
     { source: "xlsx", documentType: "picking-xlsx" }
   );
   const importedLine = cloneJson(context.__state.lines?.[0] || {});
   const hasOpenReviewBeforeRelease = context.__hasOpenFromBinReviewWarnings(context.__state.lines);
   let savedLine = null;
   let savedLines = null;
+  let savedOrder = null;
   let releaseRequests = 0;
   if (release) {
     context.__state.lines.forEach((line) => {
@@ -3271,6 +3332,7 @@ async function pickingXlsxDraftReleaseFixture(lines, { release = false } = {}) {
     context.apiJson = async (_url, options = {}) => {
       releaseRequests += 1;
       const payload = JSON.parse(options.body || "{}");
+      savedOrder = cloneJson(payload.order || {});
       savedLine = cloneJson(payload.order?.lines?.[0] || {});
       savedLines = cloneJson(payload.order?.lines || []);
       return { order: { id: "qa-xlsx-release" } };
@@ -3294,7 +3356,9 @@ async function pickingXlsxDraftReleaseFixture(lines, { release = false } = {}) {
     hasOpenReviewBeforeRelease,
     releaseRequests,
     savedLine,
-    savedLines
+    savedLines,
+    savedOrder,
+    reopenedOrder: savedOrder ? cloneJson(savedOrder) : null
   };
 }
 
@@ -3918,6 +3982,7 @@ async function createAppParserContext() {
   const appCode = await readFile(new URL("../app.js", import.meta.url), "utf8");
   vm.runInContext(`${appCode}\nglobalThis.__parseOrderText = parseOrderText; globalThis.__validatePickingImport = validatePickingImport; globalThis.__buildBestellscheinOcrText = buildBestellscheinOcrText; globalThis.__buildPickingOcrCandidate = buildPickingOcrCandidate; globalThis.__isUsablePickingOcrSelection = isUsablePickingOcrSelection; globalThis.__isAcceptedPdfTextImportCandidate = isAcceptedPdfTextImportCandidate; globalThis.__isAcceptedSiBestellscheinOcrCandidate = isAcceptedSiBestellscheinOcrCandidate; globalThis.__scorePickingImportCandidate = scorePickingImportCandidate; globalThis.__collectLoadingSlipLinesFromOcrCandidates = collectLoadingSlipLinesFromOcrCandidates; globalThis.__shouldRunLoadingSlipOcrFallback = shouldRunLoadingSlipOcrFallback; globalThis.__appendLoadingSlipLinesToParsed = appendLoadingSlipLinesToParsed; globalThis.__mergeBestellscheinOcrLines = mergeBestellscheinOcrLines; globalThis.__correctedOcrWarehouseQuantityFromStock = correctedOcrWarehouseQuantityFromStock; globalThis.__pickingImportDiagnostics = pickingImportDiagnostics; globalThis.__buildPickingImportLineDiagnostics = buildPickingImportLineDiagnostics; globalThis.__pickingFromBinShapeDiagnostic = pickingFromBinShapeDiagnostic; globalThis.__fromBinReviewDiagnosticForValue = fromBinReviewDiagnosticForValue; globalThis.__fromBinReviewPatchForValue = fromBinReviewPatchForValue; globalThis.__isFromBinReviewConfirmedForValue = isFromBinReviewConfirmedForValue; globalThis.__canConfirmFromBinReview = canConfirmFromBinReview; globalThis.__siSystemFromBinPatchForLine = siSystemFromBinPatchForLine; globalThis.__siBestellscheinOrientationProbeCandidate = siBestellscheinOrientationProbeCandidate; globalThis.__selectSiBestellscheinOrientationCandidate = selectSiBestellscheinOrientationCandidate; globalThis.__selectSiBestellscheinOrientationTieBreakCandidate = selectSiBestellscheinOrientationTieBreakCandidate; globalThis.__bestellscheinPageNotice = bestellscheinPageNotice; globalThis.__applyFromBinReviewWarnings = applyFromBinReviewWarnings; globalThis.__orderExportCompletionMessage = orderExportCompletionMessage; globalThis.__fromBinReviewBlockMessage = fromBinReviewBlockMessage; globalThis.__removeClosestLabelOrElement = removeClosestLabelOrElement; globalThis.__pickingXlsxImportText = pickingXlsxImportText; globalThis.__importText = importText; globalThis.__state = state; globalThis.__currentUser = currentUser; globalThis.__elements = elements; globalThis.__renderReleaseButton = renderReleaseButton; globalThis.__setServerOnline = (value) => { serverOnline = Boolean(value); };`, context, { filename: "app.js" });
   vm.runInContext("globalThis.__hasOpenFromBinReviewWarnings = hasOpenFromBinReviewWarnings; globalThis.__releaseCurrentOrder = releaseCurrentOrder; globalThis.__auditLoadingSlipImport = auditLoadingSlipImport;", context, { filename: "app.js" });
+  vm.runInContext("globalThis.__annotateDestinationExceptions = annotateDestinationExceptions; globalThis.__createLine = createLine;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__parseLoadingSlipLines = parseLoadingSlipLines; globalThis.__appendAllLoadingSlipLines = appendAllLoadingSlipLines; globalThis.__canAppendLoadingSlipToXlsxDraft = canAppendLoadingSlipToXlsxDraft; globalThis.__renderSaveOrderButton = renderSaveOrderButton;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__createManualStorageLine = createManualStorageLine; globalThis.__readManualStorageBin = readManualStorageBin;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__storageLineCompletionErrors = storageLineCompletionErrors; globalThis.__storageOrderExportMessage = storageOrderExportMessage;", context, { filename: "app.js" });
