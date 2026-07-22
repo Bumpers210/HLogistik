@@ -11,7 +11,7 @@
     <title>Kommissionier-App</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260622-2">
+    <link rel="stylesheet" href="styles.css?v=20260722-1">
     <script src="pdf.min.js" defer></script>
     <script src="xlsx.full.min.js" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js" defer></script>
@@ -27,8 +27,8 @@
     <script src="app-import-diagnostics.js?v=20260710-1" defer></script>
     <script src="app-state-helpers.js?v=20260703-1" defer></script>
     <script src="app-ui-helpers.js?v=20260703-2" defer></script>
-    <script src="app-picking-parser.js?v=20260720-2" defer></script>
-  <script src="app.js?v=20260720-2" defer></script>
+    <script src="app-picking-parser.js?v=20260722-1" defer></script>
+  <script src="app.js?v=20260722-1" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -210,6 +210,7 @@
               <label>
                 Notiz
                 <textarea id="orderNote" rows="4" placeholder="Schäden, Fehlmengen, Besonderheiten"></textarea>
+                <span id="orderPackageA1Total" class="automatic-order-note" role="status" hidden></span>
               </label>
             </div>
           </div>

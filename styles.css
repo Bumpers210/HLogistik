@@ -688,6 +688,12 @@ textarea {
   padding: 10px;
 }
 
+.automatic-order-note {
+  color: var(--accent-dark);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
 input:focus,
 select:focus,
 textarea:focus {

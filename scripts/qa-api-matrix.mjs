@@ -77,6 +77,15 @@ async function run() {
       return order;
     }
   });
+  const packageArticles = await createPackageLookupFixtureArticles();
+  check(
+    "package lookup QA articles exist in the isolated SSI article database",
+    packageArticles.responses.every((response) => [200, 201].includes(response.status)),
+    JSON.stringify(packageArticles.responses)
+  );
+  const packageA1OrderNote = await desktopPackageA1OrderNoteFixture();
+  const packageA1PdfImport = await pickingA1ImportFixture("picking-pdf", packageArticles);
+  const packageA1XlsxImport = await pickingA1ImportFixture("picking-xlsx", packageArticles);
 
   const storagePdfHtml = printableHtml({
     orderNumber: `QA-PDF-ST-${suffix}`,
@@ -109,6 +118,7 @@ async function run() {
   const pickingPdfHtml = printableHtml({
     orderNumber: `QA-PDF-PK-${suffix}`,
     orderType: "picking",
+    orderNote: "Manuelle Auftragsnotiz",
     lines: [{
       warehouseOrder: "10",
       product: materialnummer,
@@ -118,7 +128,17 @@ async function run() {
       targetQty: "5",
       actualQty: "5",
       unit: "ST",
-      picked: true
+      picked: true,
+      positionNote: "Manuell",
+      autoPositionNotes: {
+        destination: "Ziel",
+        quantity: "Menge",
+        quantityCorrection: "Korrektur",
+        storagePallet: "Palette",
+        loadingSlip: "Ladeliste",
+        sourceBinSystem: "System",
+        package: "3A1"
+      }
     }, {
       lineType: "loading-slip",
       barcode: "QA-LS-PDF",
@@ -165,6 +185,42 @@ async function run() {
     })
   );
   check(
+    "picking A1 total stays structurally separate from manual order notes",
+    packageA1OrderNote.initialManual === "Eilige Lieferung" &&
+      packageA1OrderNote.initialAuto === "20 A1" &&
+      packageA1OrderNote.repeatedAuto === packageA1OrderNote.initialAuto &&
+      packageA1OrderNote.manualEndingA1 === "Historischer Hinweis 20 A1" &&
+      packageA1OrderNote.manualEndingA1Auto === "20 A1" &&
+      packageA1OrderNote.storageUnchanged === "Einlagerhinweis - 4 A1",
+    JSON.stringify(packageA1OrderNote)
+  );
+  check(
+    "picking order A1 sum updates after quantity and position changes without duplicates",
+    packageA1OrderNote.afterQuantityChange === "18 A1" &&
+      packageA1OrderNote.afterAdd === "20 A1" &&
+      packageA1OrderNote.afterRemove === "10 A1" &&
+      packageA1OrderNote.withoutA1 === "" &&
+      packageA1OrderNote.savedPayload?.orderNote === "Eilige Lieferung" &&
+      packageA1OrderNote.savedPayload?.autoOrderNotes?.packageA1 === "20 A1" &&
+      packageA1OrderNote.reopenedOrder?.orderNote === "Eilige Lieferung" &&
+      packageA1OrderNote.reopenedOrder?.autoOrderNotes?.packageA1 === "20 A1",
+    JSON.stringify(packageA1OrderNote)
+  );
+  check(
+    "picking PDF and XLSX imports use real article lookups for package notes",
+    packageA1PdfImport.result?.cancelled !== true &&
+      packageA1XlsxImport.result?.cancelled !== true &&
+      packageA1PdfImport.orderNote === "" &&
+      packageA1XlsxImport.orderNote === "" &&
+      packageA1PdfImport.autoOrderNote === "3 A1" &&
+      packageA1XlsxImport.autoOrderNote === packageA1PdfImport.autoOrderNote &&
+      JSON.stringify(packageA1PdfImport.packages) === JSON.stringify(["3A1", "4KRT", ""]) &&
+      JSON.stringify(packageA1XlsxImport.packages) === JSON.stringify(packageA1PdfImport.packages) &&
+      packageA1PdfImport.notes[0] === "Bitte pruefen - Sollmenge - 3A1" &&
+      packageA1XlsxImport.notes[0] === packageA1PdfImport.notes[0],
+    JSON.stringify({ pdf: packageA1PdfImport, xlsx: packageA1XlsxImport })
+  );
+  check(
     "storage PDF uses portrait A4 with exactly the six storage columns",
     storagePdfHtml.includes("@page { size: A4 portrait; margin: 10mm; }") &&
       JSON.stringify(storagePdfHeaders) === JSON.stringify(["Pos.", "Artikelnummer", "HU / LE", "Soll", "Ist", "Einlagerplatz"]),
@@ -188,6 +244,13 @@ async function run() {
       !pickingPdfHtml.includes("Ladeliste darf nicht") &&
       pickingPdfHtml.includes("Erledigt:</strong> 1/1") &&
       !pickingPdfHtml.includes("loading-slip"),
+    pickingPdfHtml
+  );
+  check(
+    "picking PDF includes the structured package note once and last",
+    pickingPdfHtml.includes("Manuell; Ziel; Menge; Korrektur; Palette; Ladeliste; System; 3A1") &&
+      pickingPdfHtml.split("3A1").length - 1 === 1 &&
+      pickingPdfHtml.includes("Manuelle Auftragsnotiz - 3 A1"),
     pickingPdfHtml
   );
   check(
@@ -846,6 +909,17 @@ async function run() {
     JSON.stringify(loadingSlipThreePositions)
   );
 
+  const loadingSlipPartialLoss = await loadingSlipPartialLossFixture();
+  check(
+    "picking loading slip warns when raw positions are only partially parsed",
+    loadingSlipPartialLoss.rawPositionCount === 3 &&
+      loadingSlipPartialLoss.loadingLines.length === 2 &&
+      loadingSlipPartialLoss.audit.expected === 3 &&
+      loadingSlipPartialLoss.audit.attached === 2 &&
+      loadingSlipPartialLoss.audit.issues.some((issue) => issue.includes("3 Rohposition(en)") && issue.includes("nur 2")),
+    JSON.stringify(loadingSlipPartialLoss)
+  );
+
   check(
     "picking loading-slip imports leave position notes empty",
     loadingSlipXlsxAttachment.loadingLines.concat(loadingSlipThreePositions.loadingLines).every((line) =>
@@ -929,7 +1003,8 @@ async function run() {
       splitMultiplierWithoutHuImport.parsed.lines[0]?.fromHandlingUnit === "" &&
       splitMultiplierWithoutHuImport.parsed.lines[0]?.fromBin === "022-H4-R8" &&
       splitMultiplierWithoutHuImport.parsed.lines[0]?.product === "1014678" &&
-      splitMultiplierWithoutHuImport.parsed.lines[0]?.targetQty === "2x33000" &&
+      splitMultiplierWithoutHuImport.parsed.lines[0]?.targetQty === "66000" &&
+      splitMultiplierWithoutHuImport.parsed.lines[0]?.quantitySourceText === "2x33000" &&
       splitMultiplierWithoutHuImport.parsed.lines[0]?.unit === "Stk" &&
       splitMultiplierWithoutHuImport.parsed.lines[0]?.toBin === "4000-KAPPE" &&
       splitMultiplierWithoutHuImport.issues.length === 0,
@@ -945,8 +1020,10 @@ async function run() {
       adjacentSameProductImport.parsed.lines.every((line) => line.product === "1014678") &&
       adjacentSameProductImport.parsed.lines[0]?.fromBin === "022-H4-R7" &&
       adjacentSameProductImport.parsed.lines[1]?.fromBin === "022-H4-R8" &&
-      adjacentSameProductImport.parsed.lines[0]?.targetQty === "6x33000" &&
-      adjacentSameProductImport.parsed.lines[1]?.targetQty === "2x33000" &&
+      adjacentSameProductImport.parsed.lines[0]?.targetQty === "198000" &&
+      adjacentSameProductImport.parsed.lines[1]?.targetQty === "66000" &&
+      adjacentSameProductImport.parsed.lines[0]?.quantitySourceText === "6x33000" &&
+      adjacentSameProductImport.parsed.lines[1]?.quantitySourceText === "2x33000" &&
       adjacentSameProductImport.diagnostics.expectedTableRows === 2 &&
       adjacentSameProductImport.diagnostics.importedPositionCount === 2 &&
       adjacentSameProductImport.diagnostics.unimportedCandidateLines.length === 0 &&
@@ -1180,8 +1257,8 @@ async function run() {
     "picking import trims OCR words after Insel destination bin without changing quantity",
     inselDestinationImport.parsed.lines.length === 1 &&
       inselDestinationImport.parsed.lines[0]?.toBin === "9020-INSEL-ROTH" &&
-      inselDestinationImport.parsed.lines[0]?.targetQty === "1.000" &&
-      inselDestinationImport.parsed.lines[0]?.actualQty === "1.000",
+      inselDestinationImport.parsed.lines[0]?.targetQty === "1000" &&
+      inselDestinationImport.parsed.lines[0]?.actualQty === "1000",
     JSON.stringify(inselDestinationImport)
   );
 
@@ -1636,8 +1713,8 @@ async function run() {
       countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
       tabletHtmlSource.includes("tablet-legacy.js?v=20260721-2") &&
       tabletHtmlSource.includes("tablet.css?v=20260720-1") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.192\"") &&
-      manifestSource.includes("\"version\": \"1.5.192\"") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.193\"") &&
+      manifestSource.includes("\"version\": \"1.5.193\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&
@@ -2081,6 +2158,37 @@ async function run() {
     body: JSON.stringify({ materialnummer, lagerplatz: "002-H1-SQA", leNummer: hu, mengeStueck: 1 })
   });
   check("storage mutation without role rejected", roleGuard.status === 403, `${roleGuard.status} ${JSON.stringify(roleGuard.body)}`);
+
+  const packageA1PersistencePayload = {
+    ...packageA1OrderNote.savedPayload,
+    id: "",
+    orderNumber: `QA-A1-PERSIST-${suffix}`,
+    customerName: "QA A1 Persistenz",
+    customerGroupKey: "QA A1 PERSISTENZ"
+  };
+  const packageA1PersistenceCreate = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify(packageA1PersistencePayload)
+  });
+  const packageA1PersistenceId = packageA1PersistenceCreate.body.order?.id;
+  const packageA1PersistenceReload = packageA1PersistenceId
+    ? await request(`/api/orders/${encodeURIComponent(packageA1PersistenceId)}`)
+    : { status: 0, body: null };
+  check(
+    "manual order note and structured A1 package sources persist after saving and reopening",
+    packageA1PersistenceCreate.status === 200 &&
+      packageA1PersistenceReload.status === 200 &&
+      packageA1PersistenceReload.body?.orderNote === "Eilige Lieferung" &&
+      packageA1PersistenceReload.body?.lines?.[0]?.autoPositionNotes?.package === "3A1",
+    JSON.stringify({ created: packageA1PersistenceCreate.body, reopened: packageA1PersistenceReload.body })
+  );
+  if (packageA1PersistenceId) {
+    await request(`/api/orders/${encodeURIComponent(packageA1PersistenceId)}`, {
+      method: "DELETE",
+      headers: ROLE_HEADERS
+    });
+  }
 
   const orderPayload = {
     orderNumber: `QA-${suffix}`,
@@ -3830,6 +3938,207 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function packageA1FixtureLines() {
+  return [
+    { id: "a1-3", product: "A1-3", targetQty: "3", actualQty: "3", autoPositionNotes: { package: "3A1" }, positionNote: "" },
+    { id: "a1-7", product: "A1-7", targetQty: "7", actualQty: "7", autoPositionNotes: { package: "7A1" }, positionNote: "" },
+    { id: "a1-10", product: "A1-10", targetQty: "10", actualQty: "10", autoPositionNotes: { package: "10A1" }, positionNote: "" },
+    { id: "mixed-package", product: "K2-4", targetQty: "4", actualQty: "4", autoPositionNotes: { package: "4K2" }, positionNote: "" },
+    { id: "visible-note", product: "VISIBLE", targetQty: "1", actualQty: "1", autoPositionNotes: {}, positionNote: "999A1" },
+    { id: "loading-slip", lineType: "loading-slip", product: "LADELISTE", targetQty: "50", actualQty: "50", autoPositionNotes: { package: "50A1" }, positionNote: "" }
+  ];
+}
+
+async function desktopPackageA1OrderNoteFixture() {
+  const context = await createAppParserContext();
+  context.HLogistikUi = {
+    currentWarehouse: () => "SSI",
+    normalizeWarehouse: (value, fallback = "") => String(value || fallback).trim().toUpperCase(),
+    apiJson: async () => ({ mengeProKarton: 1, gebindeArt: "A1" })
+  };
+  context.HLogistikQuantityFormat = { parse: (value) => Number(value) };
+
+  Object.assign(context.__state, {
+    id: "",
+    orderNumber: "QA-A1-FIXTURE",
+    customerName: "QA A1",
+    customerGroupKey: "QA A1",
+    orderDate: "2026-07-21",
+    orderTime: "10:00",
+    orderType: "picking",
+    orderWarehouse: "SSI",
+    orderNote: "Eilige Lieferung",
+    lines: packageA1FixtureLines()
+  });
+  context.__saveState();
+  const initialManual = context.__state.orderNote;
+  const initialAuto = context.__state.autoOrderNotes?.packageA1 || "";
+  context.__saveState();
+  const repeatedAuto = context.__state.autoOrderNotes?.packageA1 || "";
+
+  const changedQuantityLine = context.__state.lines.find((line) => line.id === "a1-7");
+  changedQuantityLine.targetQty = "5";
+  context.__setServerOnline(true);
+  await context.__refreshPackageNoteForLine(changedQuantityLine);
+  context.__saveState();
+  const afterQuantityChange = context.__state.autoOrderNotes?.packageA1 || "";
+  context.__state.lines.push({ id: "a1-added", autoPositionNotes: { package: "2A1" }, positionNote: "" });
+  context.__saveState();
+  const afterAdd = context.__state.autoOrderNotes?.packageA1 || "";
+  context.__state.lines = context.__state.lines.filter((line) => line.id !== "a1-10");
+  context.__saveState();
+  const afterRemove = context.__state.autoOrderNotes?.packageA1 || "";
+  context.__state.lines.forEach((line) => {
+    if (line.lineType !== "loading-slip") line.autoPositionNotes.package = "4K2";
+  });
+  context.__saveState();
+  const withoutA1 = context.__state.autoOrderNotes?.packageA1 || "";
+
+  const manualEndingA1Order = {
+    orderType: "picking",
+    orderNote: "Historischer Hinweis 20 A1",
+    lines: packageA1FixtureLines()
+  };
+  context.__recalculatePickingA1OrderNote(manualEndingA1Order);
+  const storageOrder = {
+    orderType: "storage",
+    orderNote: "Einlagerhinweis - 4 A1",
+    lines: [{ autoPositionNotes: { package: "4A1" } }]
+  };
+  context.__recalculatePickingA1OrderNote(storageOrder);
+
+  context.__state.orderNote = "Eilige Lieferung";
+  context.__state.lines = packageA1FixtureLines();
+  const savedPayload = cloneJson(context.__currentOrderPayload({ touch: false }));
+  const reopenedOrder = cloneJson(savedPayload);
+  delete reopenedOrder.autoOrderNotes;
+  context.__recalculatePickingA1OrderNote(reopenedOrder);
+
+  return {
+    initialManual,
+    initialAuto,
+    repeatedAuto,
+    afterQuantityChange,
+    afterAdd,
+    afterRemove,
+    withoutA1,
+    manualEndingA1: manualEndingA1Order.orderNote,
+    manualEndingA1Auto: manualEndingA1Order.autoOrderNotes?.packageA1 || "",
+    storageUnchanged: storageOrder.orderNote,
+    savedPayload,
+    reopenedOrder
+  };
+}
+
+async function createPackageLookupFixtureArticles() {
+  const materials = {
+    a1: `QA-PKG-A1-${suffix}`,
+    krt: `QA-PKG-KRT-${suffix}`
+  };
+  const definitions = [
+    {
+      materialnummer: materials.a1,
+      materialbezeichnung: "QA Gebinde A1",
+      gebindeArt: "A1",
+      mengeProKarton: 938,
+      mengeProPalette: 0
+    },
+    {
+      materialnummer: materials.krt,
+      materialbezeichnung: "QA Gebinde KRT",
+      gebindeArt: "KRT",
+      mengeProKarton: 19000,
+      mengeProPalette: 0
+    }
+  ];
+  const responses = [];
+  for (const definition of definitions) {
+    responses.push(await request("/api/articles?warehouse=SSI", {
+      method: "POST",
+      headers: ROLE_HEADERS,
+      body: JSON.stringify(definition)
+    }));
+  }
+  return { ...materials, responses };
+}
+
+async function pickingA1ImportFixture(documentType, materials) {
+  const context = await createAppParserContext();
+  context.__currentUser.name = "QA Buero";
+  context.__currentUser.group = "buero";
+  context.HLogistikUi = {
+    currentWarehouse: () => "SSI",
+    normalizeWarehouse: (value, fallback = "") => String(value || fallback).trim().toUpperCase(),
+    apiJson: async (url, options = {}) => {
+      const response = await request(url, {
+        ...options,
+        headers: { ...ROLE_HEADERS, ...(options.headers || {}) }
+      });
+      if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
+      return response.body;
+    }
+  };
+  context.__setServerOnline(true);
+  context.findDuplicateOrderForImport = async () => null;
+  context.validatePickingImport = () => [];
+  context.detectPickingWarehouse = async () => ({ warehouse: "SSI", type: "ok", shortMessage: "" });
+  context.applyWarehouseHint = () => {
+    context.__state.orderWarehouse = "SSI";
+  };
+  context.isSiSystemFromBinFillContext = () => false;
+  context.applyStorageBinsFromArticleStock = async (lines) => ({ lines, applied: 0 });
+  context.buildPickingImportLineDiagnostics = () => ({ source: documentType });
+  context.logPickingImportLineDiagnostics = () => {};
+  context.applyDefaultDestinationCustomer = () => false;
+  context.applyCustomerOrderNumberRule = () => {};
+  context.render = () => {};
+
+  const result = await context.__importText(
+    `QA ${documentType}`,
+    documentType === "picking-xlsx" ? "qa-a1.xlsx" : "qa-a1.pdf",
+    {
+      orderNumber: `QA-A1-${documentType}`,
+      customerName: "QA A1",
+      lines: [
+        {
+          id: `${documentType}-a1`,
+          product: materials.a1,
+          targetQty: "1.877",
+          actualQty: "1.877",
+          positionNote: "Bitte pruefen",
+          autoPositionNotes: { quantity: "Sollmenge" }
+        },
+        {
+          id: `${documentType}-krt`,
+          product: materials.krt,
+          targetQty: "76.000",
+          actualQty: "76.000",
+          positionNote: "",
+          autoPositionNotes: {}
+        },
+        {
+          id: `${documentType}-loading-slip`,
+          lineType: "loading-slip",
+          product: materials.a1,
+          targetQty: "1.877",
+          actualQty: "1.877",
+          positionNote: "",
+          autoPositionNotes: {}
+        }
+      ]
+    },
+    { source: documentType === "picking-xlsx" ? "xlsx" : "pdf", documentType }
+  );
+  return {
+    result,
+    orderNote: context.__state.orderNote,
+    autoOrderNote: context.__state.autoOrderNotes?.packageA1 || "",
+    lines: cloneJson(context.__state.lines),
+    packages: context.__state.lines.map((line) => line.autoPositionNotes?.package || ""),
+    notes: context.__state.lines.map((line) => context.__combinedPositionNote(line))
+  };
+}
+
 function positionNoteDedupeScenario(api) {
   const autoNotes = { quantity: "com", package: "3A1" };
   const inputLine = { positionNote: "", autoPositionNotes: cloneJson(autoNotes) };
@@ -4080,6 +4389,8 @@ async function createAppParserContext() {
   vm.runInContext(manualStorageRulesCode, context, { filename: "shared/manual-storage-rules.js" });
   const importLineHelpersCode = await readFile(new URL("../app-import-line-helpers.js", import.meta.url), "utf8");
   vm.runInContext(importLineHelpersCode, context, { filename: "app-import-line-helpers.js" });
+  const quantityFormatCode = await readFile(new URL("../shared/quantity-format.js", import.meta.url), "utf8");
+  vm.runInContext(quantityFormatCode, context, { filename: "shared/quantity-format.js" });
   const importDiagnosticsCode = await readFile(new URL("../app-import-diagnostics.js", import.meta.url), "utf8");
   vm.runInContext(importDiagnosticsCode, context, { filename: "app-import-diagnostics.js" });
   const stateHelpersCode = await readFile(new URL("../app-state-helpers.js", import.meta.url), "utf8");
@@ -4094,6 +4405,7 @@ async function createAppParserContext() {
   vm.runInContext("globalThis.__hasOpenFromBinReviewWarnings = hasOpenFromBinReviewWarnings; globalThis.__releaseCurrentOrder = releaseCurrentOrder; globalThis.__auditLoadingSlipImport = auditLoadingSlipImport;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__annotateDestinationExceptions = annotateDestinationExceptions; globalThis.__createLine = createLine;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__combinedPositionNote = combinedPositionNote; globalThis.__manualPositionNoteFromInput = manualPositionNoteFromInput; globalThis.__normalizePositionNotesForSave = normalizePositionNotesForSave;", context, { filename: "app.js" });
+  vm.runInContext("globalThis.__packageA1Total = packageA1Total; globalThis.__recalculatePickingA1OrderNote = recalculatePickingA1OrderNote; globalThis.__refreshPackageNoteForLine = refreshPackageNoteForLine; globalThis.__saveState = saveState; globalThis.__currentOrderPayload = currentOrderPayload;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__parseLoadingSlipLines = parseLoadingSlipLines; globalThis.__appendAllLoadingSlipLines = appendAllLoadingSlipLines; globalThis.__canAppendLoadingSlipToXlsxDraft = canAppendLoadingSlipToXlsxDraft; globalThis.__renderSaveOrderButton = renderSaveOrderButton;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__createManualStorageLine = createManualStorageLine; globalThis.__readManualStorageBin = readManualStorageBin;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__storageLineCompletionErrors = storageLineCompletionErrors; globalThis.__storageOrderExportMessage = storageOrderExportMessage;", context, { filename: "app.js" });
@@ -4495,6 +4807,24 @@ async function loadingSlipThreePositionsFixture() {
     loadingLines,
     audit,
     reappendedLineCount: reappended.lines.length
+  };
+}
+
+async function loadingSlipPartialLossFixture() {
+  if (!appParserContext) appParserContext = await createAppParserContext();
+  const sourceLines = [
+    "Ladeschein",
+    "Nummer: V260009625/0",
+    "1066526 Sicherheitsstreifen fuer 7015-01 10 Stueck",
+    "1072595 PET-Etui Menge unlesbar",
+    "1072598 PET-Etui fuer 7015-01 6 Stueck"
+  ];
+  const loadingLines = appParserContext.__parseLoadingSlipLines(sourceLines);
+  const audit = appParserContext.__auditLoadingSlipImport(sourceLines, loadingLines);
+  return {
+    rawPositionCount: sourceLines.filter((line) => /^\d{6,8}\b/.test(line)).length,
+    loadingLines,
+    audit
   };
 }
 

@@ -181,7 +181,7 @@ export function printableHtml(order, fileName) {
       <p><strong>Stellplätze:</strong> ${escapeHtml(order.storageSpaces || "0")}</p>
       <p><strong>Korrigiert:</strong> ${changed}</p>
     </section>
-    <section class="note"><strong>Notiz:</strong> ${escapeHtml(order.orderNote || "-")}</section>
+    <section class="note"><strong>Notiz:</strong> ${escapeHtml(combinedOrderNote(order) || "-")}</section>
     <table class="${isStorage ? "storage-table" : ""}">
       <thead>
         ${isStorage ? `
@@ -237,9 +237,36 @@ function combinedPositionNote(line) {
   return combineUniqueNoteParts([line?.positionNote, ...autoPositionNoteValues(line)]);
 }
 
+function combinedOrderNote(order) {
+  const packageA1 = packageA1Total(order?.lines);
+  return combineUniqueNoteParts([
+    order?.orderNote,
+    packageA1 > 0 ? `${packageA1} A1` : "",
+  ]).replaceAll("; ", " - ");
+}
+
+function packageA1Total(lines) {
+  return (Array.isArray(lines) ? lines : []).reduce((total, line) => {
+    if (!line || line.lineType === "loading-slip") return total;
+    const match = String(line.autoPositionNotes?.package || "").trim().match(/^([1-9]\d*)A1$/);
+    if (!match) return total;
+    const count = Number(match[1]);
+    const nextTotal = total + count;
+    return Number.isSafeInteger(count) && Number.isSafeInteger(nextTotal) ? nextTotal : total;
+  }, 0);
+}
+
 function autoPositionNoteValues(line) {
   const notes = line?.autoPositionNotes && typeof line.autoPositionNotes === "object" ? line.autoPositionNotes : {};
-  return [notes.destination, notes.quantity, notes.storagePallet, notes.loadingSlip]
+  return [
+    notes.destination,
+    notes.quantity,
+    notes.quantityCorrection,
+    notes.storagePallet,
+    notes.loadingSlip,
+    notes.sourceBinSystem,
+    notes.package,
+  ]
     .map((value) => String(value || "").trim())
     .filter(Boolean);
 }
