@@ -1812,6 +1812,9 @@ async function run() {
   const offlineStoreWebSql = await offlineStoreWebSqlFallbackFixture(offlineStoreSource);
   const offlineStoreFalsePositive = await offlineStoreFalsePositiveIndexedDbFixture(offlineStoreSource);
   const offlineStoreNotFoundStages = await offlineStoreNotFoundStagesFixture(offlineStoreSource);
+  const offlineOrderCache = await offlineOrderCacheFixture(offlineStoreSource);
+  const tabletModernPdfCache = await tabletPdfCacheFinalizeFixture("tablet.js");
+  const tabletLegacyPdfCache = await tabletPdfCacheFinalizeFixture("tablet-legacy.js");
   const tabletLegacyServiceWorkerSource = extractFunctionSource(tabletLegacySource, "function registerTabletServiceWorker(");
   const tabletModernServiceWorkerSource = extractFunctionSource(tabletModernSource, "function registerTabletServiceWorker(");
   const duplicateImportSource = extractFunctionSource(appSource, "async function findDuplicateOrderForImport(");
@@ -1842,13 +1845,13 @@ async function run() {
       countSourceOccurrences(tabletLegacyServiceWorkerSource, "registration.update()") === 1 &&
       countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
       tabletHtmlSource.includes("tablet-transfer.js?v=20260724-4") &&
-      tabletHtmlSource.includes("offline-store.js?v=20260724-2") &&
-      tabletHtmlSource.includes("tablet-legacy.js?v=20260724-4") &&
+      tabletHtmlSource.includes("offline-store.js?v=20260724-3") &&
+      tabletHtmlSource.includes("tablet-legacy.js?v=20260724-5") &&
       tabletHtmlSource.includes("tablet.css?v=20260724-3") &&
       indexHtmlSource.includes("app-import-line-helpers.js?v=20260724-2") &&
       indexHtmlSource.includes("app.js?v=20260724-3") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.209\"") &&
-      manifestSource.includes("\"version\": \"1.5.209\"") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.210\"") &&
+      manifestSource.includes("\"version\": \"1.5.210\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&
@@ -1936,7 +1939,7 @@ async function run() {
       tabletLegacySource.includes("exportingPdf") &&
       tabletLegacySource.includes("reloadCurrentOrderFromServer") &&
       tabletLegacySource.includes("var exportOrderId = currentOrder.id") &&
-      tabletLegacySource.indexOf("return exportCurrentOrderPdfOnServer();") < tabletLegacySource.indexOf("removeQueuedOrderMutations(exportOrderId)") &&
+      tabletLegacySource.indexOf("return exportCurrentOrderPdfOnServer();") < tabletLegacySource.indexOf("return finalizeSuccessfulPdfExport(exportOrderId, result)") &&
       tabletModernSource.includes("allowOffline: false") &&
       tabletModernSource.includes("CONNECTION_CHECK_MS") &&
       tabletModernSource.includes("startConnectionMonitor") &&
@@ -1945,20 +1948,20 @@ async function run() {
       tabletModernSource.includes("exportingPdf") &&
       tabletModernSource.includes("reloadCurrentOrderFromServer") &&
       tabletModernSource.includes("const exportOrderId = currentOrder.id") &&
-      tabletModernSource.indexOf("/export-pdf") < tabletModernSource.indexOf("removeQueuedOrderMutations(exportOrderId)"),
+      tabletModernSource.indexOf("/export-pdf") < tabletModernSource.indexOf("await finalizeSuccessfulPdfExport(exportOrderId, exportResult)"),
     JSON.stringify({
       legacyAllowOfflineFalse: tabletLegacySource.includes("allowOffline: false"),
       legacyConnectionMonitor: tabletLegacySource.includes("CONNECTION_CHECK_MS") && tabletLegacySource.includes("startConnectionMonitor"),
       legacyReconnectBeforePdfError: tabletLegacySource.includes("ensureServerOnlineForPdf"),
       legacyLocalSaveBeforeQueue: tabletLegacySource.indexOf("return saveOrderToOfflineStore(currentOrder)") < tabletLegacySource.indexOf("OfflineStore.enqueue(\"PUT\""),
       legacyExportGuard: tabletLegacySource.includes("exportingPdf"),
-      legacyCleanupAfterExport: tabletLegacySource.indexOf("return exportCurrentOrderPdfOnServer();") < tabletLegacySource.indexOf("removeQueuedOrderMutations(exportOrderId)"),
+      legacyCleanupAfterExport: tabletLegacySource.indexOf("return exportCurrentOrderPdfOnServer();") < tabletLegacySource.indexOf("return finalizeSuccessfulPdfExport(exportOrderId, result)"),
       modernAllowOfflineFalse: tabletModernSource.includes("allowOffline: false"),
       modernConnectionMonitor: tabletModernSource.includes("CONNECTION_CHECK_MS") && tabletModernSource.includes("startConnectionMonitor"),
       modernReconnectBeforePdfError: tabletModernSource.includes("ensureServerOnlineForPdf"),
       modernLocalSaveBeforeQueue: tabletModernSource.indexOf("await saveOrderToOfflineStore(currentOrder)") < tabletModernSource.indexOf("await OfflineStore.enqueue(\"PUT\""),
       modernExportGuard: tabletModernSource.includes("exportingPdf"),
-      modernCleanupAfterExport: tabletModernSource.indexOf("/export-pdf") < tabletModernSource.indexOf("removeQueuedOrderMutations(exportOrderId)")
+      modernCleanupAfterExport: tabletModernSource.indexOf("/export-pdf") < tabletModernSource.indexOf("await finalizeSuccessfulPdfExport(exportOrderId, exportResult)")
     })
   );
   check(
@@ -2457,6 +2460,45 @@ async function run() {
       !offlineStoreSource.includes('createObjectStore("transfer-movements"') &&
       !offlineStoreSource.includes('createObjectStore("transfer-history"'),
     "dedicated transfer draft and minimal snapshot persistence"
+  );
+  check(
+    "successful tablet PDF completion clears the offline order cache in modern and legacy code",
+    [tabletModernPdfCache, tabletLegacyPdfCache].every((result) =>
+      result.success === true &&
+      result.exportedAt === "2026-07-24T12:00:00.000Z" &&
+      result.removedIds.join(",") === "qa-pdf-cache-success" &&
+      result.failedPdfRejected === true &&
+      result.removedAfterFailure === 1
+    ) &&
+      tabletModernSource.includes("await finalizeSuccessfulPdfExport(exportOrderId, exportResult)") &&
+      tabletLegacySource.includes("return finalizeSuccessfulPdfExport(exportOrderId, result)"),
+    JSON.stringify({ modern: tabletModernPdfCache, legacy: tabletLegacyPdfCache })
+  );
+  check(
+    "completed order disappears atomically from orders, summaries and groups and stays absent after reload",
+    offlineOrderCache.atomicTransaction === true &&
+    offlineOrderCache.immediate.orders.includes("qa-cache-completed") === false &&
+      offlineOrderCache.immediate.summaries.includes("qa-cache-completed") === false &&
+      offlineOrderCache.immediate.groupOrderIds.includes("qa-cache-completed") === false &&
+      offlineOrderCache.completedQueueBeforeRemoval === 1 &&
+      offlineOrderCache.completedQueueAfterRemoval === 0 &&
+      offlineOrderCache.afterReload.orders.includes("qa-cache-completed") === false &&
+      offlineOrderCache.afterReload.summaries.includes("qa-cache-completed") === false &&
+      offlineOrderCache.afterReload.groupOrderIds.includes("qa-cache-completed") === false,
+    JSON.stringify(offlineOrderCache)
+  );
+  check(
+    "next online order reconciliation removes stale closed caches but preserves unsynced local drafts",
+    offlineOrderCache.reconcileTransaction === true &&
+      offlineOrderCache.afterReconcile.orders.includes("qa-cache-stale") === false &&
+      offlineOrderCache.afterReconcile.summaries.includes("qa-cache-stale") === false &&
+      offlineOrderCache.afterReconcile.groupOrderIds.includes("qa-cache-stale") === false &&
+      offlineOrderCache.afterReconcile.orders.includes("qa-cache-pending") === true &&
+      offlineOrderCache.afterReconcile.summaries.includes("qa-cache-pending") === true &&
+      offlineOrderCache.pendingQueueBefore === offlineOrderCache.pendingQueueAfter &&
+      tabletModernSource.includes("OfflineStore.reconcileOpenOrders(orders)") &&
+      tabletLegacySource.includes("OfflineStore.reconcileOpenOrders(orders || [])"),
+    JSON.stringify(offlineOrderCache)
   );
   check(
     "iOS 9 compatible offline store creates schema, persists a snapshot across reload and searches without modern IndexedDB helpers",
@@ -5797,6 +5839,220 @@ async function offlineStoreIos9Fixture(offlineStoreSource) {
   };
 }
 
+async function offlineOrderCacheFixture(offlineStoreSource) {
+  const indexedDb = createLegacyIndexedDbFixture();
+  const context = createOfflineStoreIos9Context(offlineStoreSource, indexedDb);
+  const completedId = "qa-cache-completed";
+  const openAId = "qa-cache-open-a";
+  const openBId = "qa-cache-open-b";
+  const groupId = "qa-cache-group";
+  const completed = {
+    id: completedId,
+    orderNumber: "QA-CACHE-COMPLETED",
+    orderType: "picking",
+    acceptedBy: "QA Tablet",
+    completedAt: "2026-07-24T11:00:00.000Z",
+    exportedAt: "",
+    tabletGroupId: groupId,
+    tabletGroupOrderIds: [completedId, openAId, openBId],
+    lines: [{ id: "qa-cache-completed-line", picked: true }]
+  };
+  const openA = {
+    id: openAId,
+    orderNumber: "QA-CACHE-OPEN-A",
+    orderType: "picking",
+    acceptedBy: "QA Tablet",
+    completedAt: "",
+    exportedAt: "",
+    tabletGroupId: groupId,
+    tabletGroupOrderIds: [completedId, openAId, openBId],
+    lines: [{ id: "qa-cache-open-a-line", picked: false }]
+  };
+  const openB = {
+    id: openBId,
+    orderNumber: "QA-CACHE-OPEN-B",
+    orderType: "picking",
+    acceptedBy: "QA Tablet",
+    completedAt: "",
+    exportedAt: "",
+    tabletGroupId: groupId,
+    tabletGroupOrderIds: [completedId, openAId, openBId],
+    lines: [{ id: "qa-cache-open-b-line", picked: false }]
+  };
+  const summary = (order) => ({
+    id: order.id,
+    orderNumber: order.orderNumber,
+    orderType: order.orderType,
+    acceptedBy: order.acceptedBy,
+    completedAt: order.completedAt,
+    exportedAt: order.exportedAt,
+    tabletGroupId: order.tabletGroupId,
+    tabletGroupOrderIds: order.tabletGroupOrderIds?.slice() || [],
+    manualStorageDraft: order.manualStorageDraft === true,
+    localDraft: order.localDraft === true
+  });
+
+  for (const order of [completed, openA, openB]) await context.OfflineStore.saveOrder(order);
+  await context.OfflineStore.saveOrderSummaries([completed, openA, openB].map(summary));
+  await context.OfflineStore.saveOrderGroup({
+    groupId,
+    orderIds: [completedId, openAId, openBId],
+    orderType: "picking",
+    acceptedBy: "QA Tablet"
+  });
+  await context.OfflineStore.enqueue(
+    "PUT",
+    `/api/orders/${encodeURIComponent(completedId)}`,
+    JSON.stringify({ order: completed }),
+    `PUT:/api/orders/${completedId}`
+  );
+  const completedQueueBeforeRemoval = (await context.OfflineStore.getPending()).length;
+  await context.OfflineStore.removeOrderCache(completedId);
+  const completedQueueAfterRemoval = (await context.OfflineStore.getPending()).length;
+  const immediate = await readOfflineOrderCacheState(context);
+
+  vm.runInContext(offlineStoreSource, context, { filename: "offline-store-order-cache-reload.js" });
+  const afterReload = await readOfflineOrderCacheState(context);
+
+  const staleId = "qa-cache-stale";
+  const pendingId = "qa-cache-pending";
+  const stale = {
+    id: staleId,
+    orderNumber: "QA-CACHE-STALE",
+    orderType: "picking",
+    acceptedBy: "QA Tablet",
+    completedAt: "2026-07-24T11:30:00.000Z",
+    exportedAt: "",
+    lines: [{ id: "qa-cache-stale-line", picked: true }]
+  };
+  const pending = {
+    id: pendingId,
+    orderNumber: "QA-CACHE-PENDING",
+    orderType: "storage",
+    acceptedBy: "QA Tablet",
+    completedAt: "",
+    exportedAt: "",
+    localDraft: true,
+    lines: [{ id: "qa-cache-pending-line", picked: false }]
+  };
+  await context.OfflineStore.saveOrder(stale);
+  await context.OfflineStore.saveOrder(pending);
+  const currentSummaries = await context.OfflineStore.loadOrderSummaries();
+  await context.OfflineStore.saveOrderSummaries(currentSummaries.concat([summary(stale), summary(pending)]));
+  await context.OfflineStore.saveOrderGroup({
+    groupId: "qa-cache-stale-group",
+    orderIds: [staleId, openAId, openBId],
+    orderType: "picking",
+    acceptedBy: "QA Tablet"
+  });
+  await context.OfflineStore.enqueue(
+    "PUT",
+    `/api/orders/${encodeURIComponent(pendingId)}`,
+    JSON.stringify({ order: pending }),
+    `PUT:/api/orders/${pendingId}`
+  );
+  const pendingQueueBefore = (await context.OfflineStore.getPending()).length;
+  const reconciliation = await context.OfflineStore.reconcileOpenOrders([summary(openA), summary(openB)]);
+  await drainFixturePromises(20);
+  const pendingQueueAfter = (await context.OfflineStore.getPending()).length;
+  const afterReconcile = await readOfflineOrderCacheState(context);
+
+  return {
+    immediate,
+    afterReload,
+    afterReconcile,
+    completedQueueBeforeRemoval,
+    completedQueueAfterRemoval,
+    pendingQueueBefore,
+    pendingQueueAfter,
+    reconciliation,
+    atomicTransaction: indexedDb.stats.transactionStoreSets.some((entry) =>
+      entry.mode === "readwrite" &&
+      entry.names.join(",") === "orders,order-summaries,order-groups,sync-queue"
+    ),
+    reconcileTransaction: indexedDb.stats.transactionStoreSets.some((entry) =>
+      entry.mode === "readwrite" &&
+      entry.names.join(",") === "orders,order-summaries,order-groups"
+    )
+  };
+}
+
+async function readOfflineOrderCacheState(context) {
+  const [orders, summaries, groups] = await Promise.all([
+    context.OfflineStore.loadOrders(),
+    context.OfflineStore.loadOrderSummaries(),
+    context.OfflineStore.loadOrderGroups()
+  ]);
+  return {
+    orders: orders.map((order) => String(order.id || "")).sort(),
+    summaries: summaries.map((order) => String(order.id || "")).sort(),
+    groupOrderIds: groups.flatMap((group) => Array.isArray(group.orderIds) ? group.orderIds.map(String) : []).sort()
+  };
+}
+
+async function tabletPdfCacheFinalizeFixture(fileName) {
+  const context = await createTabletValidationContext(fileName);
+  const removedIds = [];
+  const dequeuedIds = [];
+  let pending = [{
+    queueId: 91,
+    method: "PUT",
+    url: "/api/orders/qa-pdf-cache-success",
+    body: JSON.stringify({ order: { id: "qa-pdf-cache-success" } })
+  }];
+  context.OfflineStore = {
+    getPending() {
+      return Promise.resolve(pending.slice());
+    },
+    dequeue(queueId) {
+      dequeuedIds.push(queueId);
+      pending = pending.filter((entry) => entry.queueId !== queueId);
+      return Promise.resolve();
+    },
+    removeOrderCache(orderId) {
+      removedIds.push(String(orderId || ""));
+      return Promise.resolve();
+    }
+  };
+  context.__setTabletOrder({
+    id: "qa-pdf-cache-success",
+    orderType: "picking",
+    acceptedBy: "QA Tablet",
+    completedAt: "2026-07-24T11:59:00.000Z",
+    exportedAt: "",
+    lines: [{ id: "qa-pdf-cache-line", picked: true }]
+  });
+  const success = await context.__finalizeSuccessfulPdfExport("qa-pdf-cache-success", {
+    ok: true,
+    exportedAt: "2026-07-24T12:00:00.000Z"
+  });
+  const exportedAt = context.__getTabletOrder()?.exportedAt || "";
+  let failedPdfRejected = false;
+  context.__setTabletOrder({
+    id: "qa-pdf-cache-failure",
+    orderType: "picking",
+    acceptedBy: "QA Tablet",
+    completedAt: "2026-07-24T12:01:00.000Z",
+    exportedAt: "",
+    lines: [{ id: "qa-pdf-cache-failure-line", picked: true }]
+  });
+  try {
+    await context.__finalizeSuccessfulPdfExport("qa-pdf-cache-failure", { ok: false });
+  } catch {
+    failedPdfRejected = true;
+  }
+  return {
+    fileName,
+    success,
+    exportedAt,
+    removedIds,
+    dequeuedIds,
+    pendingAfterSuccess: pending.length,
+    failedPdfRejected,
+    removedAfterFailure: removedIds.length
+  };
+}
+
 function createLegacyIndexedDbFixture(options = {}) {
   const databaseState = { version: Number(options.initialVersion || 0), stores: new Map() };
   const stats = {
@@ -6655,7 +6911,8 @@ globalThis.__elements = elements;
 globalThis.__loadTabletOrder = loadOrder;
 globalThis.__rememberTabletOrders = rememberListedOrders;
 globalThis.__setTabletOnline = (value) => { serverOnline = Boolean(value); };
-globalThis.__renderTabletTakeOver = renderTakeOverButton;`, context, { filename: fileName });
+globalThis.__renderTabletTakeOver = renderTakeOverButton;
+globalThis.__finalizeSuccessfulPdfExport = finalizeSuccessfulPdfExport;`, context, { filename: fileName });
   return context;
 }
 

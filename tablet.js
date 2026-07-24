@@ -974,7 +974,10 @@ async function loadOrderList(options = {}) {
     renderAcceptedGroupInfo();
     if (statusMessage) setMessage(statusMessage, currentMissingOnServer && dirty);
     else if (!silent) setMessage(currentOrder ? "Auftragsliste aktualisiert." : `Bitte ${modeLabel()} waehlen.`, false);
-    try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders); } catch { /* non-critical */ }
+    try {
+      if (window.OfflineStore?.reconcileOpenOrders) await OfflineStore.reconcileOpenOrders(orders);
+      else if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders);
+    } catch { /* non-critical */ }
     cacheAcceptedOpenOrders(orders);
   } catch (error) {
     markServerOffline();
@@ -2233,6 +2236,10 @@ async function removeOrderFromOfflineStore(orderId) {
 
 async function removeOrderCacheEntry(orderId) {
   if (!window.OfflineStore || !orderId) return;
+  if (OfflineStore.removeOrderCache) {
+    await OfflineStore.removeOrderCache(orderId);
+    return;
+  }
   if (OfflineStore.deleteOrder) await OfflineStore.deleteOrder(orderId);
   if (OfflineStore.deleteOrderSummary) {
     await OfflineStore.deleteOrderSummary(orderId);
@@ -2542,10 +2549,7 @@ async function exportPdf() {
       method: "POST",
       body: JSON.stringify({ order: currentOrder, userName: currentUserName() }),
     });
-    if (!exportResult || exportResult.ok !== true) {
-      throw new Error("PDF-Export wurde vom Server nicht bestaetigt.");
-    }
-    await removeQueuedOrderMutations(exportOrderId);
+    await finalizeSuccessfulPdfExport(exportOrderId, exportResult);
     dirty = false;
     clearCurrentOrderCache();
     exportingPdf = false;
@@ -2557,6 +2561,26 @@ async function exportPdf() {
     exportingPdf = false;
     renderTakeOverButton();
   }
+}
+
+async function finalizeSuccessfulPdfExport(orderId, exportResult) {
+  if (!exportResult || exportResult.ok !== true) {
+    throw new Error("PDF-Export wurde vom Server nicht bestaetigt.");
+  }
+  if (currentOrder && String(currentOrder.id || "") === String(orderId || "")) {
+    currentOrder.exportedAt = exportResult.exportedAt || new Date().toISOString();
+  }
+  try {
+    if (window.OfflineStore?.removeOrderCache) {
+      await OfflineStore.removeOrderCache(orderId);
+    } else {
+      await removeQueuedOrderMutations(orderId);
+      await removeOrderCacheEntry(orderId);
+    }
+  } catch {
+    // Der Serverabschluss bleibt erfolgreich; der naechste Online-Abgleich bereinigt den Cache.
+  }
+  return true;
 }
 
 async function reloadCurrentOrderFromServer() {

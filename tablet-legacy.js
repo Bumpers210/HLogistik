@@ -575,7 +575,10 @@ function renderAcceptedGroupInfo(group) {
 
 function cacheOrderSummaries(orders) {
   if (!window.OfflineStore) return;
-  OfflineStore.saveOrderSummaries(orders || []).catch(function () {});
+  var cacheUpdate = OfflineStore.reconcileOpenOrders
+    ? OfflineStore.reconcileOpenOrders(orders || [])
+    : OfflineStore.saveOrderSummaries(orders || []);
+  cacheUpdate.catch(function () {});
 }
 
 function cacheAcceptedOpenOrders(orders) {
@@ -2343,6 +2346,7 @@ function removeOrderFromOfflineStore(orderId) {
 
 function removeOrderCacheEntry(orderId) {
   if (!window.OfflineStore || !orderId) return Promise.resolve();
+  if (OfflineStore.removeOrderCache) return OfflineStore.removeOrderCache(orderId);
   return (OfflineStore.deleteOrder ? OfflineStore.deleteOrder(orderId) : Promise.resolve())
     .then(function () {
       return OfflineStore.deleteOrderSummary ? OfflineStore.deleteOrderSummary(orderId) : OfflineStore.loadOrderSummaries().then(function (orders) {
@@ -2709,10 +2713,7 @@ function continuePdfExportAfterConnection() {
         return exportCurrentOrderPdfOnServer();
       })
       .then(function (result) {
-        if (!result || result.ok !== true) {
-          throw new Error("PDF-Export wurde vom Server nicht bestaetigt.");
-        }
-        return removeQueuedOrderMutations(exportOrderId);
+        return finalizeSuccessfulPdfExport(exportOrderId, result);
       })
       .then(function () {
         dirty = false;
@@ -2726,6 +2727,25 @@ function continuePdfExportAfterConnection() {
         setMessage("PDF-Export fehlgeschlagen: " + (error && error.message ? error.message : error), true);
       });
   });
+}
+
+function finalizeSuccessfulPdfExport(orderId, exportResult) {
+  if (!exportResult || exportResult.ok !== true) {
+    return Promise.reject(new Error("PDF-Export wurde vom Server nicht bestaetigt."));
+  }
+  if (currentOrder && String(currentOrder.id || "") === String(orderId || "")) {
+    currentOrder.exportedAt = exportResult.exportedAt || new Date().toISOString();
+  }
+  var cleanup = window.OfflineStore && OfflineStore.removeOrderCache
+    ? OfflineStore.removeOrderCache(orderId)
+    : removeQueuedOrderMutations(orderId).then(function () {
+      return removeOrderCacheEntry(orderId);
+    });
+  return cleanup
+    .catch(function () {
+      // Der Serverabschluss bleibt erfolgreich; der naechste Online-Abgleich bereinigt den Cache.
+    })
+    .then(function () { return true; });
 }
 
 function reloadCurrentOrderFromServer() {

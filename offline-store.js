@@ -1381,6 +1381,238 @@
     };
   }
 
+  function pruneOrderGroupFields(record, removedOrderId) {
+    if (!record || !Array.isArray(record.tabletGroupOrderIds)) return false;
+    var nextIds = record.tabletGroupOrderIds.filter(function (id) {
+      return String(id || "") !== removedOrderId;
+    });
+    if (nextIds.length === record.tabletGroupOrderIds.length) return false;
+    if (nextIds.length > 1) {
+      record.tabletGroupOrderIds = nextIds;
+    } else {
+      delete record.tabletGroupId;
+      delete record.tabletGroupOrderIds;
+      delete record.tabletGroupCustomerName;
+      delete record.tabletGroupCustomerGroupKey;
+    }
+    return true;
+  }
+
+  function pruneOrderRecordStore(store, removedOrderId) {
+    var request = store.openCursor();
+    request.onsuccess = function () {
+      var cursor = request.result;
+      if (!cursor) return;
+      var record = cursor.value || {};
+      if (String(record.id || "") === removedOrderId) {
+        cursor.delete();
+      } else if (pruneOrderGroupFields(record, removedOrderId)) {
+        store.put(record);
+      }
+      cursor.continue();
+    };
+  }
+
+  function removeOrderCache(orderId) {
+    var id = String(orderId || "");
+    if (!id) return Promise.resolve();
+    return openDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx;
+        var settled = false;
+        function fail(error) {
+          if (settled) return;
+          settled = true;
+          reject(error || new Error("Offline-Auftragscache konnte nicht bereinigt werden"));
+        }
+        try {
+          tx = db.transaction(["orders", "order-summaries", "order-groups", "sync-queue"], "readwrite");
+          pruneOrderRecordStore(tx.objectStore("orders"), id);
+          pruneOrderRecordStore(tx.objectStore("order-summaries"), id);
+          var groupStore = tx.objectStore("order-groups");
+          var groupRequest = groupStore.openCursor();
+          groupRequest.onsuccess = function () {
+            var cursor = groupRequest.result;
+            if (!cursor) return;
+            var group = cursor.value || {};
+            var orderIds = Array.isArray(group.orderIds) ? group.orderIds : [];
+            var nextIds = orderIds.filter(function (groupOrderId) {
+              return String(groupOrderId || "") !== id;
+            });
+            if (nextIds.length !== orderIds.length) {
+              if (nextIds.length > 1) {
+                group.orderIds = nextIds;
+                group.updatedAt = new Date().toISOString();
+                groupStore.put(group);
+              } else {
+                cursor.delete();
+              }
+            }
+            cursor.continue();
+          };
+          var queueStore = tx.objectStore("sync-queue");
+          var queueRequest = queueStore.openCursor();
+          queueRequest.onsuccess = function () {
+            var cursor = queueRequest.result;
+            if (!cursor) return;
+            if (queuedOrderId(cursor.value) === id) cursor.delete();
+            cursor.continue();
+          };
+          tx.oncomplete = function () {
+            if (settled) return;
+            settled = true;
+            resolve();
+          };
+          tx.onerror = function () { fail(tx.error); };
+          tx.onabort = function () { fail(tx.error); };
+        } catch (error) {
+          fail(error);
+        }
+      });
+    });
+  }
+
+  function queuedOrderId(item) {
+    var url = String(item && item.url || "");
+    var match = url.match(/^\/api\/orders\/([^/?]+)/);
+    if (match) {
+      try {
+        return decodeURIComponent(match[1]);
+      } catch (error) {
+        void error;
+        return match[1];
+      }
+    }
+    if (url !== "/api/orders") return "";
+    try {
+      var payload = item && item.body ? JSON.parse(item.body) : {};
+      return String(payload && payload.order && payload.order.id || "");
+    } catch (error) {
+      void error;
+      return "";
+    }
+  }
+
+  function applyOpenOrderSummary(record, summary) {
+    if (!record || !summary) return record;
+    [
+      "orderNumber", "customerName", "customerGroupKey", "orderDate", "orderTime",
+      "createdBy", "lastEditedBy", "activeUser", "activeUserAt", "acceptedBy",
+      "acceptedAt", "completedBy", "completedAt", "orderWarehouse", "exportedAt",
+      "orderType", "createdAt", "updatedAt"
+    ].forEach(function (field) {
+      if (Object.prototype.hasOwnProperty.call(summary, field)) record[field] = summary[field];
+    });
+    return record;
+  }
+
+  function reconcileOpenOrders(openOrders) {
+    var summaries = Array.isArray(openOrders) ? openOrders.filter(function (order) {
+      return order && order.id;
+    }) : [];
+    var openById = Object.create(null);
+    summaries.forEach(function (order) {
+      openById[String(order.id)] = order;
+    });
+
+    return openDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx;
+        var settled = false;
+        var removedOrders = 0;
+        var removedSummaries = 0;
+        var changedGroups = 0;
+
+        function fail(error) {
+          if (settled) return;
+          settled = true;
+          reject(error || new Error("Offline-Auftragscache konnte nicht abgeglichen werden"));
+        }
+
+        function keepRecord(record) {
+          var id = String(record && record.id || "");
+          return Boolean(id && (
+            openById[id] ||
+            record.localDraft === true ||
+            record.manualStorageDraft === true
+          ));
+        }
+
+        function pruneRecords(store, isSummary) {
+          var request = store.openCursor();
+          request.onsuccess = function () {
+            var cursor = request.result;
+            if (!cursor) return;
+            var record = cursor.value || {};
+            var id = String(record.id || "");
+            if (!keepRecord(record)) {
+              cursor.delete();
+              if (isSummary) removedSummaries += 1;
+              else removedOrders += 1;
+            } else if (!isSummary && openById[id]) {
+              store.put(applyOpenOrderSummary(record, openById[id]));
+            }
+            cursor.continue();
+          };
+        }
+
+        function pruneGroups(store) {
+          var request = store.openCursor();
+          request.onsuccess = function () {
+            var cursor = request.result;
+            if (!cursor) return;
+            var group = cursor.value || {};
+            var orderIds = Array.isArray(group.orderIds) ? group.orderIds : [];
+            var nextIds = orderIds.filter(function (id) {
+              var key = String(id || "");
+              return Boolean(openById[key]);
+            });
+            if (nextIds.length !== orderIds.length) {
+              changedGroups += 1;
+              if (nextIds.length > 1) {
+                group.orderIds = nextIds;
+                group.updatedAt = new Date().toISOString();
+                store.put(group);
+              } else {
+                cursor.delete();
+              }
+            }
+            cursor.continue();
+          };
+        }
+
+        function reconcileStores() {
+          var orderStore = tx.objectStore("orders");
+          var summaryStore = tx.objectStore("order-summaries");
+          var groupStore = tx.objectStore("order-groups");
+          summaries.forEach(function (summary) { summaryStore.put(summary); });
+          pruneRecords(orderStore, false);
+          pruneRecords(summaryStore, true);
+          pruneGroups(groupStore);
+        }
+
+        try {
+          tx = db.transaction(["orders", "order-summaries", "order-groups"], "readwrite");
+          reconcileStores();
+          tx.oncomplete = function () {
+            if (settled) return;
+            settled = true;
+            resolve({
+              openOrders: summaries.length,
+              removedOrders: removedOrders,
+              removedSummaries: removedSummaries,
+              changedGroups: changedGroups
+            });
+          };
+          tx.onerror = function () { fail(tx.error); };
+          tx.onabort = function () { fail(tx.error); };
+        } catch (error) {
+          fail(error);
+        }
+      });
+    });
+  }
+
   window.OfflineStore = {
     transferSnapshotApiVersion: TRANSFER_SNAPSHOT_API_VERSION,
     // ── Order list (summaries) ───────────────────────────────────────────────
@@ -1427,6 +1659,10 @@
         }));
       });
     },
+
+    removeOrderCache: removeOrderCache,
+
+    reconcileOpenOrders: reconcileOpenOrders,
 
     // ── Accepted tablet order groups ─────────────────────────────────────────
 
