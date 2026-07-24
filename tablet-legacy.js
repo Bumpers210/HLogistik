@@ -109,6 +109,7 @@ function bindElements() {
     "euroPalletsInput",
     "storageSpacesInput",
     "orderNoteInput",
+    "orderPackageA1Total",
     "doneCount",
     "openCount",
     "changedCount",
@@ -882,12 +883,15 @@ function transferUserGroup() {
 }
 
 function tabletApiGroup() {
-  return currentMode === "transfer" ? transferUserGroup() : "tablet";
+  return currentMode === "transfer" && !currentOrderAcceptedByCurrentUser()
+    ? transferUserGroup()
+    : "tablet";
 }
 
 function setMode(mode) {
   var nextMode = mode === "transfer" ? "transfer" : mode === "storage" ? "storage" : "picking";
   if (nextMode === currentMode) return;
+  var preserveCurrentOrder = modeSwitchPreservesCurrentOrder(nextMode);
   if (nextMode === "transfer" && !canAccessTransfers(transferUserGroup())) {
     setMessage("Keine Berechtigung für Umlagerungen.", true);
     return;
@@ -898,12 +902,24 @@ function setMode(mode) {
   }
   if (currentMode === "transfer" && window.HLogistikTransfer && window.HLogistikTransfer.hasUnsavedChanges() &&
       !window.confirm("Es gibt einen noch nicht gespeicherten Umlagerungsentwurf. Bereich trotzdem wechseln?")) return;
-  if (dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
+  if (!preserveCurrentOrder && dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
   currentMode = nextMode;
   try {
     localStorage.setItem(MODE_KEY, currentMode);
   } catch (error) {
     void error;
+  }
+  if (preserveCurrentOrder) {
+    persistCurrentOrderCache();
+    if (currentMode === "transfer") {
+      updateModeUi();
+    } else {
+      ensureCurrentOrderInSelect();
+      renderCompletionFields();
+      renderOrder();
+      setMessage("Auftrag " + lockedOrderLabel() + " unveraendert fortgesetzt.", false);
+    }
+    return;
   }
   resetToStart("Bitte " + modeLabel() + " waehlen.");
   updateModeUi();
@@ -1114,9 +1130,16 @@ function currentOrderLocksSwitch(nextOrderId) {
 
 function currentOrderLocksModeSwitch(nextMode) {
   if (!currentOrder || !currentOrder.id || currentOrder.exportedAt) return false;
+  if (nextMode === "transfer") return false;
   if ((currentOrder.orderType || "picking") === nextMode) return false;
   var acceptedBy = String(currentOrder.acceptedBy || "").trim();
   return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+}
+
+function modeSwitchPreservesCurrentOrder(nextMode) {
+  if (!currentOrderAcceptedByCurrentUser()) return false;
+  var orderMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
+  return nextMode === "transfer" || (currentMode === "transfer" && nextMode === orderMode);
 }
 
 function keepCurrentOrderSelected() {
@@ -1357,6 +1380,7 @@ function addManualStorageLine() {
 function createManualStorageLine(lines, preset, options) {
   preset = preset || {};
   options = options || {};
+  var quantity = options.actualQty || "";
   return {
     id: createLineId(),
     orderType: "storage",
@@ -1369,8 +1393,8 @@ function createManualStorageLine(lines, preset, options) {
     fromBin: options.fromBin || "",
     product: preset.product || "",
     description: preset.description || "",
-    targetQty: "",
-    actualQty: options.actualQty || "",
+    targetQty: quantity,
+    actualQty: quantity,
     unit: preset.unit || "Stk",
     picked: false
   };
@@ -2440,6 +2464,38 @@ function renderCompletionFields() {
   elements.euroPalletsInput.value = currentOrder ? currentOrder.euroPallets || "" : "";
   elements.storageSpacesInput.value = currentOrder ? currentOrder.storageSpaces || "" : "";
   elements.orderNoteInput.value = currentOrder ? currentOrder.orderNote || "" : "";
+  renderAutomaticOrderNotes();
+}
+
+function packageA1Total(lines) {
+  return (Array.isArray(lines) ? lines : []).reduce(function (total, line) {
+    if (!line || line.lineType === "loading-slip") return total;
+    var match = String(line.autoPositionNotes && line.autoPositionNotes.package || "").trim().match(/^([1-9]\d*)A1$/);
+    if (!match) return total;
+    var count = Number(match[1]);
+    var nextTotal = total + count;
+    return isWholeNumber(count) && count <= 9007199254740991 && isWholeNumber(nextTotal) && nextTotal <= 9007199254740991
+      ? nextTotal
+      : total;
+  }, 0);
+}
+
+function recalculatePickingA1OrderNote(order) {
+  order = order || currentOrder;
+  if (!order || String(order.orderType || "picking") !== "picking") {
+    if (order) order.autoOrderNotes = {};
+    return;
+  }
+  var total = packageA1Total(order.lines);
+  order.autoOrderNotes = total > 0 ? { packageA1: total + " A1" } : {};
+}
+
+function renderAutomaticOrderNotes() {
+  if (!elements.orderPackageA1Total) return;
+  recalculatePickingA1OrderNote(currentOrder);
+  var packageA1 = String(currentOrder && currentOrder.autoOrderNotes && currentOrder.autoOrderNotes.packageA1 || "");
+  elements.orderPackageA1Total.innerHTML = packageA1 ? "Automatische Auftragsnotiz: " + packageA1 : "";
+  elements.orderPackageA1Total.hidden = !packageA1;
 }
 
 function updateCompletionFieldsFromInputs() {
@@ -2473,6 +2529,7 @@ function touchOrder() {
   currentOrder.activeUser = user;
   currentOrder.activeUserAt = now;
   applyCompletionFieldsToOrder();
+  recalculatePickingA1OrderNote(currentOrder);
   if (currentOrder.lines.length && allPicked()) {
     currentOrder.completedBy = currentOrder.completedBy || user;
     currentOrder.completedAt = currentOrder.completedAt || now;
@@ -2856,6 +2913,7 @@ function updateCounts() {
   elements.doneCount.innerHTML = done;
   elements.openCount.innerHTML = Math.max(lines.length - done, 0);
   elements.changedCount.innerHTML = changed;
+  renderAutomaticOrderNotes();
 }
 
 function allPicked() {
@@ -2986,12 +3044,16 @@ function normalizeOrderQuantitiesForSave(order) {
       var parsed = window.HLogistikQuantityFormat ? window.HLogistikQuantityFormat.parse(text) : Number(text);
       if (isFiniteNumber(parsed)) line[key] = String(parsed);
     });
+    if (line.manual === true && !String(line.targetQty == null ? "" : line.targetQty).trim() && String(line.actualQty == null ? "" : line.actualQty).trim()) {
+      line.targetQty = String(line.actualQty).trim();
+    }
     var source = String(line.quantitySourceText || "").trim();
     var effectiveQuantity = String(line.actualQty == null ? "" : line.actualQty).trim() || line.targetQty;
     if (source && window.HLogistikQuantityFormat && window.HLogistikQuantityFormat.parse(source) !== window.HLogistikQuantityFormat.parse(effectiveQuantity)) {
       line.quantitySourceText = "";
     }
   });
+  recalculatePickingA1OrderNote(order);
   return order;
 }
 

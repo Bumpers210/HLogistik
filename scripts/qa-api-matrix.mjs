@@ -1,7 +1,7 @@
 import { normalizeSsiStorageBin } from "../server/helpers.mjs";
 import ExcelJS from "exceljs";
 import { ORDER_EXCEL_HEADERS, ORDER_EXCEL_SHEET_NAME } from "../server/order-excel-export.mjs";
-import { printableHtml } from "../server/export.mjs";
+import { printableHtml, printableStorageTransferHtml } from "../server/export.mjs";
 import {
   detectSiStockColumns,
   previewSiStockImportRows,
@@ -97,6 +97,8 @@ async function run() {
     JSON.stringify(packageArticles.responses)
   );
   const packageA1OrderNote = await desktopPackageA1OrderNoteFixture();
+  const tabletModernPackageA1OrderNote = await tabletPackageA1OrderNoteFixture("tablet.js");
+  const tabletLegacyPackageA1OrderNote = await tabletPackageA1OrderNoteFixture("tablet-legacy.js");
   const packageA1PdfImport = await pickingA1ImportFixture("picking-pdf", packageArticles);
   const packageA1XlsxImport = await pickingA1ImportFixture("picking-xlsx", packageArticles);
 
@@ -164,6 +166,19 @@ async function run() {
     }]
   }, "QA-Kommissionierung.pdf");
   const storagePdfHeaders = tableHeadersFromHtml(storagePdfHtml);
+  const transferPdfHtml = printableStorageTransferHtml({
+    id: `qa-transfer-pdf-${suffix}`,
+    lager: "SSI",
+    materialnummer,
+    leNummer: `QA-HU-${suffix}`,
+    mengeStueck: 12,
+    quellLagerplatz: "002-H3-SQA",
+    zielLagerplatz: "002-H4-SQA",
+    referenz: "QA PDF Referenz",
+    gebuchtVon: "QA Tablet",
+    erstelltAm: "2026-07-24T08:30:00.000Z"
+  }, "QA-Umlagerung.pdf");
+  const transferPdfHeaders = tableHeadersFromHtml(transferPdfHtml);
 
   check("quantity parser reads German thousands", quantityFormat.parse("85.000") === 85000, String(quantityFormat.parse("85.000")));
   check(
@@ -246,6 +261,17 @@ async function run() {
     JSON.stringify(packageA1OrderNote)
   );
   check(
+    "modern and legacy tablets show the structural A1 order note without changing manual notes",
+    [tabletModernPackageA1OrderNote, tabletLegacyPackageA1OrderNote].every((result) =>
+      result.manualNote === "Manuell unveraendert" &&
+        result.initialAuto === "20 A1" &&
+        result.updatedAuto === "22 A1" &&
+        result.displayedText === "Automatische Auftragsnotiz: 20 A1" &&
+        result.hidden === false
+    ),
+    JSON.stringify({ modern: tabletModernPackageA1OrderNote, legacy: tabletLegacyPackageA1OrderNote })
+  );
+  check(
     "picking PDF and XLSX imports use real article lookups for package notes",
     packageA1PdfImport.result?.cancelled !== true &&
       packageA1XlsxImport.result?.cancelled !== true &&
@@ -289,7 +315,9 @@ async function run() {
     "picking PDF includes the structured package note once and last",
     pickingPdfHtml.includes("Manuell; Ziel; Menge; Korrektur; Palette; Ladeliste; System; 3A1") &&
       pickingPdfHtml.split("3A1").length - 1 === 1 &&
-      pickingPdfHtml.includes("Manuelle Auftragsnotiz - 3 A1"),
+      pickingPdfHtml.includes("<strong>Notiz:</strong> Manuelle Auftragsnotiz") &&
+      pickingPdfHtml.includes('<p class="automatic-order-note"><strong>Automatische Auftragsnotiz:</strong> 3 A1</p>') &&
+      !pickingPdfHtml.includes("Manuelle Auftragsnotiz - 3 A1"),
     pickingPdfHtml
   );
   check(
@@ -300,6 +328,23 @@ async function run() {
       storagePdfHtml.includes(".storage-table .manual-line:not(.changed-qty):not(.missing-line) td { background: #fff; }") &&
       storagePdfHtml.includes(".storage-table .changed-qty td:nth-child(5) { border: 2px solid #111; }"),
     storagePdfHtml
+  );
+  check(
+    "storage transfer PDF follows the storage portrait layout with exactly the requested booked-row columns",
+    transferPdfHtml.includes("@page { size: A4 portrait; margin: 10mm; }") &&
+      transferPdfHtml.includes("<h1>Umlagerungsbeleg</h1>") &&
+      JSON.stringify(transferPdfHeaders) === JSON.stringify([
+        "Artikelnummer",
+        "HU",
+        "Menge",
+        "Von-Stellplatz",
+        "Nach-Stellplatz"
+      ]) &&
+      transferPdfHtml.includes(materialnummer) &&
+      transferPdfHtml.includes("002-H3-SQA") &&
+      transferPdfHtml.includes("002-H4-SQA") &&
+      transferPdfHtml.split("<tbody>")[1]?.split("<tr>").length - 1 === 1,
+    transferPdfHtml
   );
   check("quantity parser reads decimal comma", quantityFormat.parse("4,5") === 4.5, String(quantityFormat.parse("4,5")));
   check(
@@ -780,6 +825,39 @@ async function run() {
     "tablet modern and legacy keep identical takeover status rules",
     JSON.stringify(tabletModernDetailLoading.statusRules) === JSON.stringify(tabletLegacyDetailLoading.statusRules),
     JSON.stringify({ modern: tabletModernDetailLoading.statusRules, legacy: tabletLegacyDetailLoading.statusRules })
+  );
+
+  const tabletActiveOrderTransferSwitches = await Promise.all(
+    ["tablet.js", "tablet-legacy.js"].flatMap((fileName) =>
+      ["picking", "storage"].map((orderType) => tabletActiveOrderTransferSwitchFixture(fileName, orderType))
+    )
+  );
+  check(
+    "active picking and storage orders survive the transfer tab round-trip in modern and legacy tablet",
+    tabletActiveOrderTransferSwitches.every((result) =>
+      result.transferMode === "transfer" &&
+      result.returnMode === result.orderType &&
+      result.orderAfterTransfer === result.orderBefore &&
+      result.orderAfterReturn === result.orderBefore &&
+      result.cachedOrder === result.orderBefore &&
+      result.cachedDirty === true &&
+      result.dirtyAfterTransfer === true &&
+      result.dirtyAfterReturn === true &&
+      result.cacheRemoveCalls === 0 &&
+      result.confirmCalls === 0 &&
+      result.orderListLoads === 0 &&
+      result.transferApiGroup === "tablet"
+    ),
+    JSON.stringify(tabletActiveOrderTransferSwitches)
+  );
+  check(
+    "other active-order mode guards remain unchanged after visiting the transfer tab",
+    tabletActiveOrderTransferSwitches.every((result) =>
+      result.blockedMode === result.orderType &&
+      result.orderAfterBlockedSwitch === result.orderBefore &&
+      /Erst Auftrag/.test(result.blockedMessage)
+    ),
+    JSON.stringify(tabletActiveOrderTransferSwitches)
   );
 
   const orderHintSameLine = await parsePickingTextFixture(pickingTextFixture("Bestellhinweis: Service Ecke"));
@@ -1718,6 +1796,9 @@ async function run() {
   const serviceWorkerSource = await readFile(new URL("../service-worker.js", import.meta.url), "utf8");
   const manifestSource = await readFile(new URL("../manifest.webmanifest", import.meta.url), "utf8");
   const exportSource = await readFile(new URL("../server/export.mjs", import.meta.url), "utf8");
+  const exportPdfSource = extractFunctionSource(exportSource, "export async function exportPdf(");
+  const renderPrintablePdfSource = extractFunctionSource(exportSource, "async function renderPrintablePdf(");
+  const publishPdfArtifactSource = extractFunctionSource(exportSource, "async function publishPdfArtifact(");
   const indexHtmlSource = await readFile(new URL("../index.html", import.meta.url), "utf8");
   const tabletHtmlSource = await readFile(new URL("../tablet.html", import.meta.url), "utf8");
   const articleHtmlSource = await readFile(new URL("../artikel.html", import.meta.url), "utf8");
@@ -1760,14 +1841,14 @@ async function run() {
       tabletModernServiceWorkerSource.includes("updateViaCache: \"none\"") &&
       countSourceOccurrences(tabletLegacyServiceWorkerSource, "registration.update()") === 1 &&
       countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
-      tabletHtmlSource.includes("tablet-transfer.js?v=20260724-1") &&
-      tabletHtmlSource.includes("offline-store.js?v=20260724-1") &&
-      tabletHtmlSource.includes("tablet-legacy.js?v=20260724-2") &&
-      tabletHtmlSource.includes("tablet.css?v=20260722-4") &&
+      tabletHtmlSource.includes("tablet-transfer.js?v=20260724-4") &&
+      tabletHtmlSource.includes("offline-store.js?v=20260724-2") &&
+      tabletHtmlSource.includes("tablet-legacy.js?v=20260724-4") &&
+      tabletHtmlSource.includes("tablet.css?v=20260724-3") &&
       indexHtmlSource.includes("app-import-line-helpers.js?v=20260724-2") &&
-      indexHtmlSource.includes("app.js?v=20260724-2") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.204\"") &&
-      manifestSource.includes("\"version\": \"1.5.204\"") &&
+      indexHtmlSource.includes("app.js?v=20260724-3") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.209\"") &&
+      manifestSource.includes("\"version\": \"1.5.209\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&
@@ -1882,23 +1963,26 @@ async function run() {
   );
   check(
     "server export verifies temporary PDF and XLSX before final artifacts",
-    exportSource.includes("assertExportArtifactCreated(tempPdfPath, \"PDF\")") &&
-      exportSource.includes("exportOrderExcel(order, tempXlsxPath") &&
-      exportSource.includes("assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")") &&
+    renderPrintablePdfSource.includes("assertExportArtifactCreated(tempPdfPath, \"PDF\")") &&
+      exportPdfSource.includes("exportOrderExcel(order, tempXlsxPath") &&
+      exportPdfSource.includes("assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")") &&
       exportSource.includes("stat(filePath)") &&
       exportSource.includes("wurde nicht erstellt") &&
-      exportSource.indexOf("await run(browser") < exportSource.indexOf("await assertExportArtifactCreated(tempPdfPath, \"PDF\")") &&
-      exportSource.indexOf("await assertExportArtifactCreated(tempPdfPath, \"PDF\")") < exportSource.indexOf("await exportOrderExcel(order, tempXlsxPath") &&
-      exportSource.indexOf("await assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")") < exportSource.indexOf("await copyFile(tempPdfPath, pdfPath)") &&
-      exportSource.indexOf("await copyFile(tempXlsxPath, xlsxPath)") < exportSource.indexOf("return {"),
+      renderPrintablePdfSource.indexOf("await run(browser") < renderPrintablePdfSource.indexOf("await assertExportArtifactCreated(tempPdfPath, \"PDF\")") &&
+      exportPdfSource.indexOf("await renderPrintablePdf(") < exportPdfSource.indexOf("await exportOrderExcel(order, tempXlsxPath") &&
+      exportPdfSource.indexOf("await assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")") < exportPdfSource.indexOf("await publishPdfArtifact(") &&
+      publishPdfArtifactSource.indexOf("await copyFile(tempPdfPath, pdfPath)") < publishPdfArtifactSource.indexOf("await assertExportArtifactCreated(pdfPath, \"PDF\")") &&
+      exportPdfSource.indexOf("await copyFile(tempXlsxPath, xlsxPath)") < exportPdfSource.indexOf("return {"),
     JSON.stringify({
-      checksTempPdf: exportSource.includes("assertExportArtifactCreated(tempPdfPath, \"PDF\")"),
-      checksTempXlsx: exportSource.includes("assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")"),
-      writesXlsx: exportSource.includes("exportOrderExcel(order, tempXlsxPath"),
+      checksTempPdf: renderPrintablePdfSource.includes("assertExportArtifactCreated(tempPdfPath, \"PDF\")"),
+      checksTempXlsx: exportPdfSource.includes("assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")"),
+      writesXlsx: exportPdfSource.includes("exportOrderExcel(order, tempXlsxPath"),
       checksFileStats: exportSource.includes("stat(filePath)"),
-      checksAfterBrowserRun: exportSource.indexOf("await run(browser") < exportSource.indexOf("await assertExportArtifactCreated(tempPdfPath, \"PDF\")"),
-      copiesAfterChecks: exportSource.indexOf("await assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")") < exportSource.indexOf("await copyFile(tempPdfPath, pdfPath)"),
-      checksBeforeReturn: exportSource.indexOf("await copyFile(tempXlsxPath, xlsxPath)") < exportSource.indexOf("return {")
+      checksAfterBrowserRun: renderPrintablePdfSource.indexOf("await run(browser") < renderPrintablePdfSource.indexOf("await assertExportArtifactCreated(tempPdfPath, \"PDF\")"),
+      rendersPdfBeforeXlsx: exportPdfSource.indexOf("await renderPrintablePdf(") < exportPdfSource.indexOf("await exportOrderExcel(order, tempXlsxPath"),
+      publishesAfterXlsxCheck: exportPdfSource.indexOf("await assertExportArtifactCreated(tempXlsxPath, \"Excel-Datei\")") < exportPdfSource.indexOf("await publishPdfArtifact("),
+      verifiesPublishedPdf: publishPdfArtifactSource.indexOf("await copyFile(tempPdfPath, pdfPath)") < publishPdfArtifactSource.indexOf("await assertExportArtifactCreated(pdfPath, \"PDF\")"),
+      checksBeforeReturn: exportPdfSource.indexOf("await copyFile(tempXlsxPath, xlsxPath)") < exportPdfSource.indexOf("return {")
     })
   );
   check(
@@ -1933,12 +2017,15 @@ async function run() {
       manualStorageSharedBin.desktop.invalid.ok === false &&
       manualStorageSharedBin.desktop.invalidKeepsExistingLines &&
       manualStorageSharedBin.desktop.lines.length === 5 &&
-      manualStorageSharedBin.desktop.lines.every((line) => line.product === "1051515" && line.fromBin === "002-H4-SH4C4" && line.actualQty === "5000" && line.targetQty === "" && line.manual === true) &&
+      manualStorageSharedBin.desktop.lines.every((line) => line.product === "1051515" && line.fromBin === "002-H4-SH4C4" && line.actualQty === "5000" && line.targetQty === "5000" && line.manual === true) &&
       new Set(manualStorageSharedBin.desktop.lines.map((line) => line.id)).size === 5 &&
       manualStorageSharedBin.desktop.lines.map((line) => line.warehouseOrder).join("|") === "M1|M2|M3|M4|M5" &&
       manualStorageSharedBin.desktop.emptyLine.fromBin === "" &&
       manualStorageSharedBin.desktop.articleBinIgnored &&
       manualStorageSharedBin.desktop.individualChangeIndependent &&
+      manualStorageSharedBin.desktop.initiallyUnchanged &&
+      manualStorageSharedBin.desktop.subsequentChangeDetected &&
+      manualStorageSharedBin.desktop.normalizedLegacyTargetQty === "17" &&
       appSource.includes("(map.targetQty.closest(\"label\") || map.targetQty).remove()") &&
       [manualStorageSharedBin.modern, manualStorageSharedBin.legacy].every((tablet) =>
         tablet.valid.value === "002-H4-SH4C4" &&
@@ -1947,11 +2034,14 @@ async function run() {
         tablet.si.value === "SI-A1" &&
         tablet.invalid.ok === false &&
         tablet.lines.length === 5 &&
-        tablet.lines.every((line) => line.product === "1051515" && line.fromBin === "002-H4-SH4C4" && line.actualQty === "5000" && line.targetQty === "" && line.manual === true) &&
+        tablet.lines.every((line) => line.product === "1051515" && line.fromBin === "002-H4-SH4C4" && line.actualQty === "5000" && line.targetQty === "5000" && line.manual === true) &&
         tablet.emptyLine.fromBin === "" &&
         tablet.articleBinIgnored &&
         tablet.individualChangeIndependent &&
-        tablet.queuePayloadHasAllBins
+        tablet.queuePayloadHasAllBins &&
+        tablet.initiallyUnchanged &&
+        tablet.subsequentChangeDetected &&
+        tablet.normalizedLegacyTargetQty === "17"
       ) &&
       JSON.stringify(manualStorageSharedBin.modern.lines.map((line) => ({ product: line.product, fromBin: line.fromBin, targetQty: line.targetQty, actualQty: line.actualQty, manual: line.manual }))) === JSON.stringify(manualStorageSharedBin.legacy.lines.map((line) => ({ product: line.product, fromBin: line.fromBin, targetQty: line.targetQty, actualQty: line.actualQty, manual: line.manual }))),
     JSON.stringify(manualStorageSharedBin)
@@ -2237,6 +2327,7 @@ async function run() {
   });
   const transferLocationsBefore = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}`);
   const transferLocationsLimited = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}&limit=1`);
+  const transferLocationsSecondPage = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}&offset=1&limit=1`);
   const transferSource = Array.isArray(transferLocationsBefore.body)
     ? transferLocationsBefore.body.find((row) => row.lagerplatz === "002-H3-SQA" && row.leNummer === transferHu)
     : null;
@@ -2283,6 +2374,10 @@ async function run() {
   const transferTargetAfter = Array.isArray(transferLocationsAfter.body)
     ? transferLocationsAfter.body.find((row) => row.lagerplatz === "002-H1-SAB1" && row.leNummer === transferHu)
     : null;
+  const transferPdfUrl = String(transferBooking.body?.pdf?.url || "");
+  const transferPdfDownload = transferPdfUrl
+    ? await request(new URL(transferPdfUrl).pathname)
+    : { status: 0, body: "" };
   check(
     "atomic transfer moves one complete stock row and preserves quantity and pallets",
     transferArticle.status === 200 &&
@@ -2301,10 +2396,27 @@ async function run() {
     JSON.stringify({ before: transferLocationsBefore.body, booking: transferBooking.body, after: transferLocationsAfter.body })
   );
   check(
+    "successful transfer automatically creates one reusable storage-style PDF artifact",
+    transferBooking.body?.pdf?.file?.startsWith("Umlagerung-SSI-") &&
+      transferBooking.body?.pdf?.file?.endsWith(".pdf") &&
+      transferBooking.body?.pdf?.path &&
+      await pathExists(transferBooking.body.pdf.path) &&
+      transferPdfUrl.includes("/exports/") &&
+      transferPdfDownload.status === 200 &&
+      String(transferPdfDownload.body || "").startsWith("%PDF"),
+    JSON.stringify({ pdf: transferBooking.body?.pdf, downloadStatus: transferPdfDownload.status })
+  );
+  check(
     "storage location API limits transfer search payloads without changing the unrestricted caller",
     transferLocationsBefore.status === 200 && transferLocationsBefore.body.length === 2 &&
-      transferLocationsLimited.status === 200 && transferLocationsLimited.body.length === 1,
-    JSON.stringify({ unrestricted: transferLocationsBefore.body, limited: transferLocationsLimited.body })
+      transferLocationsLimited.status === 200 && transferLocationsLimited.body.length === 1 &&
+      transferLocationsSecondPage.status === 200 && transferLocationsSecondPage.body.length === 1 &&
+      transferLocationsSecondPage.body[0]?.id !== transferLocationsLimited.body[0]?.id,
+    JSON.stringify({
+      unrestricted: transferLocationsBefore.body,
+      firstPage: transferLocationsLimited.body,
+      secondPage: transferLocationsSecondPage.body
+    })
   );
   check(
     "tablet transfer workspace exposes scan, complete-row booking and history controls through one controller",
@@ -2313,6 +2425,8 @@ async function run() {
       tabletHtmlSource.includes('id="transferSourceCameraButton"') &&
       tabletHtmlSource.includes('id="transferTargetCameraButton"') &&
       tabletHtmlSource.includes('id="transferBookButton"') &&
+      tabletHtmlSource.includes('id="transferPdfDownloadLink"') &&
+      tabletHtmlSource.includes('id="transferPdfPrintLink"') &&
       tabletHtmlSource.includes('id="transferDraftList"') &&
       tabletHtmlSource.includes('id="transferHistoryTableBody"') &&
       tabletTransferSource.includes("window.BarcodeDetector") &&
@@ -2323,6 +2437,8 @@ async function run() {
       tabletTransferSource.includes('transferSourceSearchInput.addEventListener("keydown", handleSourceScannerEnter)') &&
       tabletTransferSource.includes('transferTargetBinInput.addEventListener("keydown", preventTargetScannerSubmit)') &&
       tabletTransferSource.includes("currentDraftId = transferId") &&
+      tabletTransferSource.includes("renderTransferPdfActions(result.pdf)") &&
+      tabletTransferSource.includes('setAttribute("download", fileName)') &&
       !tabletTransferSource.includes("OfflineStore.enqueue"),
     "integrated tablet transfer UI and online-only booking markers"
   );
@@ -2349,10 +2465,16 @@ async function run() {
       offlineStoreIos9.usedWebkitKeyRange === true &&
       offlineStoreIos9.domStringListContainsAvailable === false &&
       offlineStoreIos9.objectStoreGetAllAvailable === false &&
-      offlineStoreIos9.snapshotApiVersion === 5 &&
+      offlineStoreIos9.snapshotApiVersion === 6 &&
       offlineStoreIos9.metadataBeforeReload?.rowCount === 30 &&
       offlineStoreIos9.metadataAfterReload?.rowCount === 30 &&
-      offlineStoreIos9.articleMatches === 25 &&
+      offlineStoreIos9.beforeReloadMatches === 20 &&
+      offlineStoreIos9.beforeReloadHasMore === true &&
+      offlineStoreIos9.secondPageBeforeReloadMatches === 10 &&
+      offlineStoreIos9.articleMatches === 20 &&
+      offlineStoreIos9.articleHasMore === true &&
+      offlineStoreIos9.secondPageAfterReloadMatches === 10 &&
+      offlineStoreIos9.secondPageAfterReloadHasMore === false &&
       offlineStoreIos9.barcodeMatches === 1 &&
       offlineStoreIos9.binMatches === 1 &&
       offlineStoreIos9.draftCount === 1 &&
@@ -2374,16 +2496,21 @@ async function run() {
     JSON.stringify({ initial: offlineStoreWebSql.initialDiagnostic, reloaded: offlineStoreWebSql.reloadedDiagnostic })
   );
   check(
-    "WebSQL fallback writes and reloads an atomic snapshot and searches article barcode bin and handling unit with a 25-row cap",
+    "WebSQL fallback writes and reloads an atomic snapshot and pages every article match without a total result cap",
     offlineStoreWebSql.metadataAfterReload?.capturedAt === "2026-07-22T15:00:00.000Z" &&
       offlineStoreWebSql.metadataAfterReload?.rowCount === 60 &&
       offlineStoreWebSql.metadataAfterReload?.storageBackend === "WebSQL" &&
-      offlineStoreWebSql.articleMatches === 25 &&
+      offlineStoreWebSql.articleMatches === 20 &&
+      offlineStoreWebSql.articleFirstHasMore === true &&
+      offlineStoreWebSql.articleSecondPageMatches === 20 &&
+      offlineStoreWebSql.articleSecondHasMore === true &&
+      offlineStoreWebSql.articleThirdPageMatches === 20 &&
+      offlineStoreWebSql.articleThirdHasMore === false &&
       offlineStoreWebSql.barcodeMatches === 1 &&
       offlineStoreWebSql.binMatches === 1 &&
       offlineStoreWebSql.handlingUnitMatches === 1 &&
       offlineStoreWebSql.storedRowCount === 60 &&
-      offlineStoreWebSql.maxRowsReturned <= 25,
+      offlineStoreWebSql.maxRowsReturned <= 21,
     JSON.stringify(offlineStoreWebSql)
   );
   check(
@@ -2510,17 +2637,27 @@ async function run() {
     "concrete snapshot storage error codes without LocalStorage fallback"
   );
   check(
-    "iPad transfer persists a complete minimal warehouse snapshot and searches it offline with a 25-row UI limit",
-    tabletTransferOffline.snapshotRowCount === 40 &&
+    "iPad transfer persists every positive warehouse row and pages online and offline searches without a total result cap",
+    tabletTransferOffline.snapshotRowCount === 65 &&
       tabletTransferOffline.snapshotWarehouse === "SSI" &&
-      tabletTransferOffline.snapshotStatus.includes("Snapshot SSI") &&
-      tabletTransferOffline.snapshotStatus.includes("40") &&
-      tabletTransferOffline.snapshotStatus.includes("Speicher: WebSQL") &&
-      tabletTransferOffline.snapshotStatus.includes("IDB_PROBE_WRITE_START_FAILED") &&
+      tabletTransferOffline.snapshotStatus === "65 positive Bestandszeilen" &&
       tabletTransferOffline.paginatedSnapshotRequests >= 1 &&
-      tabletTransferOffline.onlineRowsVisible === 25 &&
-      tabletTransferOffline.sourceRequestLimited === true &&
-      tabletTransferOffline.offlineArticleRowsVisible === 25 &&
+      tabletTransferOffline.onlineRowsVisible === 20 &&
+      tabletTransferOffline.onlineFirstPageHasMore === true &&
+      tabletTransferOffline.onlineSecondPageRowsVisible === 20 &&
+      tabletTransferOffline.onlineSecondPageRange === "21–40 Treffer" &&
+      tabletTransferOffline.sourceRequestPaged === true &&
+      tabletTransferOffline.offlineArticleRowsVisible === 20 &&
+      tabletTransferOffline.offlineFirstPageHasMore === true &&
+      tabletTransferOffline.offlineSecondPageRowsVisible === 20 &&
+      tabletTransferOffline.offlineSecondPageRange === "21–40 Treffer" &&
+      tabletTransferOffline.offlineSecondPageFirstId === "qa-source-21" &&
+      tabletTransferOffline.offlineThirdPageRowsVisible === 20 &&
+      tabletTransferOffline.offlineThirdPageRange === "41–60 Treffer" &&
+      tabletTransferOffline.offlineLastPageRowsVisible === 5 &&
+      tabletTransferOffline.offlineLastPageRange === "61–65 Treffer" &&
+      tabletTransferOffline.offlineLastPageHasMore === false &&
+      tabletTransferOffline.offlinePreviousPageRange === "41–60 Treffer" &&
       tabletTransferOffline.offlineBarcodeRowsVisible === 1 &&
       tabletTransferOffline.offlineBinRowsVisible === 1 &&
       tabletTransferOffline.offlineSearchDisabled === false &&
@@ -2533,6 +2670,25 @@ async function run() {
     JSON.stringify(tabletTransferOffline)
   );
   check(
+    "successful snapshot status is minimal in modern and legacy tablet while loading and errors retain diagnostics",
+    tabletTransferOffline.successfulSnapshotStatus === "65 positive Bestandszeilen" &&
+      tabletTransferOffline.loadingSnapshotStatus.includes("Snapshot SSI wird vollständig und atomar aktualisiert") &&
+      tabletTransferOffline.loadingSnapshotStatus.includes("Speicher: WebSQL") &&
+      tabletTransferOffline.loadingSnapshotStatus.includes("IDB_PROBE_WRITE_START_FAILED") &&
+      tabletTransferOffline.interruptedSnapshotDiagnostic.includes("WEBSQL_SNAPSHOT_PAGE_WRITE_FAILED") &&
+      tabletTransferOffline.interruptedSnapshotDiagnostic.includes("Speicher: WebSQL") &&
+      !/(Snapshot SSI|Stand |Speicher:|WebSQL|IndexedDB|Generation|2026-)/.test(tabletTransferOffline.successfulSnapshotStatus) &&
+      tabletModernSource.includes("initializeTransferController()") &&
+      tabletLegacySource.includes("initializeTransferController()") &&
+      tabletModernSource.includes("window.HLogistikTransfer.initialize({") &&
+      tabletLegacySource.includes("window.HLogistikTransfer.initialize({"),
+    JSON.stringify({
+      success: tabletTransferOffline.successfulSnapshotStatus,
+      loading: tabletTransferOffline.loadingSnapshotStatus,
+      error: tabletTransferOffline.interruptedSnapshotDiagnostic
+    })
+  );
+  check(
     "interrupted transfer snapshot refresh preserves the prior completed generation",
       tabletTransferOffline.interruptedSnapshotPreserved === true &&
       tabletTransferOffline.interruptedSnapshotDiagnostic.includes("WEBSQL_SNAPSHOT_PAGE_WRITE_FAILED") &&
@@ -2541,7 +2697,13 @@ async function run() {
       offlineStoreSource.includes('db.transaction(["transfer-stock-rows", "transfer-stock-snapshots"], "readwrite")') &&
       offlineStoreSource.includes('tx.objectStore("transfer-stock-snapshots").put(metadata)') &&
       offlineStoreSource.includes('snapshotKeyRange(metadata.generation)') &&
-      offlineStoreSource.includes("Math.min(Math.max(Number(limit) || 25, 1), 25)") &&
+      offlineStoreSource.includes("transferSnapshotSearchPage(options)") &&
+      offlineStoreSource.includes("LIMIT ? OFFSET ?") &&
+      tabletTransferSource.includes("SOURCE_PAGE_SIZE = 20") &&
+      !tabletTransferSource.includes("SOURCE_RESULT_LIMIT") &&
+      tabletHtmlSource.includes('id="transferSourcePreviousButton"') &&
+      tabletHtmlSource.includes('id="transferSourceNextButton"') &&
+      /\.tablet-transfer-source-panel,\s*\.tablet-transfer-editor-panel\s*\{\s*flex:\s*1 1 100%;\s*\}/.test(tabletCssSource) &&
       tabletTransferSource.includes("beginTransferStockSnapshotUpdate") &&
       tabletTransferSource.includes("appendTransferStockSnapshotPage") &&
       tabletTransferSource.includes("completeTransferStockSnapshotUpdate") &&
@@ -2558,6 +2720,20 @@ async function run() {
       tabletTransferOffline.conflictSelectionStale === true &&
       tabletTransferOffline.conflictStatus.includes("erneut") &&
       tabletTransferOffline.transferPostsAfterConflict === 0,
+    JSON.stringify(tabletTransferOffline)
+  );
+  check(
+    "modern and legacy tablet expose download and print links only after a successful transfer PDF response",
+    tabletTransferOffline.pdfActionsVisible === true &&
+      tabletTransferOffline.pdfDownloadHref === "http://qa.local/exports/Umlagerung-SSI-QA.pdf" &&
+      tabletTransferOffline.pdfPrintHref === tabletTransferOffline.pdfDownloadHref &&
+      tabletTransferOffline.pdfDownloadFile === "Umlagerung-SSI-QA.pdf" &&
+      tabletTransferOffline.pdfBookingStatus.includes("PDF wurde erstellt") &&
+      tabletTransferOffline.transferPostsAfterPdfBooking === 1 &&
+      tabletModernSource.includes("initializeTransferController()") &&
+      tabletLegacySource.includes("initializeTransferController()") &&
+      tabletModernSource.includes("window.HLogistikTransfer.initialize({") &&
+      tabletLegacySource.includes("window.HLogistikTransfer.initialize({"),
     JSON.stringify(tabletTransferOffline)
   );
   check(
@@ -2602,7 +2778,9 @@ async function run() {
     "transfer idempotency replays exactly once and rejects changed payload",
     transferReplay.status === 200 &&
       transferReplay.body?.replayed === true &&
+      transferReplay.body?.pdf?.file === transferBooking.body?.pdf?.file &&
       transferConflict.status === 409 &&
+      !transferConflict.body?.pdf &&
       Array.isArray(transferHistory.body) &&
       transferHistory.body.length === 1 &&
       transferHistory.body[0]?.id === transferId,
@@ -2799,6 +2977,7 @@ async function run() {
     packageA1PersistenceCreate.status === 200 &&
       packageA1PersistenceReload.status === 200 &&
       packageA1PersistenceReload.body?.orderNote === "Eilige Lieferung" &&
+      packageA1PersistenceReload.body?.autoOrderNotes?.packageA1 === "20 A1" &&
       packageA1PersistenceReload.body?.lines?.[0]?.autoPositionNotes?.package === "3A1",
     JSON.stringify({ created: packageA1PersistenceCreate.body, reopened: packageA1PersistenceReload.body })
   );
@@ -3409,7 +3588,9 @@ async function run() {
     exportSource.includes("const preserveTempArtifacts = options?.preserveTempArtifacts === true") &&
       exportSource.includes("if (!preserveTempArtifacts)") &&
       serverSource.includes("isQaPreserveArtifactsRequest(request, order)") &&
-      serverSource.includes("isLoopbackRequest(request) && isQaOrder(order)"),
+      serverSource.includes("isQaPreserveArtifactsRequest(request, result.transfer)") &&
+      serverSource.includes("isLoopbackRequest(request) && isQaExportSubject(subject)") &&
+      serverSource.includes("return isQaOrder(subject) || isQaTransfer(subject)"),
     "QA artifact preservation markers"
   );
 
@@ -3450,21 +3631,46 @@ async function run() {
     body: JSON.stringify(manualMultiOrderPayload)
   });
   check(
-    "manual storage creates multiple same-material lines without target quantity",
+    "manual storage creates multiple same-material lines with a quantity baseline",
     manualMultiCreate.status === 200 && manualMultiCreate.body.order?.total === 2,
     `${manualMultiCreate.status} ${JSON.stringify(manualMultiCreate.body)}`
   );
   const manualMultiOrderId = manualMultiCreate.body.order?.id;
   const manualMultiReload = await request(`/api/orders/${encodeURIComponent(manualMultiOrderId)}`);
+  const manualMultiInitialPdf = printableHtml(manualMultiReload.body, "QA-Manuell-Unveraendert.pdf");
   check(
-    "manual storage keeps per-line quantity, empty target quantity and distinct bins",
+    "manual storage persists its initial quantity as an unchanged baseline",
     manualMultiReload.status === 200 &&
       Array.isArray(manualMultiReload.body.lines) &&
       manualMultiReload.body.lines.length === 2 &&
-      manualMultiReload.body.lines.every((line) => String(line.targetQty || "") === "") &&
+      manualMultiReload.body.lines.map((line) => String(line.targetQty || "")).join(",") === "2,3" &&
       manualMultiReload.body.lines.map((line) => String(line.actualQty || "")).join(",") === "2,3" &&
-      new Set(manualMultiReload.body.lines.map((line) => String(line.fromBin || ""))).size === 2,
-    `${manualMultiReload.status} ${JSON.stringify(manualMultiReload.body.lines || manualMultiReload.body)}`
+      new Set(manualMultiReload.body.lines.map((line) => String(line.fromBin || ""))).size === 2 &&
+      manualMultiInitialPdf.split('class="manual-line"').length - 1 === 2 &&
+      !manualMultiInitialPdf.includes('class="manual-line changed-qty"') &&
+      manualMultiInitialPdf.includes("<strong>Korrigiert:</strong> 0"),
+    `${manualMultiReload.status} ${JSON.stringify(manualMultiReload.body.lines || manualMultiReload.body)} ${manualMultiInitialPdf}`
+  );
+  const manualMultiChangedOrder = cloneJson(manualMultiReload.body);
+  manualMultiChangedOrder.lines[0].actualQty = "5";
+  const manualMultiChangedSave = await request(`/api/orders/${encodeURIComponent(manualMultiOrderId)}`, {
+    method: "PUT",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ order: manualMultiChangedOrder, userName: `QA Verwaltung ${suffix}` })
+  });
+  const manualMultiChangedReload = await request(`/api/orders/${encodeURIComponent(manualMultiOrderId)}`);
+  const manualMultiChangedPdf = printableHtml(manualMultiChangedReload.body, "QA-Manuell-Geaendert.pdf");
+  check(
+    "manual storage marks only a real later quantity change after saving and reopening",
+    manualMultiChangedSave.status === 200 &&
+      manualMultiChangedReload.status === 200 &&
+      manualMultiChangedReload.body.lines?.[0]?.targetQty === "2" &&
+      manualMultiChangedReload.body.lines?.[0]?.actualQty === "5" &&
+      manualMultiChangedReload.body.lines?.[1]?.targetQty === "3" &&
+      manualMultiChangedReload.body.lines?.[1]?.actualQty === "3" &&
+      manualMultiChangedPdf.split('class="manual-line changed-qty"').length - 1 === 1 &&
+      manualMultiChangedPdf.includes("<strong>Korrigiert:</strong> 1"),
+    JSON.stringify({ saved: manualMultiChangedSave.body, reopened: manualMultiChangedReload.body })
   );
   const invalidManualStorageQuantityPayload = {
     ...manualMultiOrderPayload,
@@ -4353,6 +4559,118 @@ async function tabletDetailLoadingFixture(fileName) {
   };
 }
 
+async function tabletActiveOrderTransferSwitchFixture(fileName, orderType) {
+  const context = await createTabletValidationContext(fileName);
+  const storage = new Map([
+    ["kommissionier-app-user-group-v1", "tablet"]
+  ]);
+  let cacheRemoveCalls = 0;
+  let confirmCalls = 0;
+  context.localStorage = {
+    getItem(key) {
+      return storage.has(String(key)) ? storage.get(String(key)) : null;
+    },
+    setItem(key, value) {
+      storage.set(String(key), String(value));
+    },
+    removeItem(key) {
+      if (String(key) === "tablet-pick-current-order-v1") cacheRemoveCalls += 1;
+      storage.delete(String(key));
+    }
+  };
+  context.confirm = () => {
+    confirmCalls += 1;
+    return false;
+  };
+  context.HLogistikTransfer = {
+    activate() {},
+    deactivate() {},
+    hasUnsavedChanges() { return false; }
+  };
+  Object.assign(context.__elements, {
+    userNameInput: { value: "QA Tablet" },
+    orderSelect: { value: "" },
+    message: { innerHTML: "", className: "" }
+  });
+  vm.runInContext(`
+    globalThis.__qaModeUiCalls = 0;
+    globalThis.__qaOrderRenderCalls = 0;
+    globalThis.__qaOrderListLoads = 0;
+    updateModeUi = function () { globalThis.__qaModeUiCalls += 1; };
+    renderOrder = function () { globalThis.__qaOrderRenderCalls += 1; };
+    renderCompletionFields = function () {};
+    ensureCurrentOrderInSelect = function () {
+      elements.orderSelect.value = currentOrder && currentOrder.id ? currentOrder.id : "";
+    };
+    loadOrderList = function () { globalThis.__qaOrderListLoads += 1; };
+    globalThis.__qaSetMode = setMode;
+    globalThis.__qaGetMode = function () { return currentMode; };
+    globalThis.__qaSetDirty = function (value) { dirty = Boolean(value); };
+    globalThis.__qaGetDirty = function () { return dirty; };
+    globalThis.__qaTabletApiGroup = tabletApiGroup;
+  `, context, { filename: `${fileName}-active-order-transfer-switch.js` });
+
+  const order = {
+    id: `qa-${orderType}-transfer-switch`,
+    orderNumber: orderType === "storage" ? "QA-EIN-UMSCHALTUNG" : "QA-KOM-UMSCHALTUNG",
+    customerName: "QA Kunde",
+    orderType,
+    acceptedBy: "QA Tablet",
+    acceptedAt: "2026-07-24T08:00:00.000Z",
+    orderNote: "Manueller Auftragszustand bleibt erhalten",
+    euroPallets: "3",
+    storageSpaces: "1,5",
+    lines: [{
+      id: `qa-${orderType}-line`,
+      product: "100001",
+      targetQty: "10",
+      actualQty: "7",
+      picked: true,
+      positionNote: "Bereits bearbeitet",
+      fromBin: "002-H3-S01A1",
+      fromHandlingUnit: "340063810001234567"
+    }]
+  };
+  context.__setTabletOrder(order);
+  context.__qaSetDirty(true);
+  const orderBefore = JSON.stringify(context.__getTabletOrder());
+
+  context.__qaSetMode("transfer");
+  const cachedPayload = JSON.parse(storage.get("tablet-pick-current-order-v1") || "{}");
+  const afterTransfer = {
+    transferMode: context.__qaGetMode(),
+    orderAfterTransfer: JSON.stringify(context.__getTabletOrder()),
+    dirtyAfterTransfer: context.__qaGetDirty(),
+    cachedOrder: JSON.stringify(cachedPayload.order || null),
+    cachedDirty: cachedPayload.dirty === true,
+    transferApiGroup: context.__qaTabletApiGroup()
+  };
+
+  context.__qaSetMode(orderType);
+  const afterReturn = {
+    returnMode: context.__qaGetMode(),
+    orderAfterReturn: JSON.stringify(context.__getTabletOrder()),
+    dirtyAfterReturn: context.__qaGetDirty()
+  };
+
+  context.__qaSetMode(orderType === "storage" ? "picking" : "storage");
+  return {
+    fileName,
+    orderType,
+    orderBefore,
+    ...afterTransfer,
+    ...afterReturn,
+    blockedMode: context.__qaGetMode(),
+    orderAfterBlockedSwitch: JSON.stringify(context.__getTabletOrder()),
+    blockedMessage: context.__elements.message.innerHTML,
+    cacheRemoveCalls,
+    confirmCalls,
+    orderListLoads: context.__qaOrderListLoads,
+    modeUiCalls: context.__qaModeUiCalls,
+    orderRenderCalls: context.__qaOrderRenderCalls
+  };
+}
+
 function configureTabletDetailTransport(context, fileName, responses, requests) {
   let responseIndex = 0;
   const nextResponse = () => responses[responseIndex++] || { status: 500, body: { ok: false, error: "Unerwarteter Detailabruf" } };
@@ -4473,6 +4791,12 @@ async function manualStorageSharedBinFixture() {
   const desktopEmptyLine = desktop.__createManualStorageLine(desktopPreset, { actualQty: "5000", fromBin: desktopEmpty.value });
   const desktopArticleBinIgnored = desktopLines.every((line) => line.fromBin !== desktopPreset.fromBin) && desktopEmptyLine.fromBin === "";
   const desktopBeforeIndividualChange = cloneJson(desktopLines);
+  const desktopInitiallyUnchanged = desktopLines.every((line) => desktop.__isQuantityChanged(line) === false);
+  const desktopChangedLine = cloneJson(desktopLines[0]);
+  desktopChangedLine.actualQty = "5001";
+  const desktopSubsequentChangeDetected = desktop.__isQuantityChanged(desktopChangedLine) === true;
+  const desktopLegacyLine = { manual: true, targetQty: "", actualQty: "17" };
+  desktop.__normalizeOrderQuantitiesForSave({ orderType: "storage", lines: [desktopLegacyLine] });
   desktopLines[1].fromBin = "EINZELN";
   desktopLines[1].fromHandlingUnit = "340063810001234567";
   const desktopIndividualChangeIndependent = desktopLines[0].fromBin === desktopBin.value &&
@@ -4490,7 +4814,10 @@ async function manualStorageSharedBinFixture() {
       lines: desktopBeforeIndividualChange,
       emptyLine: cloneJson(desktopEmptyLine),
       articleBinIgnored: desktopArticleBinIgnored,
-      individualChangeIndependent: desktopIndividualChangeIndependent
+      individualChangeIndependent: desktopIndividualChangeIndependent,
+      initiallyUnchanged: desktopInitiallyUnchanged,
+      subsequentChangeDetected: desktopSubsequentChangeDetected,
+      normalizedLegacyTargetQty: desktopLegacyLine.targetQty
     },
     modern: await manualStorageSharedBinTabletFixture("tablet.js"),
     legacy: await manualStorageSharedBinTabletFixture("tablet-legacy.js")
@@ -4525,6 +4852,12 @@ async function manualStorageSharedBinTabletFixture(fileName) {
   const emptyLine = context.__createManualStorageLine(context.__getTabletOrder().lines, preset, { actualQty: "5000", fromBin: empty.value });
   const articleBinIgnored = lines.every((line) => line.fromBin !== preset.fromBin) && emptyLine.fromBin === "";
   const serializedLines = cloneJson(lines);
+  const initiallyUnchanged = lines.every((line) => context.__storageLineQuantityChanged(line) === false);
+  const changedLine = cloneJson(lines[0]);
+  changedLine.actualQty = "5001";
+  const subsequentChangeDetected = context.__storageLineQuantityChanged(changedLine) === true;
+  const legacyLine = { manual: true, targetQty: "", actualQty: "17" };
+  context.__normalizeOrderQuantitiesForSave({ orderType: "storage", lines: [legacyLine] });
   lines[1].fromBin = "EINZELN";
   lines[1].fromHandlingUnit = "340063810001234567";
   const individualChangeIndependent = lines[0].fromBin === bin.value &&
@@ -4543,7 +4876,36 @@ async function manualStorageSharedBinTabletFixture(fileName) {
     emptyLine: cloneJson(emptyLine),
     articleBinIgnored,
     individualChangeIndependent,
-    queuePayloadHasAllBins: JSON.parse(queuePayload).order.lines.every((line) => line.fromBin === bin.value)
+    queuePayloadHasAllBins: JSON.parse(queuePayload).order.lines.every((line) => line.fromBin === bin.value),
+    initiallyUnchanged,
+    subsequentChangeDetected,
+    normalizedLegacyTargetQty: legacyLine.targetQty
+  };
+}
+
+async function tabletPackageA1OrderNoteFixture(fileName) {
+  const context = await createTabletValidationContext(fileName);
+  const automaticNote = { hidden: true, textContent: "", innerHTML: "" };
+  Object.assign(context.__elements, { orderPackageA1Total: automaticNote });
+  const order = {
+    orderType: "picking",
+    orderNote: "Manuell unveraendert",
+    lines: packageA1FixtureLines()
+  };
+  context.__setTabletOrder(order);
+  context.__recalculatePickingA1OrderNote(order);
+  context.__renderAutomaticOrderNotes();
+  const displayedText = String(automaticNote.textContent || automaticNote.innerHTML || "");
+  const initialAuto = order.autoOrderNotes?.packageA1 || "";
+  order.lines[0].autoPositionNotes.package = "5A1";
+  context.__normalizeOrderQuantitiesForSave(order);
+  return {
+    fileName,
+    manualNote: order.orderNote,
+    initialAuto,
+    updatedAuto: order.autoOrderNotes?.packageA1 || "",
+    displayedText,
+    hidden: automaticNote.hidden
   };
 }
 
@@ -5073,10 +5435,12 @@ async function offlineStoreWebSqlFallbackFixture(offlineStoreSource) {
   vm.runInContext(offlineStoreSource, context, { filename: "offline-store-websql-reload.js" });
   const reloadedDiagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
   const metadataAfterReload = await context.OfflineStore.loadTransferStockSnapshotMeta("SSI");
-  const articleMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-MATERIAL", 25);
-  const barcodeMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-BC-59", 25);
-  const binMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "002-H4-W60A1", 25);
-  const handlingUnitMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-HU-58", 25);
+  const articleMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-MATERIAL", { offset: 0, limit: 20 });
+  const articleSecondPage = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-MATERIAL", { offset: 20, limit: 20 });
+  const articleThirdPage = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-MATERIAL", { offset: 40, limit: 20 });
+  const barcodeMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-BC-59", { offset: 0, limit: 20 });
+  const binMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "002-H4-W60A1", { offset: 0, limit: 20 });
+  const handlingUnitMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-HU-58", { offset: 0, limit: 20 });
   const drafts = await context.OfflineStore.loadTransferDrafts();
   const storedRowCount = Number(webSql.sqlite.prepare("SELECT COUNT(*) AS count FROM transfer_snapshot_rows").get().count || 0);
 
@@ -5087,6 +5451,11 @@ async function offlineStoreWebSqlFallbackFixture(offlineStoreSource) {
     metadataAfterReload,
     incompleteError,
     articleMatches: articleMatches.rows.length,
+    articleFirstHasMore: articleMatches.hasMore,
+    articleSecondPageMatches: articleSecondPage.rows.length,
+    articleSecondHasMore: articleSecondPage.hasMore,
+    articleThirdPageMatches: articleThirdPage.rows.length,
+    articleThirdHasMore: articleThirdPage.hasMore,
     barcodeMatches: barcodeMatches.rows.length,
     binMatches: binMatches.rows.length,
     handlingUnitMatches: handlingUnitMatches.rows.length,
@@ -5296,19 +5665,26 @@ async function offlineStoreIos9Fixture(offlineStoreSource) {
     ignoredHistory: "must-not-be-stored"
   }));
   await context.OfflineStore.saveTransferDraft({ id: "ios9-draft", warehouse: "SSI" });
-  await context.OfflineStore.replaceTransferStockSnapshot({
+  const pagedSession = await context.OfflineStore.beginTransferStockSnapshotUpdate({
     warehouse: "SSI",
     capturedAt: "2026-07-22T12:00:00.000Z",
-    rows
+    rowCount: rows.length,
+    snapshotKey: "ios9-paged-30"
   });
+  for (let offset = 0; offset < rows.length; offset += 10) {
+    await context.OfflineStore.appendTransferStockSnapshotPage(pagedSession, rows.slice(offset, offset + 10));
+  }
+  await context.OfflineStore.completeTransferStockSnapshotUpdate(pagedSession);
   const metadataBeforeReload = await context.OfflineStore.loadTransferStockSnapshotMeta("SSI");
-  const articleBeforeReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-MATERIAL", 25);
+  const articleBeforeReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-MATERIAL", { offset: 0, limit: 20 });
+  const articleSecondPageBeforeReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-MATERIAL", { offset: 20, limit: 20 });
 
   vm.runInContext(offlineStoreSource, context, { filename: "offline-store-ios9-reload.js" });
   const metadataAfterReload = await context.OfflineStore.loadTransferStockSnapshotMeta("SSI");
-  const articleAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-MATERIAL", 25);
-  const barcodeAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-BC-29", 25);
-  const binAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "002-H4-S30A1", 25);
+  const articleAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-MATERIAL", { offset: 0, limit: 20 });
+  const articleSecondPageAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-MATERIAL", { offset: 20, limit: 20 });
+  const barcodeAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-BC-29", { offset: 0, limit: 20 });
+  const binAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "002-H4-S30A1", { offset: 0, limit: 20 });
   const draftsAfterReload = await context.OfflineStore.loadTransferDrafts();
   const diagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
   const unavailableContext = vm.createContext({
@@ -5395,7 +5771,12 @@ async function offlineStoreIos9Fixture(offlineStoreSource) {
     metadataBeforeReload,
     metadataAfterReload,
     beforeReloadMatches: articleBeforeReload.rows.length,
+    beforeReloadHasMore: articleBeforeReload.hasMore,
+    secondPageBeforeReloadMatches: articleSecondPageBeforeReload.rows.length,
     articleMatches: articleAfterReload.rows.length,
+    articleHasMore: articleAfterReload.hasMore,
+    secondPageAfterReloadMatches: articleSecondPageAfterReload.rows.length,
+    secondPageAfterReloadHasMore: articleSecondPageAfterReload.hasMore,
     barcodeMatches: barcodeAfterReload.rows.length,
     binMatches: binAfterReload.rows.length,
     draftCount: draftsAfterReload.length,
@@ -5602,7 +5983,7 @@ function createLegacyIndexedDbFixture(options = {}) {
       if (!upgrade) {
         setTimeout(() => {
           if (!this.aborted && typeof this.oncomplete === "function") this.oncomplete({ target: this });
-        }, this.isSnapshotTransaction ? 100 : 25);
+        }, this.isSnapshotTransaction ? 500 : 25);
       }
     }
     objectStore(name) {
@@ -5722,10 +6103,12 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
     "transferWorkspace", "transferCapabilityStatus", "transferSnapshotStatus", "transferRefreshSnapshotButton",
     "transferWarehouseSelect", "transferSourceSearchForm",
     "transferSourceSearchInput", "transferSourceCameraButton", "transferSourceSearchButton", "transferSourceStatus",
-    "transferSourceCount", "transferSourceTableBody", "transferSelectedSourceCard", "transferSelectedSourceTitle",
+    "transferSourceCount", "transferSourceTableBody", "transferSourcePreviousButton", "transferSourceNextButton",
+    "transferSelectedSourceCard", "transferSelectedSourceTitle",
     "transferSelectedSourceBin", "transferSelectedSourceUnit", "transferSelectedSourceQuantity",
     "transferSelectedSourcePallets", "transferForm", "transferTargetBinInput", "transferTargetCameraButton",
     "transferReferenceInput", "transferSaveDraftButton", "transferBookButton", "transferStatus",
+    "transferPdfActions", "transferPdfDownloadLink", "transferPdfPrintLink",
     "transferDraftCount", "transferDraftList", "transferHistoryCount", "transferHistorySearchInput",
     "transferRefreshHistoryButton", "transferHistoryTableBody", "transferCameraOverlay", "transferCameraVideo",
     "transferCameraStatus", "transferCloseCameraButton"
@@ -5811,7 +6194,7 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
   let activeSnapshot = { metadata: null, rows: [] };
   let pendingSnapshot = null;
   let failNextSnapshotReplace = false;
-  let currentLocations = Array.from({ length: 40 }, (_entry, index) => ({
+  let currentLocations = Array.from({ length: 65 }, (_entry, index) => ({
     id: `qa-source-${index + 1}`,
     lager: "SSI",
     artikelId: `qa-article-${index + 1}`,
@@ -5857,6 +6240,7 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
         const locationId = parsed.searchParams.get("id") || "";
         const materialnummer = parsed.searchParams.get("materialnummer") || "";
         const query = String(parsed.searchParams.get("q") || "").toLowerCase();
+        const offset = Number(parsed.searchParams.get("offset") || 0);
         const limit = Number(parsed.searchParams.get("limit") || 0);
         responseBody = currentLocations.filter((location) => {
           if (locationId && location.id !== locationId) return false;
@@ -5864,11 +6248,32 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
           if (!query) return true;
           return [location.id, location.artikelId, location.materialnummer, location.barcode, location.lagerplatz, location.leNummer]
             .join(" ").toLowerCase().includes(query);
-        }).slice(0, limit > 0 ? limit : currentLocations.length).map((location) => ({ ...location }));
+        }).slice(offset, offset + (limit > 0 ? limit : currentLocations.length)).map((location) => ({ ...location }));
       } else if (this.url.includes("/api/storage/transfers") && this.method === "GET") {
         responseBody = [];
       } else if (this.url.includes("/api/storage/transfers") && this.method === "POST") {
-        responseBody = { ok: true };
+        const payload = JSON.parse(String(body || "{}")).transfer || {};
+        const source = currentLocations.find((location) => location.id === payload.sourceLocationId) || {};
+        responseBody = {
+          ok: true,
+          replayed: false,
+          transfer: {
+            id: payload.id,
+            lager: "SSI",
+            materialnummer: source.materialnummer || "QA-TRANSFER-MAT",
+            leNummer: source.leNummer || "",
+            mengeStueck: Number(source.mengeStueck || 0),
+            quellLagerplatz: source.lagerplatz || "",
+            zielLagerplatz: payload.targetBin,
+            referenz: payload.reference || "",
+            gebuchtVon: payload.userName || "",
+            erstelltAm: "2026-07-24T08:30:00.000Z"
+          },
+          pdf: {
+            file: "Umlagerung-SSI-QA.pdf",
+            url: "http://qa.local/exports/Umlagerung-SSI-QA.pdf"
+          }
+        };
       }
       this.status = 200;
       this.responseText = JSON.stringify(responseBody);
@@ -5895,7 +6300,7 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
     cancelAnimationFrame() {},
     confirm: () => true,
     OfflineStore: {
-      transferSnapshotApiVersion: 5,
+      transferSnapshotApiVersion: 6,
       probeTransferStockSnapshotStorage: () => Promise.resolve({
         ok: true,
         code: "WEBSQL_FALLBACK_READY",
@@ -5990,15 +6395,23 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
         return Promise.resolve();
       },
       loadTransferStockSnapshotMeta: () => Promise.resolve(activeSnapshot.metadata ? { ...activeSnapshot.metadata } : null),
-      searchTransferStockSnapshot: (warehouse, query, limit) => {
+      searchTransferStockSnapshot: (warehouse, query, options) => {
         const terms = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
-        const rows = activeSnapshot.rows.filter((row) => {
+        const offset = Math.max(0, Number(options?.offset) || 0);
+        const limit = Math.max(1, Number(options?.limit) || 20);
+        const matches = activeSnapshot.rows.filter((row) => {
           if (row.lager !== warehouse) return false;
           const haystack = [row.id, row.artikelId, row.materialnummer, row.barcode, row.lagerplatz, row.leNummer]
             .join(" ").toLowerCase();
           return terms.every((term) => haystack.includes(term));
-        }).slice(0, Math.min(Number(limit) || 25, 25)).map((row) => ({ ...row }));
-        return Promise.resolve({ metadata: activeSnapshot.metadata ? { ...activeSnapshot.metadata } : null, rows });
+        });
+        const rows = matches.slice(offset, offset + limit).map((row) => ({ ...row }));
+        return Promise.resolve({
+          metadata: activeSnapshot.metadata ? { ...activeSnapshot.metadata } : null,
+          rows,
+          offset,
+          hasMore: offset + rows.length < matches.length
+        });
       }
     }
   };
@@ -6009,6 +6422,10 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
   context.HLogistikTransfer.initialize();
   context.HLogistikTransfer.activate({ userName: "QA iPad", userGroup: "tablet", warehouse: "SSI", online: true });
   await drainFixturePromises(8);
+  const successfulSnapshotStatus = elements.get("transferSnapshotStatus").textContent;
+  elements.get("transferRefreshSnapshotButton").emit("click");
+  const loadingSnapshotStatus = elements.get("transferSnapshotStatus").textContent;
+  await drainFixturePromises(8);
 
   elements.get("transferSourceSearchInput").value = "QA-TRANSFER-MAT";
   elements.get("transferSourceSearchForm").emit("submit");
@@ -6016,6 +6433,11 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
   const onlineRowsVisible = elements.get("transferSourceTableBody").children.length;
   const sourceRows = elements.get("transferSourceTableBody").children;
   elements.get("transferSourceTableBody").emit("click", { target: sourceRows[0].sourceButton });
+  const onlineFirstPageHasMore = elements.get("transferSourceNextButton").hidden === false;
+  elements.get("transferSourceNextButton").emit("click");
+  await drainFixturePromises();
+  const onlineSecondPageRowsVisible = elements.get("transferSourceTableBody").children.length;
+  const onlineSecondPageRange = elements.get("transferSourceCount").textContent;
   const historyRequestsBeforeOffline = requestLog.filter((entry) => entry.url.includes("/api/storage/transfers") && entry.method === "GET").length;
   context.HLogistikTransfer.setOnline(false);
 
@@ -6023,6 +6445,24 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
   elements.get("transferSourceSearchForm").emit("submit");
   await drainFixturePromises();
   const offlineArticleRowsVisible = elements.get("transferSourceTableBody").children.length;
+  const offlineFirstPageHasMore = elements.get("transferSourceNextButton").hidden === false;
+  elements.get("transferSourceNextButton").emit("click");
+  await drainFixturePromises();
+  const offlineSecondPageRowsVisible = elements.get("transferSourceTableBody").children.length;
+  const offlineSecondPageRange = elements.get("transferSourceCount").textContent;
+  const offlineSecondPageFirstId = elements.get("transferSourceTableBody").children[0]?.sourceButton?.getAttribute("data-transfer-source-id") || "";
+  elements.get("transferSourceNextButton").emit("click");
+  await drainFixturePromises();
+  const offlineThirdPageRowsVisible = elements.get("transferSourceTableBody").children.length;
+  const offlineThirdPageRange = elements.get("transferSourceCount").textContent;
+  elements.get("transferSourceNextButton").emit("click");
+  await drainFixturePromises();
+  const offlineLastPageRowsVisible = elements.get("transferSourceTableBody").children.length;
+  const offlineLastPageRange = elements.get("transferSourceCount").textContent;
+  const offlineLastPageHasMore = elements.get("transferSourceNextButton").hidden === false;
+  elements.get("transferSourcePreviousButton").emit("click");
+  await drainFixturePromises();
+  const offlinePreviousPageRange = elements.get("transferSourceCount").textContent;
   elements.get("transferSourceSearchInput").value = "QA-BC-32";
   elements.get("transferSourceSearchForm").emit("submit");
   await drainFixturePromises();
@@ -6041,10 +6481,30 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
     snapshotRowCount: activeSnapshot.metadata?.rowCount || 0,
     snapshotWarehouse: activeSnapshot.metadata?.warehouse || "",
     snapshotStatus: elements.get("transferSnapshotStatus").textContent,
+    successfulSnapshotStatus,
+    loadingSnapshotStatus,
     paginatedSnapshotRequests: requestLog.filter((entry) => entry.url.includes("/api/storage/locations/snapshot") && entry.url.includes("limit=100")).length,
     onlineRowsVisible,
-    sourceRequestLimited: requestLog.some((entry) => entry.url.includes("/api/storage/locations?") && !entry.url.includes("/snapshot") && entry.url.includes("limit=25")),
+    onlineFirstPageHasMore,
+    onlineSecondPageRowsVisible,
+    onlineSecondPageRange,
+    sourceRequestPaged: requestLog.some((entry) =>
+      entry.url.includes("/api/storage/locations?") &&
+      !entry.url.includes("/snapshot") &&
+      entry.url.includes("offset=20") &&
+      entry.url.includes("limit=21")
+    ),
     offlineArticleRowsVisible,
+    offlineFirstPageHasMore,
+    offlineSecondPageRowsVisible,
+    offlineSecondPageRange,
+    offlineSecondPageFirstId,
+    offlineThirdPageRowsVisible,
+    offlineThirdPageRange,
+    offlineLastPageRowsVisible,
+    offlineLastPageRange,
+    offlineLastPageHasMore,
+    offlinePreviousPageRange,
     offlineBarcodeRowsVisible,
     offlineBinRowsVisible,
     offlineSearchDisabled: elements.get("transferSourceSearchInput").disabled || elements.get("transferSourceSearchButton").disabled,
@@ -6082,6 +6542,23 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
   offlineResult.conflictSelectionStale = elements.get("transferSelectedSourceCard").className.includes("is-stale");
   offlineResult.conflictStatus = elements.get("transferStatus").textContent;
   offlineResult.transferPostsAfterConflict = requestLog.filter((entry) => entry.method === "POST").length;
+
+  elements.get("transferSourceSearchInput").value = "QA-BC-02";
+  elements.get("transferSourceSearchForm").emit("submit");
+  await drainFixturePromises(4);
+  const pdfSourceRows = elements.get("transferSourceTableBody").children;
+  elements.get("transferSourceTableBody").emit("click", { target: pdfSourceRows[0].sourceButton });
+  elements.get("transferTargetBinInput").value = "002-H4-S99A1";
+  elements.get("transferTargetBinInput").emit("input");
+  elements.get("transferForm").emit("submit");
+  await drainFixturePromises(10);
+  offlineResult.pdfActionsVisible = elements.get("transferPdfActions").hidden === false;
+  offlineResult.pdfDownloadHref = elements.get("transferPdfDownloadLink").getAttribute("href") || "";
+  offlineResult.pdfDownloadFile = elements.get("transferPdfDownloadLink").getAttribute("download") || "";
+  offlineResult.pdfPrintHref = elements.get("transferPdfPrintLink").getAttribute("href") || "";
+  offlineResult.pdfBookingStatus = elements.get("transferStatus").textContent;
+  offlineResult.transferPostsAfterPdfBooking = requestLog.filter((entry) => entry.method === "POST").length;
+
   const completeOfflineStore = context.OfflineStore;
   delete completeOfflineStore.loadTransferStockSnapshotMeta;
   context.HLogistikTransfer.activate({ userName: "QA iPad", userGroup: "tablet", warehouse: "SSI", online: false });
@@ -6170,6 +6647,10 @@ globalThis.__readManualStorageBin = readManualStorageBin;
 globalThis.__combinedPositionNote = combinedPositionNote;
 globalThis.__manualPositionNoteFromInput = manualPositionNoteFromInput;
 globalThis.__normalizePositionNotesForSave = normalizePositionNotesForSave;
+globalThis.__normalizeOrderQuantitiesForSave = normalizeOrderQuantitiesForSave;
+globalThis.__storageLineQuantityChanged = storageLineQuantityChanged;
+globalThis.__recalculatePickingA1OrderNote = recalculatePickingA1OrderNote;
+globalThis.__renderAutomaticOrderNotes = renderAutomaticOrderNotes;
 globalThis.__elements = elements;
 globalThis.__loadTabletOrder = loadOrder;
 globalThis.__rememberTabletOrders = rememberListedOrders;
@@ -6315,7 +6796,7 @@ async function createAppParserContext() {
   vm.runInContext("globalThis.__combinedPositionNote = combinedPositionNote; globalThis.__manualPositionNoteFromInput = manualPositionNoteFromInput; globalThis.__normalizePositionNotesForSave = normalizePositionNotesForSave;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__packageA1Total = packageA1Total; globalThis.__recalculatePickingA1OrderNote = recalculatePickingA1OrderNote; globalThis.__refreshPackageNoteForLine = refreshPackageNoteForLine; globalThis.__saveState = saveState; globalThis.__currentOrderPayload = currentOrderPayload;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__parseLoadingSlipLines = parseLoadingSlipLines; globalThis.__appendAllLoadingSlipLines = appendAllLoadingSlipLines; globalThis.__canAppendLoadingSlipToXlsxDraft = canAppendLoadingSlipToXlsxDraft; globalThis.__renderSaveOrderButton = renderSaveOrderButton;", context, { filename: "app.js" });
-  vm.runInContext("globalThis.__createManualStorageLine = createManualStorageLine; globalThis.__readManualStorageBin = readManualStorageBin;", context, { filename: "app.js" });
+  vm.runInContext("globalThis.__createManualStorageLine = createManualStorageLine; globalThis.__readManualStorageBin = readManualStorageBin; globalThis.__normalizeOrderQuantitiesForSave = normalizeOrderQuantitiesForSave; globalThis.__isQuantityChanged = isQuantityChanged;", context, { filename: "app.js" });
   vm.runInContext("globalThis.__storageLineCompletionErrors = storageLineCompletionErrors; globalThis.__storageOrderExportMessage = storageOrderExportMessage;", context, { filename: "app.js" });
   return context;
 }

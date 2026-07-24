@@ -22,28 +22,17 @@ export async function exportPdf(order, exportDir, tempDir, origin = "", copyDir 
   if (!discard) await mkdir(exportDir, { recursive: true });
 
   try {
-    await writeFile(htmlPath, printableHtml(order, pdfFileName), "utf8");
-
-    const browser = findBrowser();
-    if (!browser) {
-      throw new Error("Kein Edge/Chrome gefunden. Bitte Microsoft Edge oder Chrome installieren.");
-    }
-
-    await run(browser, ["--headless", "--disable-gpu", `--print-to-pdf=${tempPdfPath}`, pathToFileURL(htmlPath).href]);
-    await assertExportArtifactCreated(tempPdfPath, "PDF");
+    await renderPrintablePdf(printableHtml(order, pdfFileName), htmlPath, tempPdfPath);
     await exportOrderExcel(order, tempXlsxPath, { exportedAt, warehouse: options?.warehouse });
     await assertExportArtifactCreated(tempXlsxPath, "Excel-Datei");
 
     let copyPath = "";
     let xlsxCopyPath = "";
     if (!discard) {
-      await copyFile(tempPdfPath, pdfPath);
+      copyPath = await publishPdfArtifact(tempPdfPath, pdfPath, copyDir, pdfFileName);
       await copyFile(tempXlsxPath, xlsxPath);
-      await assertExportArtifactCreated(pdfPath, "PDF");
       await assertExportArtifactCreated(xlsxPath, "Excel-Datei");
-      copyPath = await copyExportArtifactToFolder(pdfPath, copyDir, pdfFileName);
       xlsxCopyPath = await copyExportArtifactToFolder(xlsxPath, copyDir, xlsxFileName);
-      if (copyPath) await assertExportArtifactCreated(copyPath, "PDF");
       if (xlsxCopyPath) await assertExportArtifactCreated(xlsxCopyPath, "Excel-Datei");
     }
 
@@ -66,6 +55,57 @@ export async function exportPdf(order, exportDir, tempDir, origin = "", copyDir 
       await safeUnlink(tempXlsxPath);
     }
   }
+}
+
+export async function exportStorageTransferPdf(transfer, exportDir, tempDir, origin = "", copyDir = "", options = {}) {
+  const discard = options?.discard === true;
+  const preserveTempArtifacts = options?.preserveTempArtifacts === true;
+  const fileBase = storageTransferPdfFileBase(transfer);
+  const pdfFileName = `${fileBase}.pdf`;
+  const htmlPath = path.join(tempDir, `${fileBase}.html`);
+  const tempPdfPath = path.join(tempDir, pdfFileName);
+  const pdfPath = path.join(exportDir, pdfFileName);
+  const exportedAt = options?.exportedAt || new Date().toISOString();
+  await mkdir(tempDir, { recursive: true });
+  if (!discard) await mkdir(exportDir, { recursive: true });
+
+  try {
+    await renderPrintablePdf(printableStorageTransferHtml(transfer, pdfFileName), htmlPath, tempPdfPath);
+    const copyPath = discard
+      ? ""
+      : await publishPdfArtifact(tempPdfPath, pdfPath, copyDir, pdfFileName);
+    return {
+      file: pdfFileName,
+      path: discard ? "" : pdfPath,
+      copyPath,
+      url: discard ? "" : absoluteUrl(origin, `/exports/${encodeURIComponent(pdfFileName)}`),
+      artifactExportedAt: exportedAt,
+      ...(discard ? { discarded: true } : {})
+    };
+  } finally {
+    if (!preserveTempArtifacts) {
+      await safeUnlink(htmlPath);
+      await safeUnlink(tempPdfPath);
+    }
+  }
+}
+
+async function renderPrintablePdf(html, htmlPath, tempPdfPath) {
+  await writeFile(htmlPath, html, "utf8");
+  const browser = findBrowser();
+  if (!browser) {
+    throw new Error("Kein Edge/Chrome gefunden. Bitte Microsoft Edge oder Chrome installieren.");
+  }
+  await run(browser, ["--headless", "--disable-gpu", `--print-to-pdf=${tempPdfPath}`, pathToFileURL(htmlPath).href]);
+  await assertExportArtifactCreated(tempPdfPath, "PDF");
+}
+
+async function publishPdfArtifact(tempPdfPath, pdfPath, copyDir, pdfFileName) {
+  await copyFile(tempPdfPath, pdfPath);
+  await assertExportArtifactCreated(pdfPath, "PDF");
+  const copyPath = await copyExportArtifactToFolder(pdfPath, copyDir, pdfFileName);
+  if (copyPath) await assertExportArtifactCreated(copyPath, "PDF");
+  return copyPath;
 }
 
 async function assertExportArtifactCreated(filePath, label) {
@@ -181,7 +221,10 @@ export function printableHtml(order, fileName) {
       <p><strong>Stellplätze:</strong> ${escapeHtml(order.storageSpaces || "0")}</p>
       <p><strong>Korrigiert:</strong> ${changed}</p>
     </section>
-    <section class="note"><strong>Notiz:</strong> ${escapeHtml(combinedOrderNote(order) || "-")}</section>
+    <section class="note">
+      <p><strong>Notiz:</strong> ${escapeHtml(order.orderNote || "-")}</p>
+      ${automaticOrderNoteHtml(order, isStorage)}
+    </section>
     <table class="${isStorage ? "storage-table" : ""}">
       <thead>
         ${isStorage ? `
@@ -213,7 +256,76 @@ export function printableHtml(order, fileName) {
 </html>`;
 }
 
+export function printableStorageTransferHtml(transfer, fileName) {
+  const createdAt = String(transfer?.erstelltAm || "");
+  const date = createdAt ? formatDate(createdAt.slice(0, 10)) : "-";
+  const time = createdAt.length >= 16 ? createdAt.slice(11, 16) : "-";
+  return `<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <title>${escapeHtml(fileName)}</title>
+    <style>
+      @page { size: A4 portrait; margin: 10mm; }
+      * { box-sizing: border-box; }
+      body { margin: 0; color: #111; font-family: Arial, Helvetica, sans-serif; font-size: 12px; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      header { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #111; }
+      h1 { margin: 0 0 6px; font-size: 24px; }
+      p { margin: 0 0 4px; }
+      .meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 18px; margin-bottom: 10px; font-size: 12px; }
+      .note { min-height: 28px; margin-bottom: 10px; padding: 6px; border: 1px solid #777; }
+      table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+      th, td { padding: 5px 4px; border: 1px solid #555; vertical-align: top; overflow-wrap: anywhere; font-size: 13px; }
+      th { background: #e8eee9; text-align: left; font-size: 11px; }
+      .num { text-align: right; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Umlagerungsbeleg</h1>
+        <p><strong>Lager:</strong> ${escapeHtml(transfer?.lager || "-")}</p>
+        <p><strong>Bearbeiter:</strong> ${escapeHtml(transfer?.gebuchtVon || "-")}</p>
+      </div>
+      <div>
+        <p><strong>Datum:</strong> ${escapeHtml(date)}</p>
+        <p><strong>Uhrzeit:</strong> ${escapeHtml(time)}</p>
+        <p><strong>Umlagerungs-ID:</strong> ${escapeHtml(transfer?.id || "-")}</p>
+        <p><strong>Dateiname:</strong> ${escapeHtml(fileName)}</p>
+      </div>
+    </header>
+    <section class="meta">
+      <p><strong>Artikel:</strong> ${escapeHtml(transfer?.materialnummer || "-")}</p>
+      <p><strong>HU / LE:</strong> ${escapeHtml(transfer?.leNummer || "-")}</p>
+      <p><strong>Menge:</strong> ${escapeHtml(transfer?.mengeStueck ?? 0)}</p>
+    </section>
+    <section class="note"><strong>Referenz:</strong> ${escapeHtml(transfer?.referenz || "-")}</section>
+    <table class="storage-table">
+      <thead>
+        <tr>
+          <th style="width:22%;">Artikelnummer</th>
+          <th style="width:20%;">HU</th>
+          <th style="width:12%;">Menge</th>
+          <th style="width:23%;">Von-Stellplatz</th>
+          <th style="width:23%;">Nach-Stellplatz</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>${escapeHtml(transfer?.materialnummer || "")}</td>
+          <td>${escapeHtml(transfer?.leNummer || "")}</td>
+          <td class="num">${escapeHtml(transfer?.mengeStueck ?? 0)}</td>
+          <td>${escapeHtml(transfer?.quellLagerplatz || "")}</td>
+          <td>${escapeHtml(transfer?.zielLagerplatz || "")}</td>
+        </tr>
+      </tbody>
+    </table>
+  </body>
+</html>`;
+}
+
 function isQuantityChanged(line) {
+  if (line?.manual === true && !String(line?.targetQty || "").trim()) return false;
   return String(line?.actualQty || "").trim() !== String(line?.targetQty || "").trim();
 }
 
@@ -237,12 +349,11 @@ function combinedPositionNote(line) {
   return combineUniqueNoteParts([line?.positionNote, ...autoPositionNoteValues(line)]);
 }
 
-function combinedOrderNote(order) {
+function automaticOrderNoteHtml(order, isStorage) {
+  if (isStorage) return "";
   const packageA1 = packageA1Total(order?.lines);
-  return combineUniqueNoteParts([
-    order?.orderNote,
-    packageA1 > 0 ? `${packageA1} A1` : "",
-  ]).replaceAll("; ", " - ");
+  if (packageA1 <= 0) return "";
+  return `<p class="automatic-order-note"><strong>Automatische Auftragsnotiz:</strong> ${escapeHtml(`${packageA1} A1`)}</p>`;
 }
 
 function packageA1Total(lines) {
@@ -292,6 +403,14 @@ function pdfFileBase(order) {
   const rawTime = String(order.orderTime || "").replace(":", "-").trim();
   const orderTime = rawTime ? sanitizeFileNamePart(rawTime) : "";
   return sanitizeFileName([orderNumber, customer, orderDate, orderTime].filter(Boolean).join("-"));
+}
+
+function storageTransferPdfFileBase(transfer) {
+  const warehouse = sanitizeFileNamePart(transfer?.lager || "lager");
+  const material = sanitizeFileNamePart(transfer?.materialnummer || "artikel");
+  const createdAt = sanitizeFileNamePart(String(transfer?.erstelltAm || new Date().toISOString()).replace(/[:.]/g, "-"));
+  const transferId = sanitizeFileNamePart(transfer?.id || "umlagerung");
+  return sanitizeFileName(["Umlagerung", warehouse, material, createdAt, transferId].join("-"));
 }
 
 export function findBrowser() {

@@ -1,7 +1,7 @@
 (function () {
   var DB_NAME = "hlogistik-offline";
   var DB_VERSION = 7;
-  var TRANSFER_SNAPSHOT_API_VERSION = 5;
+  var TRANSFER_SNAPSHOT_API_VERSION = 6;
   var _db = null;
   var _opening = null;
   var _lastStorageDiagnostic = null;
@@ -617,13 +617,13 @@
     });
   }
 
-  function createTransferSnapshotSession(snapshot) {
+  function createTransferSnapshotSession(snapshot, backendName) {
     var warehouse = normalizeTransferWarehouse(snapshot && snapshot.warehouse);
     var capturedAt = String(snapshot && snapshot.capturedAt || "");
     var rowCount = Math.max(0, Number(snapshot && snapshot.rowCount || 0));
     if (!capturedAt) throw storageError("SNAPSHOT_CAPTURE_TIME_MISSING", "Bestandssnapshot enthält keinen Zeitpunkt");
     return {
-      backend: "WebSQL",
+      backend: String(backendName || "WebSQL"),
       warehouse: warehouse,
       capturedAt: capturedAt,
       rowCount: rowCount,
@@ -635,7 +635,7 @@
 
   function webSqlBeginTransferSnapshot(db, snapshot) {
     var session;
-    try { session = createTransferSnapshotSession(snapshot); } catch (error) { return Promise.reject(error); }
+    try { session = createTransferSnapshotSession(snapshot, "WebSQL"); } catch (error) { return Promise.reject(error); }
     return new Promise(function (resolve, reject) {
       db.transaction(function (tx) {
         tx.executeSql(
@@ -757,12 +757,22 @@
     });
   }
 
-  function webSqlSearchTransferSnapshot(db, warehouse, query, limit) {
+  function transferSnapshotSearchPage(options) {
+    if (typeof options === "number") {
+      return { offset: 0, limit: Math.min(Math.max(Number(options) || 20, 1), 100) };
+    }
+    return {
+      offset: Math.max(0, Number(options && options.offset) || 0),
+      limit: Math.min(Math.max(Number(options && options.limit) || 20, 1), 100)
+    };
+  }
+
+  function webSqlSearchTransferSnapshot(db, warehouse, query, options) {
     var normalizedWarehouse = normalizeTransferWarehouse(warehouse);
     var terms = transferStockSearchText(query).split(" ").filter(Boolean);
-    var safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 25);
+    var page = transferSnapshotSearchPage(options);
     return webSqlLoadTransferSnapshotMeta(db, normalizedWarehouse).then(function (metadata) {
-      if (!metadata) return { metadata: null, rows: [] };
+      if (!metadata) return { metadata: null, rows: [], offset: page.offset, hasMore: false };
       return new Promise(function (resolve, reject) {
         db.readTransaction(function (tx) {
           var sql = "SELECT stock_id, warehouse, article_id, material_number, barcode, bin, handling_unit, quantity, pallets, updated_at FROM transfer_snapshot_rows WHERE generation = ? AND warehouse = ?";
@@ -771,8 +781,8 @@
             sql += " AND instr(search_text, ?) > 0";
             parameters.push(term);
           });
-          sql += " ORDER BY bin COLLATE NOCASE, material_number COLLATE NOCASE, handling_unit COLLATE NOCASE LIMIT ?";
-          parameters.push(safeLimit);
+          sql += " ORDER BY bin COLLATE NOCASE, material_number COLLATE NOCASE, handling_unit COLLATE NOCASE LIMIT ? OFFSET ?";
+          parameters.push(page.limit + 1, page.offset);
           tx.executeSql(sql, parameters, function (_tx, result) {
             var rows = webSqlRows(result).map(function (row) {
               return {
@@ -788,7 +798,15 @@
                 aktualisiertAm: String(row.updated_at || "")
               };
             });
-            resolve({ metadata: metadata, rows: rows });
+            var hasMore = rows.length > page.limit;
+            if (hasMore) rows.pop();
+            resolve({
+              metadata: metadata,
+              rows: rows,
+              offset: page.offset,
+              hasMore: hasMore,
+              nextOffset: page.offset + rows.length
+            });
           });
         }, function (error) {
           reject(storageError("WEBSQL_SNAPSHOT_SEARCH_FAILED", "WebSQL-Snapshot-Suche ist fehlgeschlagen", webSqlNativeError(error)));
@@ -922,6 +940,166 @@
     });
   }
 
+  function indexedDbBeginTransferSnapshot(snapshot) {
+    try {
+      return Promise.resolve(createTransferSnapshotSession(snapshot, "IndexedDB"));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  function indexedDbSnapshotRow(session, row) {
+    return {
+      key: session.generation + "|" + row.id,
+      warehouse: session.warehouse,
+      warehouseGeneration: session.generation,
+      generation: session.generation,
+      id: row.id,
+      lager: row.lager,
+      artikelId: row.artikelId,
+      materialnummer: row.materialnummer,
+      barcode: row.barcode,
+      lagerplatz: row.lagerplatz,
+      leNummer: row.leNummer,
+      mengeStueck: row.mengeStueck,
+      paletten: row.paletten,
+      aktualisiertAm: row.aktualisiertAm
+    };
+  }
+
+  function indexedDbAppendTransferSnapshotRows(session, rows) {
+    var projectedRows = Array.isArray(rows) ? rows.map(transferStockPublicRow).filter(function (row) {
+      return row.id && row.lager === session.warehouse && row.mengeStueck > 0;
+    }) : [];
+    return openDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx;
+        try {
+          tx = db.transaction("transfer-stock-rows", "readwrite");
+          var store = tx.objectStore("transfer-stock-rows");
+          projectedRows.forEach(function (row) {
+            store.put(indexedDbSnapshotRow(session, row));
+          });
+        } catch (error) {
+          if (tx) try { tx.abort(); } catch (abortError) { void abortError; }
+          reject(storageError("IDB_SNAPSHOT_PAGE_WRITE_START_FAILED", "IndexedDB-Snapshot-Seite konnte nicht geöffnet werden", error, db));
+          return;
+        }
+        tx.oncomplete = function () {
+          session.appendedRows += projectedRows.length;
+          resolve(session);
+        };
+        tx.onerror = function () {
+          reject(storageError("IDB_SNAPSHOT_PAGE_WRITE_FAILED", "IndexedDB-Snapshot-Seite konnte nicht gespeichert werden", tx.error, db));
+        };
+        tx.onabort = function () {
+          reject(storageError("IDB_SNAPSHOT_PAGE_WRITE_ABORTED", "IndexedDB-Snapshot-Seite wurde abgebrochen", tx.error, db));
+        };
+      });
+    });
+  }
+
+  function indexedDbCompleteTransferSnapshot(session) {
+    return openDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx;
+        var completedMetadata = null;
+        var completionError = null;
+        var settled = false;
+        try {
+          tx = db.transaction(["transfer-stock-rows", "transfer-stock-snapshots"], "readwrite");
+          var rowStore = tx.objectStore("transfer-stock-rows");
+          var cursorRequest = rowStore.index("warehouse-generation").openCursor(snapshotKeyRange(session.generation));
+          var actualCount = 0;
+          cursorRequest.onsuccess = function () {
+            var cursor = cursorRequest.result;
+            if (cursor) {
+              actualCount += 1;
+              cursor.continue();
+              return;
+            }
+            if (actualCount !== session.rowCount || session.appendedRows !== session.rowCount) {
+              completionError = new Error("Erwartet " + session.rowCount + " Zeilen, gespeichert " + actualCount);
+              completionError.name = "SnapshotCountError";
+              try { tx.abort(); } catch (abortError) { void abortError; }
+              return;
+            }
+            completedMetadata = {
+              warehouse: session.warehouse,
+              capturedAt: session.capturedAt,
+              rowCount: session.rowCount,
+              generation: session.generation,
+              completedAt: new Date().toISOString(),
+              snapshotKey: session.snapshotKey,
+              storageBackend: "IndexedDB"
+            };
+            tx.objectStore("transfer-stock-snapshots").put(completedMetadata);
+          };
+          cursorRequest.onerror = function () {
+            completionError = cursorRequest.error;
+            try { tx.abort(); } catch (abortError) { void abortError; }
+          };
+        } catch (error) {
+          if (tx) try { tx.abort(); } catch (abortError) { void abortError; }
+          reject(storageError("IDB_SNAPSHOT_COMPLETE_START_FAILED", "IndexedDB-Snapshot-Abschluss konnte nicht gestartet werden", error, db));
+          return;
+        }
+        tx.oncomplete = function () {
+          if (settled) return;
+          settled = true;
+          cleanupTransferStockRows(session.warehouse, session.generation).catch(function () {});
+          resolve(completedMetadata);
+        };
+        tx.onerror = function () {
+          if (settled) return;
+          settled = true;
+          reject(storageError("IDB_SNAPSHOT_COMPLETE_FAILED", "IndexedDB-Snapshot konnte nicht aktiviert werden", completionError || tx.error, db));
+        };
+        tx.onabort = function () {
+          if (settled) return;
+          settled = true;
+          reject(storageError(
+            completionError && completionError.name === "SnapshotCountError" ? "IDB_SNAPSHOT_INCOMPLETE" : "IDB_SNAPSHOT_COMPLETE_ABORTED",
+            completionError && completionError.name === "SnapshotCountError"
+              ? "Unvollständiger IndexedDB-Snapshot wurde nicht aktiviert"
+              : "IndexedDB-Snapshot-Abschluss wurde abgebrochen",
+            completionError || tx.error,
+            db
+          ));
+        };
+      });
+    });
+  }
+
+  function indexedDbAbortTransferSnapshot(session) {
+    if (!session || !session.generation) return Promise.resolve();
+    return openDb().then(function (db) {
+      return new Promise(function (resolve) {
+        var tx;
+        var request;
+        try {
+          tx = db.transaction("transfer-stock-rows", "readwrite");
+          request = tx.objectStore("transfer-stock-rows")
+            .index("warehouse-generation")
+            .openCursor(snapshotKeyRange(session.generation));
+        } catch (error) {
+          void error;
+          resolve();
+          return;
+        }
+        request.onsuccess = function () {
+          var cursor = request.result;
+          if (!cursor) return;
+          cursor.delete();
+          cursor.continue();
+        };
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { resolve(); };
+        tx.onabort = function () { resolve(); };
+      });
+    }).catch(function () {});
+  }
+
   function startSnapshotWrite(db, warehouse, generation, projectedRows, metadata) {
     return new Promise(function (resolve, reject) {
       var tx;
@@ -982,10 +1160,10 @@
     });
   }
 
-  function searchIndexedDbTransferStockSnapshot(warehouse, query, limit) {
+  function searchIndexedDbTransferStockSnapshot(warehouse, query, options) {
     var normalizedWarehouse = normalizeTransferWarehouse(warehouse);
     var terms = transferStockSearchText(query).split(" ").filter(Boolean);
-    var safeLimit = Math.min(Math.max(Number(limit) || 25, 1), 25);
+    var page = transferSnapshotSearchPage(options);
     return openDb().then(function (db) {
       return new Promise(function (resolve, reject) {
         var tx;
@@ -1003,10 +1181,11 @@
         metadataRequest.onsuccess = function () {
           var metadata = metadataRequest.result;
           if (!metadata || !metadata.generation) {
-            resolve({ metadata: null, rows: [] });
+            resolve({ metadata: null, rows: [], offset: page.offset, hasMore: false });
             return;
           }
           var rows = [];
+          var matchingRows = 0;
           var cursorRequest;
           try {
             cursorRequest = tx.objectStore("transfer-stock-rows")
@@ -1021,18 +1200,29 @@
           };
           cursorRequest.onsuccess = function () {
             var cursor = cursorRequest.result;
-            if (!cursor || rows.length >= safeLimit) {
+            if (!cursor || rows.length > page.limit) {
+              var hasMore = rows.length > page.limit;
+              if (hasMore) rows.pop();
               rows.sort(function (left, right) {
                 return String(left.lagerplatz || "").localeCompare(String(right.lagerplatz || ""));
               });
-              resolve({ metadata: metadata, rows: rows });
+              resolve({
+                metadata: metadata,
+                rows: rows,
+                offset: page.offset,
+                hasMore: hasMore,
+                nextOffset: page.offset + rows.length
+              });
               return;
             }
             var row = transferStockPublicRow(cursor.value);
             var haystack = transferStockSearchText([
               row.id, row.artikelId, row.materialnummer, row.barcode, row.lagerplatz, row.leNummer
             ].join(" "));
-            if (!terms.length || terms.every(function (term) { return haystack.indexOf(term) >= 0; })) rows.push(row);
+            if (!terms.length || terms.every(function (term) { return haystack.indexOf(term) >= 0; })) {
+              if (matchingRows >= page.offset) rows.push(row);
+              matchingRows += 1;
+            }
             cursor.continue();
           };
         };
@@ -1096,48 +1286,55 @@
     });
   }
 
-  function searchTransferStockSnapshot(warehouse, query, limit) {
+  function searchTransferStockSnapshot(warehouse, query, options) {
     return selectTransferBackend().then(function (backend) {
       if (backend.name === "IndexedDB") {
-        return searchIndexedDbTransferStockSnapshot(warehouse, query, limit).catch(function (error) {
+        return searchIndexedDbTransferStockSnapshot(warehouse, query, options).catch(function (error) {
           if (!isNotFoundError(error)) throw error;
           return activateWebSqlBackend(error).then(function (webSqlBackend) {
-            return webSqlSearchTransferSnapshot(webSqlBackend.db, warehouse, query, limit);
+            return webSqlSearchTransferSnapshot(webSqlBackend.db, warehouse, query, options);
           });
         });
       }
-      return webSqlSearchTransferSnapshot(backend.db, warehouse, query, limit);
+      return webSqlSearchTransferSnapshot(backend.db, warehouse, query, options);
     });
   }
 
   function beginTransferStockSnapshotUpdate(snapshot) {
     return selectTransferBackend().then(function (backend) {
-      if (backend.name !== "WebSQL") {
-        throw storageError("TRANSFER_PAGED_BACKEND_MISMATCH", "Seitenweiser Snapshot ist nur für den WebSQL-Legacy-Fallback vorgesehen");
-      }
+      if (backend.name === "IndexedDB") return indexedDbBeginTransferSnapshot(snapshot);
       return webSqlBeginTransferSnapshot(backend.db, snapshot);
     });
   }
 
   function appendTransferStockSnapshotPage(session, rows) {
+    if (session && session.backend === "IndexedDB") {
+      return indexedDbAppendTransferSnapshotRows(session, rows);
+    }
     return selectTransferBackend().then(function (backend) {
       if (backend.name !== "WebSQL" || !session || session.backend !== "WebSQL") {
-        throw storageError("TRANSFER_PAGED_BACKEND_MISMATCH", "Snapshot-Seite gehört nicht zum aktiven WebSQL-Legacy-Fallback");
+        throw storageError("TRANSFER_PAGED_BACKEND_MISMATCH", "Snapshot-Seite gehört nicht zum aktiven Offline-Speicher");
       }
       return webSqlAppendTransferSnapshotRows(backend.db, session, rows);
     });
   }
 
   function completeTransferStockSnapshotUpdate(session) {
+    if (session && session.backend === "IndexedDB") {
+      return indexedDbCompleteTransferSnapshot(session);
+    }
     return selectTransferBackend().then(function (backend) {
       if (backend.name !== "WebSQL" || !session || session.backend !== "WebSQL") {
-        throw storageError("TRANSFER_PAGED_BACKEND_MISMATCH", "Snapshot-Abschluss gehört nicht zum aktiven WebSQL-Legacy-Fallback");
+        throw storageError("TRANSFER_PAGED_BACKEND_MISMATCH", "Snapshot-Abschluss gehört nicht zum aktiven Offline-Speicher");
       }
       return webSqlCompleteTransferSnapshot(backend.db, session);
     });
   }
 
   function abortTransferStockSnapshotUpdate(session) {
+    if (session && session.backend === "IndexedDB") {
+      return indexedDbAbortTransferSnapshot(session);
+    }
     return selectTransferBackend().then(function (backend) {
       if (backend.name !== "WebSQL") return;
       return webSqlAbortTransferSnapshot(backend.db, session);

@@ -131,6 +131,7 @@ export function initializeDatabase() {
       euro_paletten TEXT NOT NULL DEFAULT '',
       stellplaetze TEXT NOT NULL DEFAULT '',
       auftrags_notiz TEXT NOT NULL DEFAULT '',
+      automatische_auftragsnotizen TEXT NOT NULL DEFAULT '{}',
       rohtext TEXT NOT NULL DEFAULT '',
       collapse_done INTEGER NOT NULL DEFAULT 1,
       auftrags_typ TEXT NOT NULL DEFAULT 'picking',
@@ -163,6 +164,7 @@ export function initializeDatabase() {
   ensureOrderColumn("auftragszeit", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("kunden_gruppe", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("auftrags_lager", "TEXT NOT NULL DEFAULT ''");
+  ensureOrderColumn("automatische_auftragsnotizen", "TEXT NOT NULL DEFAULT '{}'");
   ensureOrderColumn("uebernommen_von", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("uebernommen_am", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("original_dateiname", "TEXT NOT NULL DEFAULT ''");

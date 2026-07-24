@@ -6,14 +6,14 @@
     <meta name="theme-color" content="#167a58">
     <title>Tablet Logistik</title>
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="tablet.css?v=20260722-4">
-    <script src="offline-store.js?v=20260724-1"></script>
+    <link rel="stylesheet" href="tablet.css?v=20260724-3">
+    <script src="offline-store.js?v=20260724-2"></script>
     <script src="shared/storage-hu-rules.js?v=20260702-2"></script>
     <script src="shared/storage-bin-rules.js?v=20260707-1"></script>
     <script src="shared/manual-storage-rules.js?v=20260702-2"></script>
     <script src="shared/quantity-format.js?v=20260720-2"></script>
-    <script src="tablet-transfer.js?v=20260724-1"></script>
-    <script src="tablet-legacy.js?v=20260724-2"></script>
+    <script src="tablet-transfer.js?v=20260724-4"></script>
+    <script src="tablet-legacy.js?v=20260724-4"></script>
   </head>
   <body>
     <header class="tablet-header">
@@ -131,6 +131,7 @@
         <label>
           Notiz
           <textarea id="orderNoteInput" rows="3" placeholder="Schäden, Fehlmengen, Besonderheiten"></textarea>
+          <span id="orderPackageA1Total" class="automatic-order-note" role="status" hidden></span>
         </label>
       </section>
       </div>
@@ -141,7 +142,7 @@
         </p>
         <div class="tablet-transfer-snapshot">
           <p id="transferSnapshotStatus" class="tablet-transfer-snapshot-status" role="status">
-            Snapshot SSI: noch kein vollständiger Stand gespeichert.
+            Noch kein vollständiger Snapshot gespeichert.
           </p>
           <button id="transferRefreshSnapshotButton" type="button">Snapshot aktualisieren</button>
         </div>
@@ -172,6 +173,10 @@
               <tbody id="transferSourceTableBody"><tr><td colspan="6">Noch keine Suche ausgeführt.</td></tr></tbody>
             </table>
           </div>
+          <div class="tablet-transfer-source-pagination" aria-label="Trefferseiten">
+            <button id="transferSourcePreviousButton" type="button" hidden>Vorherige Treffer</button>
+            <button id="transferSourceNextButton" type="button" hidden>Weitere Treffer</button>
+          </div>
         </section>
 
         <section class="tablet-transfer-card tablet-transfer-editor-panel">
@@ -197,6 +202,10 @@
             </div>
           </form>
           <p id="transferStatus" class="message" role="status">Die Buchung ist nur online möglich.</p>
+          <div id="transferPdfActions" class="tablet-transfer-pdf-actions" hidden>
+            <a id="transferPdfDownloadLink" href="#" target="_blank" rel="noopener" download>PDF herunterladen</a>
+            <a id="transferPdfPrintLink" href="#" target="_blank" rel="noopener">PDF öffnen / drucken</a>
+          </div>
         </section>
 
         <section class="tablet-transfer-card tablet-transfer-drafts-panel">

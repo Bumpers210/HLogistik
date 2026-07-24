@@ -1,6 +1,86 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-24 08:50:21 +02:00
+Stand: 2026-07-24 10:16:32 +02:00
+
+## 2026-07-24 - Regressionsfix fuer manuelle Einlagerungszeilen und A1-Auftragsnotiz
+
+Umgesetzt:
+
+- Manuell angelegte Einlagerungszeilen speichern ihre Anfangsmenge als Soll-Basis. Dadurch bleiben sie nach Aktualisierung, Speichern und Wiederoeffnen unveraendert; erst eine spaetere Abweichung der Ist-Menge wird markiert.
+- Vorhandene manuelle Altzeilen ohne Soll-Basis erhalten beim naechsten Speichern serverseitig kontrolliert ihre aktuelle Ist-Menge als Basis, ohne andere Positionsdaten zu veraendern.
+- Die berechnete A1-Gesamtsumme wird als `autoOrderNotes.packageA1` getrennt von `orderNote` in SQLite gespeichert, auf Desktop sowie Modern-/Legacy-Tablet separat angezeigt und im Kommissionier-PDF als eigene Auftragsnotiz ausgegeben. Ladelisten bleiben ausgeschlossen.
+- Asset-/Cachestand: `app.js?v=20260724-3`, `tablet-legacy.js?v=20260724-4`, `tablet.css?v=20260724-3`, Service Worker/Manifest `1.5.209`.
+
+Validierung:
+
+- Die Regressionstests pruefen Anfangszustand, Aktualisierung, Speichern, Wiederoeffnen und echte spaetere Mengenabweichungen fuer manuelle Einlagerungszeilen.
+- A1-QA prueft die strukturelle Trennung, unveraenderte manuelle Notizen, Modern-/Legacy-Anzeige, Serverpersistenz, Ladelistenausschluss und getrennte PDF-Ausgabe.
+- Vollstaendige QA-Matrix auf frischer isolierter QA-Datenbank und Port `4175`: 252/252 erfolgreich.
+- Browser-Smoke auf Port `4175`: manuelle Einlagerungszeile blieb nach Aktualisierung, Speichern und Reload bei `0 korrigiert` und wechselte erst nach einer echten Mengenabweichung auf `1 korrigiert`; die A1-Notiz blieb nach Reload getrennt sichtbar. Der reale einseitige PDF-Export enthielt manuelle und automatische Auftragsnotiz getrennt und keine Ladelistenposition.
+
+## 2026-07-24 - Automatischer PDF-Beleg nach Umlagerung
+
+Umgesetzt:
+
+- `POST /api/storage/transfers` erzeugt erst nach erfolgreicher beziehungsweise idempotent wiederholter Buchung automatisch einen PDF-Beleg.
+- Der Beleg verwendet dieselbe Headless-Browser-, Artefaktpruefungs-, Bereinigungs- und Kopierlogik wie die Einlagerungs-PDF. Er enthaelt genau eine gebuchte Umlagerung mit `Artikelnummer`, `HU`, `Menge`, `Von-Stellplatz` und `Nach-Stellplatz`.
+- Der gemeinsame Umlagerungscontroller fuer modernes und Legacy-Tablet zeigt danach getrennte Aktionen fuer Download und `PDF oeffnen / drucken`.
+- Asset-/Cachestand: `tablet-transfer.js?v=20260724-4`, `tablet.css?v=20260724-2`, Service Worker/Manifest `1.5.208`.
+
+Validierung:
+
+- Die API-QA prueft Layout und Spalten, ein echtes `%PDF`-Artefakt, idempotenten Dateinamen sowie das Fehlen eines PDF-Ergebnisses bei abgelehnter Buchung.
+- Vollstaendige QA-Matrix auf frischer isolierter QA-Datenbank und Port `4175`: 250/250 erfolgreich.
+- Browser-Smoke auf Port `4175`: erfolgreiche Umlagerung, sichtbare Download-/Druckaktionen, ausgeloester Download und im PDF-Viewer geoeffneter einseitiger Umlagerungsbeleg mit den gebuchten Werten.
+
+## 2026-07-24 - Vollstaendige Umlagerungssuche ohne 25er-Gesamtlimit
+
+Umgesetzt:
+
+- Der Snapshot enthaelt weiterhin alle positiven Bestandszeilen des gewaehlten Lagers. IndexedDB und WebSQL schreiben ihn jetzt fuer Modern und Legacy seitenweise, ohne die vollstaendige Datenmenge im JavaScript-Arbeitsspeicher zu halten.
+- Online- und Offline-Suche sind ohne Gesamtlimit ueber `Weitere Treffer` und `Vorherige Treffer` vollstaendig navigierbar. Pro sichtbarer Seite werden ressourcenschonend nur 20 Zeilen geladen und gerendert.
+- `2. Ziel` steht in voller Breite direkt unter `1. Quelle`.
+- Asset-/Cachestand: `offline-store.js?v=20260724-2`, `tablet-transfer.js?v=20260724-3`, `tablet.css?v=20260724-1`, Service Worker/Manifest `1.5.207`, Snapshot-API 6.
+
+Validierung:
+
+- iOS-9-nahe IndexedDB-QA und WebSQL-QA pruefen seitenweises Schreiben, Reload und die vollstaendige Navigation ueber mehrere Trefferseiten.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 247/247 erfolgreich.
+- Browser-Smoke auf Port `4175`: 40-Zeilen-Snapshot, 20 Treffer auf Seite 1, weitere 15 Treffer auf Seite 2 sowie Zielbereich direkt unter der Quelle.
+
+## 2026-07-24 - Snapshot-Erfolgsanzeige auf Bestandszeilen reduzieren
+
+Umgesetzt:
+
+- Modernes und Legacy-Tablet verwenden im gemeinsamen Umlagerungsbereich nach erfolgreichem Snapshot-Abschluss nur noch die Anzeige `[Anzahl] positive Bestandszeilen`.
+- Lager, Zeitpunkt, Generation, Speicher-Backend und technische Details werden im normalen Erfolgszustand nicht mehr angezeigt.
+- Ladeanzeige und konkrete Fehlerdiagnosen behalten die bisherigen Status-, Backend- und Fehlerdetails.
+- Asset-/Cachestand: `tablet-transfer.js?v=20260724-2`, Service Worker/Manifest `1.5.206`.
+
+Validierung:
+
+- QA prueft den exakten Erfolgstext, das Fehlen technischer Erfolgsdetails sowie die unveraenderten Lade- und Fehlerdiagnosen fuer den von Modern und Legacy gemeinsam verwendeten Controller.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 247/247 erfolgreich.
+
+## 2026-07-24 - Aktiven Tablet-Auftrag beim Wechsel zur Umlagerung erhalten
+
+Ursache:
+
+- Der gemeinsame Moduswechsel blockierte einen angenommenen Kommissionierungs- oder Einlagerungsauftrag vor dem Wechsel zur Umlagerung.
+- Nach einem erlaubten Moduswechsel wurde immer `resetToStart()` ausgefuehrt. Damit gingen der geoeffnete Auftrag, sein Dirty-Status und der lokale Absturz-Cache verloren.
+
+Umgesetzt:
+
+- Modernes und Legacy-Tablet behandeln nur den Wechsel `aktiver Auftrag -> Umlagerung -> zugehoeriger Auftragsbereich` zustandserhaltend.
+- Auftrag, Positionen, Mengen, Notizen, Dirty-Status und lokaler Auftragscache bleiben unveraendert; es wird weder beendet, verworfen noch zurueckgesetzt.
+- Direkte Wechsel zwischen Kommissionierung und Einlagerung bleiben bei aktivem Auftrag gesperrt. Der bestehende Schutz fuer einen ungespeicherten Umlagerungsentwurf bleibt ebenfalls aktiv.
+- Asset-/Cachestand: `tablet-legacy.js?v=20260724-3`, Service Worker/Manifest `1.5.205`.
+
+Validierung:
+
+- QA prueft Kommissionierung und Einlagerung jeweils im modernen und Legacy-Tablet inklusive vollstaendigem Zustandsvergleich, Dirty-Status, Cacheinhalt und unveraendertem Schutz des anderen Auftragsbereichs.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 246/246 erfolgreich.
+- Browser-Smoke auf Port `4175`: angenommenen Kommissionierungsauftrag geaendert, Umlagerung geoeffnet, zurueckgewechselt und Menge/Notiz unveraendert wiedergefunden; Einlagerungswechsel blieb gesperrt.
 
 ## 2026-07-24 - SI-LE/HU-Erfolgshinweis aus Zusatzbemerkung entfernt
 

@@ -1,6 +1,6 @@
 # HLogistik Test Baseline
 
-Stand: 2026-07-24 08:50:21 +02:00
+Stand: 2026-07-24 10:16:32 +02:00
 
 ## Kurzbeschreibung
 
@@ -112,6 +112,7 @@ Die QA-Matrix sucht im Exportziel, in `Exporte/`, in `tmp/` und in gemeldeten Ex
 - Tablet Modern pruefen.
 - Tablet Legacy pruefen, soweit moeglich.
 - Auftrag uebernehmen, offline wechseln, Sync-Queue-Verhalten pruefen.
+- Bei angenommenem Kommissionierungs- und Einlagerungsauftrag zur Umlagerung und zurueck wechseln. Auftrag, Positionswerte, Notizen, Dirty-Status und lokaler Cache muessen unveraendert bleiben; der direkte Wechsel in den anderen Auftragsbereich bleibt gesperrt.
 - Button-, Loading- und Fehlerzustaende pruefen.
 - PDF-Export ohne Tab-Reload pruefen.
 
@@ -124,17 +125,18 @@ Die QA-Matrix sucht im Exportziel, in `Exporte/`, in `tmp/` und in gemeldeten Ex
 - Entwurf speichern, Seite neu laden, Entwurf oeffnen und Quellsnapshot online erneut validieren.
 - Offline darf kein `POST /api/storage/transfers` und kein Eintrag in die bestehende Sync-Queue entstehen.
 - Online fuer das gewaehlte Lager einen vollstaendigen Snapshot aller positiven Bestandszeilen speichern; nur ID, Lager, Artikel-ID, Materialnummer, Barcode, Stellplatz, HU/LE, Menge, Paletten und Aktualisierungszeitpunkt duerfen enthalten sein.
-- Offline-Suche direkt im aktiven Snapshot-Backend nach Artikel/Material, Barcode, Stellplatz und HU/LE pruefen; die Oberflaeche zeigt maximal 25 Treffer. Verlauf und Bewegungen duerfen nicht offline persistiert werden.
-- Snapshot-Lager, Zeitpunkt und Zeilenzahl sichtbar pruefen. Eine simuliert unterbrochene Aktualisierung muss den zuvor vollstaendigen Snapshot unveraendert aktiv lassen.
+- Offline-Suche direkt im aktiven Snapshot-Backend nach Artikel/Material, Barcode, Stellplatz und HU/LE pruefen. Alle Treffer muessen ohne Gesamtlimit seitenweise erreichbar sein; gleichzeitig duerfen nur 20 Treffer im Arbeitsspeicher und in der Oberflaeche liegen. Verlauf und Bewegungen duerfen nicht offline persistiert werden.
+- Nach erfolgreicher Snapshot-Aktualisierung darf nur `[Anzahl] positive Bestandszeilen` sichtbar sein. Lager, Zeitpunkt, Generation, Backend und technische Details bleiben im Erfolg verborgen; Lade- und Fehlerzustaende behalten ihre Status- und Diagnoseangaben. Eine simuliert unterbrochene Aktualisierung muss den zuvor vollstaendigen Snapshot unveraendert aktiv lassen.
 - iOS-9-Kompatibilitaet ohne `IDBObjectStore.getAll()` und `DOMStringList.contains()` sowie mit `webkitIndexedDB`/`webkitIDBKeyRange` pruefen. Snapshot muss nach neuem Store-Aufruf und Reload suchbar bleiben.
 - Fehlerfaelle fuer fehlendes/veraltetes Offline-Store-Skript, blockiertes Upgrade, unvollstaendiges Schema sowie Schreib-/Cursorfehler muessen einen konkreten Diagnosecode statt einer Sammelmeldung zeigen.
 - Bei `IDB_SNAPSHOT_WRITE_START_FAILED` muessen nativer Fehlername, native Meldung, Ist-DB-Version und vorhandene Object-Stores sichtbar sein. Fuer die gemeldete DB-Version 7 mit vollstaendigem Schema darf der Fehlerpfad weder loeschen noch upgraden; Entwuerfe, Queue-Eintraege, Auftraege und sonstige Stores muessen erhalten bleiben.
 - Die IndexedDB-Bereitschaftspruefung muss exakt die gemeinsame `readwrite`-Transaktion ueber `transfer-stock-rows` und `transfer-stock-snapshots` verwenden und Schreiben sowie Lesen in beiden Stores nachweisen. `NotFoundError` bei Start, Schreiben, Lesen oder beim anschliessenden Snapshot markiert IndexedDB fuer die Sitzung einmalig als unbrauchbar; derselbe vollstaendige Snapshot wird automatisch ueber WebSQL wiederholt. Wiederholte IndexedDB-Versuche und Fallback-Schleifen sind unzulaessig.
-- Eine IndexedDB, deren echte Schreib-/Leseprobe fehlschlaegt, muss fuer Umlagerung auf die isolierte WebSQL-Datenbank wechseln. Backend und IndexedDB-Ursache sichtbar pruefen. WebSQL darf nur Snapshot, ungepruefte Umlagerungsentwuerfe und Probedaten enthalten; keine Auftraege oder Sync-Queue. Snapshot seitenweise schreiben, erst nach exakter Zeilenzahl aktivieren und nach Reload per SQL nach Artikel, Barcode, Stellplatz und HU/LE mit maximal 25 Treffern suchen. Eine unvollstaendige Generation darf den vorherigen Stand nicht ersetzen.
+- Eine IndexedDB, deren echte Schreib-/Leseprobe fehlschlaegt, muss fuer Umlagerung auf die isolierte WebSQL-Datenbank wechseln. Backend und IndexedDB-Ursache in Lade- beziehungsweise Fehlerdiagnosen sichtbar pruefen, nicht im erfolgreichen Kurzstatus. WebSQL darf nur Snapshot, ungepruefte Umlagerungsentwuerfe und Probedaten enthalten; keine Auftraege oder Sync-Queue. Snapshot seitenweise schreiben, erst nach exakter Zeilenzahl aktivieren und nach Reload per SQL nach Artikel, Barcode, Stellplatz und HU/LE ohne Gesamtlimit, aber in kleinen Trefferseiten suchen. Eine unvollstaendige Generation darf den vorherigen Stand nicht ersetzen.
 - Fuer den vollstaendigen Snapshot darf kein LocalStorage-Fallback eingefuehrt werden.
 - Verlauf online auf maximal 30 Zeilen begrenzen.
 - Offline gespeicherte Entwuerfe als `unchecked` kennzeichnen. Nach Wiederverbindung bleibt Buchen bis zur erfolgreichen Onlinepruefung gesperrt.
 - Mengen-, Paletten-, Stellplatz-, HU-/LE- oder Zeitstempelabweichung muss die Buchung sperren und eine erneute Quellauswahl verlangen.
+- Nach erfolgreicher oder idempotent wiederholter Buchung muss automatisch genau ein PDF-Beleg mit `Artikelnummer`, `HU`, `Menge`, `Von-Stellplatz` und `Nach-Stellplatz` entstehen. Abgelehnte Buchungen duerfen keinen Beleg erzeugen. Download und `PDF oeffnen / drucken` sind im gemeinsamen Modern-/Legacy-Controller zu pruefen.
 - Integrierten Arbeitsbereich in `tablet.html` ueber Modusschalter und direkten Link `tablet.html?bereich=umlagerungen` pruefen.
 - Desktop-, 1024er- und 768er-Tablet-Layout sowie Kamera-Fallback pruefen; eine eigenstaendige Umlagerungsseite darf nicht ausgeliefert werden.
 - Reale Kamera und Berechtigungsdialog auf einem physischen Tablet stichprobenartig pruefen.

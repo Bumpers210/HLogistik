@@ -1,6 +1,6 @@
 (function () {
   var SEARCH_DEBOUNCE_MS = 250;
-  var SOURCE_RESULT_LIMIT = 25;
+  var SOURCE_PAGE_SIZE = 20;
   var HISTORY_RESULT_LIMIT = 30;
   var elements = {};
   var options = {};
@@ -9,6 +9,10 @@
   var serverOnline = false;
   var currentUser = { name: "", group: "tablet" };
   var loadedSources = [];
+  var sourceSearchQuery = "";
+  var sourceSearchOffset = 0;
+  var sourceSearchHasMore = false;
+  var sourceSearchLoading = false;
   var selectedSource = null;
   var selectionStale = false;
   var selectionNeedsValidation = false;
@@ -35,6 +39,7 @@
     bindEvents();
     renderSources([]);
     renderSelectedSource();
+    renderTransferPdfActions(null);
     renderDrafts([]);
     renderHistory([]);
     initialized = true;
@@ -51,6 +56,8 @@
       "transferSourceSearchInput",
       "transferSourceCameraButton",
       "transferSourceSearchButton",
+      "transferSourcePreviousButton",
+      "transferSourceNextButton",
       "transferSourceStatus",
       "transferSourceCount",
       "transferSourceTableBody",
@@ -67,6 +74,9 @@
       "transferSaveDraftButton",
       "transferBookButton",
       "transferStatus",
+      "transferPdfActions",
+      "transferPdfDownloadLink",
+      "transferPdfPrintLink",
       "transferDraftCount",
       "transferDraftList",
       "transferHistoryCount",
@@ -87,6 +97,8 @@
     elements.transferRefreshSnapshotButton.addEventListener("click", refreshStockSnapshot);
     elements.transferSourceSearchForm.addEventListener("submit", searchSources);
     elements.transferSourceSearchInput.addEventListener("keydown", handleSourceScannerEnter);
+    elements.transferSourcePreviousButton.addEventListener("click", loadPreviousSourcePage);
+    elements.transferSourceNextButton.addEventListener("click", loadNextSourcePage);
     elements.transferSourceTableBody.addEventListener("click", selectSourceFromTable);
     elements.transferForm.addEventListener("submit", submitTransfer);
     elements.transferTargetBinInput.addEventListener("input", updateActions);
@@ -149,8 +161,7 @@
     if (!active) return;
     if (!serverOnline) {
       if (wasOnline && loadedSources.length) {
-        loadedSources = [];
-        renderSources([]);
+        resetSourceSearchResults();
       }
       validationSequence += 1;
       validationPending = false;
@@ -170,8 +181,7 @@
       return;
     }
     if (!wasOnline && loadedSources.length) {
-      loadedSources = [];
-      renderSources([]);
+      resetSourceSearchResults();
       setStatus(elements.transferSourceStatus, "Wieder online: Bitte Quelle neu suchen; Offline-Treffer wurden verworfen.", false);
     } else if (!String(elements.transferSourceSearchInput.value || "").trim()) {
       setStatus(elements.transferSourceStatus, "Bitte Suchbegriff eingeben.", false);
@@ -221,8 +231,7 @@
     if (typeof options.onWarehouseChange === "function") options.onWarehouseChange(warehouse);
     updateUnitLabels();
     clearTransferEditor();
-    loadedSources = [];
-    renderSources([]);
+    resetSourceSearchResults();
     loadDrafts();
     setOnline(serverOnline);
     loadSnapshotMetadata().then(function () {
@@ -243,17 +252,44 @@
     if (event) event.preventDefault();
     var query = String(elements.transferSourceSearchInput.value || "").trim();
     if (!query) return setStatus(elements.transferSourceStatus, "Bitte Artikel, Barcode, Stellplatz oder HU/LE eingeben.", true);
+    sourceSearchQuery = query;
+    loadSourcePage(0);
+  }
+
+  function loadPreviousSourcePage() {
+    if (sourceSearchLoading || sourceSearchOffset <= 0 || !sourceSearchQuery) return;
+    loadSourcePage(Math.max(0, sourceSearchOffset - SOURCE_PAGE_SIZE));
+  }
+
+  function loadNextSourcePage() {
+    if (sourceSearchLoading || !sourceSearchHasMore || !sourceSearchQuery) return;
+    loadSourcePage(sourceSearchOffset + loadedSources.length);
+  }
+
+  function loadSourcePage(offset) {
+    var safeOffset = Math.max(0, Number(offset) || 0);
+    sourceSearchLoading = true;
+    renderSourcePagination();
     setStatus(elements.transferSourceStatus, serverOnline ? "Bestand wird online gesucht..." : "Gespeicherter Snapshot wird durchsucht...", false);
-    var searchPromise = serverOnline ? resolveSourceSearch(query) : resolveOfflineSourceSearch(query);
+    var searchPromise = serverOnline
+      ? resolveSourceSearch(sourceSearchQuery, safeOffset)
+      : resolveOfflineSourceSearch(sourceSearchQuery, safeOffset);
     searchPromise.then(function (locations) {
-      loadedSources = Array.isArray(locations) ? locations.slice(0, SOURCE_RESULT_LIMIT) : [];
+      var page = normalizeSourcePage(locations, safeOffset);
+      loadedSources = page.rows;
+      sourceSearchOffset = page.offset;
+      sourceSearchHasMore = page.hasMore;
+      sourceSearchLoading = false;
       renderSources(loadedSources);
       setStatus(elements.transferSourceStatus, loadedSources.length
-        ? loadedSources.length + (serverOnline ? " Online-Bestandszeile(n) geladen" : " Snapshot-Bestandszeile(n) geladen") +
-          (loadedSources.length === SOURCE_RESULT_LIMIT ? " (maximal " + SOURCE_RESULT_LIMIT + ")." : ".")
+        ? sourceResultRangeText() + (serverOnline ? " Online-Bestandszeilen geladen." : " Snapshot-Bestandszeilen geladen.") +
+          (sourceSearchHasMore ? " Weitere Treffer sind verfügbar." : "")
         : (serverOnline ? "Kein positiver Bestand gefunden." : "Kein passender Bestand im vollständigen Snapshot gefunden."), false);
     }).catch(function (error) {
+      sourceSearchLoading = false;
       loadedSources = [];
+      sourceSearchOffset = safeOffset;
+      sourceSearchHasMore = false;
       renderSources([]);
       setStatus(elements.transferSourceStatus, "Suche fehlgeschlagen: " + error.message, true);
     });
@@ -271,23 +307,29 @@
     updateActions();
   }
 
-  function resolveSourceSearch(query) {
-    var warehouseQuery = "warehouse=" + encodeURIComponent(currentWarehouse()) + "&limit=" + SOURCE_RESULT_LIMIT;
+  function resolveSourceSearch(query, offset) {
+    var warehouseQuery = "warehouse=" + encodeURIComponent(currentWarehouse()) +
+      "&offset=" + Math.max(0, Number(offset) || 0) + "&limit=" + (SOURCE_PAGE_SIZE + 1);
     return apiJson("/api/articles/lookup/" + encodeURIComponent(query) + "?" + warehouseQuery).then(function (article) {
       return apiJson("/api/storage/locations?" + warehouseQuery + "&materialnummer=" + encodeURIComponent(article.materialnummer || query));
     }).catch(function () {
       return apiJson("/api/storage/locations?" + warehouseQuery + "&q=" + encodeURIComponent(query));
+    }).then(function (rows) {
+      return sourcePageFromRows(rows, offset);
     });
   }
 
-  function resolveOfflineSourceSearch(query) {
+  function resolveOfflineSourceSearch(query, offset) {
     var apiError = transferSnapshotApiError("searchTransferStockSnapshot");
     if (apiError) return Promise.reject(apiError);
-    return window.OfflineStore.searchTransferStockSnapshot(currentWarehouse(), query, SOURCE_RESULT_LIMIT).then(function (result) {
+    return window.OfflineStore.searchTransferStockSnapshot(currentWarehouse(), query, {
+      offset: Math.max(0, Number(offset) || 0),
+      limit: SOURCE_PAGE_SIZE
+    }).then(function (result) {
       snapshotMeta = result && result.metadata || null;
       renderSnapshotStatus();
       if (!snapshotMeta) throw new Error("Für " + currentWarehouse() + " ist noch kein vollständiger Snapshot gespeichert");
-      return result && Array.isArray(result.rows) ? result.rows : [];
+      return result || { rows: [], offset: offset, hasMore: false };
     }).catch(function (error) {
       if (error && !error.offlineStoreCode && String(error.message || "").indexOf("noch kein vollständiger Snapshot") >= 0) throw error;
       throw snapshotStorageUiError("Offline-Suche fehlgeschlagen", error);
@@ -348,19 +390,7 @@
         diagnostic && diagnostic.code || "TRANSFER_STORAGE_UNAVAILABLE",
         diagnostic && diagnostic.message || "Umlagerungs-Offline-Speicher ist nicht verfügbar"
       );
-      if (diagnostic.backend === "WebSQL") return refreshWebSqlStockSnapshot(warehouse);
-      return apiJson("/api/storage/locations/snapshot?warehouse=" + encodeURIComponent(warehouse), { timeout: 30000 }).then(function (snapshot) {
-      var rows = snapshot && Array.isArray(snapshot.rows) ? snapshot.rows : [];
-      if (!snapshot || normalizeWarehouse(snapshot.warehouse) !== warehouse || !snapshot.capturedAt || Number(snapshot.rowCount) !== rows.length) {
-        throw new Error("Server lieferte keinen vollständigen Lager-Snapshot");
-      }
-      return window.OfflineStore.replaceTransferStockSnapshot({
-        warehouse: warehouse,
-        capturedAt: snapshot.capturedAt,
-        snapshotKey: snapshot.snapshotKey,
-        rows: rows
-      });
-      });
+      return refreshPagedStockSnapshot(warehouse);
     }).then(function (metadata) {
       return window.OfflineStore.probeTransferStockSnapshotStorage().then(function (diagnostic) {
         snapshotStorageInfo = diagnostic || null;
@@ -389,7 +419,7 @@
     });
   }
 
-  function refreshWebSqlStockSnapshot(warehouse) {
+  function refreshPagedStockSnapshot(warehouse) {
     var pageSize = 100;
     var session = null;
     var expectedSnapshotKey = "";
@@ -404,7 +434,7 @@
       ).then(function (page) {
         var rows = page && Array.isArray(page.rows) ? page.rows : [];
         if (!page || normalizeWarehouse(page.warehouse) !== warehouse || !page.capturedAt || !page.snapshotKey || Number(page.offset) !== nextOffset || rows.length > pageSize) {
-          throw new Error("Server lieferte keine gültige WebSQL-Snapshot-Seite");
+          throw new Error("Server lieferte keine gültige Snapshot-Seite");
         }
         if (!session) {
           expectedSnapshotKey = String(page.snapshotKey);
@@ -431,10 +461,10 @@
       return window.OfflineStore.appendTransferStockSnapshotPage(session, rows).then(function () {
         nextOffset += rows.length;
         if (page.hasMore === true) {
-          if (!rows.length || nextOffset >= expectedRowCount) throw new Error("WebSQL-Snapshot-Seitenfolge ist unvollständig");
+          if (!rows.length || nextOffset >= expectedRowCount) throw new Error("Snapshot-Seitenfolge ist unvollständig");
           return loadPage();
         }
-        if (nextOffset !== expectedRowCount) throw new Error("WebSQL-Snapshot ist unvollständig: " + nextOffset + " von " + expectedRowCount + " Zeilen");
+        if (nextOffset !== expectedRowCount) throw new Error("Snapshot ist unvollständig: " + nextOffset + " von " + expectedRowCount + " Zeilen");
         return window.OfflineStore.completeTransferStockSnapshotUpdate(session);
       });
     }
@@ -448,14 +478,12 @@
   function renderSnapshotStatus(message, isError, state) {
     if (!elements.transferSnapshotStatus) return;
     if (message) {
-      elements.transferSnapshotStatus.textContent = message;
+      elements.transferSnapshotStatus.textContent = message + snapshotStorageStatusText();
     } else if (snapshotMeta) {
-      elements.transferSnapshotStatus.textContent = "Snapshot " + snapshotMeta.warehouse + ": " +
-        formatNumber(snapshotMeta.rowCount) + " positive Bestandszeile(n), Stand " + formatDateTime(snapshotMeta.capturedAt) + ".";
+      elements.transferSnapshotStatus.textContent = formatNumber(snapshotMeta.rowCount) + " positive Bestandszeilen";
     } else {
-      elements.transferSnapshotStatus.textContent = "Snapshot " + currentWarehouse() + ": noch kein vollständiger Stand gespeichert.";
+      elements.transferSnapshotStatus.textContent = "Noch kein vollständiger Snapshot gespeichert.";
     }
-    elements.transferSnapshotStatus.textContent += snapshotStorageStatusText();
     elements.transferSnapshotStatus.className = "tablet-transfer-snapshot-status" +
       (isError ? " is-error" : state === "checking" ? " is-checking" : "");
   }
@@ -478,7 +506,7 @@
         storageDiagnosticError("OFFLINE_STORE_SCRIPT_MISSING", "offline-store.js wurde nicht geladen oder von diesem Browser nicht ausgeführt")
       );
     }
-    if (Number(window.OfflineStore.transferSnapshotApiVersion || 0) < 5 ||
+    if (Number(window.OfflineStore.transferSnapshotApiVersion || 0) < 6 ||
         typeof window.OfflineStore[methodName] !== "function" ||
         typeof window.OfflineStore.probeTransferStockSnapshotStorage !== "function") {
       var version = String(window.OfflineStore.transferSnapshotApiVersion || "alt");
@@ -519,7 +547,7 @@
 
   function renderSources(locations) {
     elements.transferSourceTableBody.innerHTML = "";
-    elements.transferSourceCount.textContent = locations.length + (locations.length === 1 ? " Treffer" : " Treffer");
+    renderSourcePagination();
     if (!locations.length) {
       elements.transferSourceTableBody.innerHTML = '<tr><td colspan="6">Keine Bestandszeilen gefunden.</td></tr>';
       return;
@@ -535,6 +563,49 @@
         '<td><button type="button" data-transfer-source-id="' + escapeAttribute(location.id) + '">Wählen</button></td>';
       elements.transferSourceTableBody.appendChild(row);
     });
+  }
+
+  function renderSourcePagination() {
+    var range = sourceResultRangeText();
+    elements.transferSourceCount.textContent = range || "0 Treffer";
+    elements.transferSourcePreviousButton.hidden = sourceSearchOffset <= 0;
+    elements.transferSourcePreviousButton.disabled = sourceSearchLoading || sourceSearchOffset <= 0;
+    elements.transferSourceNextButton.hidden = !sourceSearchHasMore;
+    elements.transferSourceNextButton.disabled = sourceSearchLoading || !sourceSearchHasMore;
+  }
+
+  function sourceResultRangeText() {
+    if (!loadedSources.length) return "";
+    var first = sourceSearchOffset + 1;
+    var last = sourceSearchOffset + loadedSources.length;
+    return first === last ? first + " Treffer" : first + "–" + last + " Treffer";
+  }
+
+  function sourcePageFromRows(rows, offset) {
+    var values = Array.isArray(rows) ? rows : [];
+    return {
+      rows: values.slice(0, SOURCE_PAGE_SIZE),
+      offset: Math.max(0, Number(offset) || 0),
+      hasMore: values.length > SOURCE_PAGE_SIZE
+    };
+  }
+
+  function normalizeSourcePage(page, offset) {
+    if (Array.isArray(page)) return sourcePageFromRows(page, offset);
+    return {
+      rows: page && Array.isArray(page.rows) ? page.rows.slice(0, SOURCE_PAGE_SIZE) : [],
+      offset: Math.max(0, Number(page && page.offset != null ? page.offset : offset) || 0),
+      hasMore: Boolean(page && page.hasMore)
+    };
+  }
+
+  function resetSourceSearchResults() {
+    loadedSources = [];
+    sourceSearchQuery = "";
+    sourceSearchOffset = 0;
+    sourceSearchHasMore = false;
+    sourceSearchLoading = false;
+    renderSources([]);
   }
 
   function selectSourceFromTable(event) {
@@ -648,9 +719,11 @@
         return deleteDraft(transferId).catch(function () {}).then(function () { return result; });
       });
     }).then(function (result) {
+      renderTransferPdfActions(result.pdf);
       setStatus(elements.transferStatus,
         (result.replayed ? "Umlagerung war bereits gebucht: " : "Umlagerung gebucht: ") +
-        formatNumber(result.transfer.mengeStueck) + " Stück von " + result.transfer.quellLagerplatz + " nach " + result.transfer.zielLagerplatz + ".", false);
+        formatNumber(result.transfer.mengeStueck) + " Stück von " + result.transfer.quellLagerplatz + " nach " + result.transfer.zielLagerplatz +
+        ". PDF wurde erstellt.", false);
       clearTransferEditor();
       return Promise.all([loadDrafts(), loadHistory(), repeatCurrentSearch()]);
     }).catch(function (error) {
@@ -659,6 +732,15 @@
       submitting = false;
       updateActions();
     });
+  }
+
+  function renderTransferPdfActions(pdf) {
+    var url = String(pdf && pdf.url || "");
+    var fileName = String(pdf && pdf.file || "Umlagerung.pdf");
+    elements.transferPdfActions.hidden = !url;
+    elements.transferPdfDownloadLink.setAttribute("href", url || "#");
+    elements.transferPdfDownloadLink.setAttribute("download", fileName);
+    elements.transferPdfPrintLink.setAttribute("href", url || "#");
   }
 
   function validateResumedSource(showStatus) {

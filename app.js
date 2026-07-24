@@ -1308,6 +1308,9 @@ function normalizeOrderQuantitiesForSave(order) {
       const parsed = window.HLogistikQuantityFormat?.parse(text);
       if (Number.isFinite(parsed)) line[key] = String(parsed);
     });
+    if (line.manual === true && !String(line.targetQty ?? "").trim() && String(line.actualQty ?? "").trim()) {
+      line.targetQty = String(line.actualQty).trim();
+    }
     const source = String(line.quantitySourceText || "").trim();
     const effectiveQuantity = String(line.actualQty ?? "").trim() || line.targetQty;
     if (source && window.HLogistikQuantityFormat?.parse(source) !== window.HLogistikQuantityFormat?.parse(effectiveQuantity)) {
@@ -6399,6 +6402,7 @@ async function addManualStorageLine() {
 }
 
 function createManualStorageLine(preset = {}, options = {}) {
+  const quantity = options.actualQty || "";
   return createLine({
     orderType: "storage",
     manual: true,
@@ -6408,8 +6412,8 @@ function createManualStorageLine(preset = {}, options = {}) {
     product: preset.product || "",
     description: preset.description || "",
     fromBin: options.fromBin || "",
-    targetQty: "",
-    actualQty: options.actualQty || "",
+    targetQty: quantity,
+    actualQty: quantity,
     unit: preset.unit || "Stk"
   });
 }

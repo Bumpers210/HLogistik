@@ -5,7 +5,7 @@ import { readArticlesSync, findArticleByCode } from "./articles.mjs";
 
 // ── Locations ─────────────────────────────────────────────────────────────────
 
-export function readStorageLocations({ query = "", materialnummer = "", locationId = "", limit = 0, warehouse = "SSI" } = {}) {
+export function readStorageLocations({ query = "", materialnummer = "", locationId = "", offset = 0, limit = 0, warehouse = "SSI" } = {}) {
   const normalizedWarehouse = normalizeWarehouse(warehouse);
   const articles = readArticlesSync(normalizedWarehouse);
   const articleInfo = new Map(articles.map((article) => [article.materialnummer, article]));
@@ -32,8 +32,9 @@ export function readStorageLocations({ query = "", materialnummer = "", location
     const haystack = normalizeSearch([row.id, row.artikelId, row.materialnummer, row.barcode, row.materialbezeichnung, row.lagerplatz, row.leNummer].join(" "));
     return terms.every((term) => haystack.includes(term));
   });
+  const safeOffset = Number.isInteger(offset) && offset > 0 ? offset : 0;
   const safeLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 0;
-  return safeLimit ? filtered.slice(0, safeLimit) : filtered;
+  return safeLimit ? filtered.slice(safeOffset, safeOffset + safeLimit) : filtered.slice(safeOffset);
 }
 
 export function readStorageLocationSnapshot({ warehouse = "SSI", offset = 0, limit = 0 } = {}) {

@@ -69,7 +69,7 @@ import {
   normalizeOrder,
   orderSummary,
 } from "./server/orders.mjs";
-import { exportPdf } from "./server/export.mjs";
+import { exportPdf, exportStorageTransferPdf } from "./server/export.mjs";
 import { archiveOriginalImportFile, resolveOriginalImportFile } from "./server/original-archive.mjs";
 import { isPublicStaticFile, staticCacheHeaders } from "./server/config/static-files.mjs";
 import { ROLE_PERMISSIONS, hasGroupPermission } from "./server/rules/permission-rules.mjs";
@@ -226,8 +226,9 @@ async function route(request, response) {
     const query = url.searchParams.get("q") || "";
     const materialnummer = url.searchParams.get("materialnummer") || "";
     const locationId = url.searchParams.get("id") || "";
+    const offset = url.searchParams.has("offset") ? readInteger(url.searchParams.get("offset")) : 0;
     const limit = url.searchParams.has("limit") ? readInteger(url.searchParams.get("limit")) : 0;
-    sendJson(response, 200, readStorageLocations({ query, materialnummer, locationId, limit, warehouse }));
+    sendJson(response, 200, readStorageLocations({ query, materialnummer, locationId, offset, limit, warehouse }));
     return;
   }
 
@@ -358,7 +359,20 @@ async function route(request, response) {
   if (pathname === "/api/storage/transfers" && request.method === "POST") {
     requireGroup(request, ROLE_PERMISSIONS.storageTransfer);
     const body = await readBody(request, maxBodyBytes);
-    sendJson(response, 200, { ok: true, ...bookStorageTransfer(body.transfer || body, warehouse) });
+    const result = bookStorageTransfer(body.transfer || body, warehouse);
+    const transferPdf = await exportStorageTransferPdf(
+      result.transfer,
+      exportDir,
+      tempDir,
+      requestOrigin(request),
+      defaultExportDir,
+      {
+        discard: isQaDiscardExportRequest(request, result.transfer),
+        preserveTempArtifacts: isQaPreserveArtifactsRequest(request, result.transfer),
+        exportedAt: new Date().toISOString()
+      }
+    );
+    sendJson(response, 200, { ok: true, ...result, pdf: transferPdf });
     return;
   }
 
@@ -1461,12 +1475,12 @@ function requestOrigin(request) {
   return `${protocol}://${host}`;
 }
 
-function isQaDiscardExportRequest(request, order) {
-  return isTruthyHeader(request.headers["x-qa-discard-export"]) && isLoopbackRequest(request) && isQaOrder(order);
+function isQaDiscardExportRequest(request, subject) {
+  return isTruthyHeader(request.headers["x-qa-discard-export"]) && isLoopbackRequest(request) && isQaExportSubject(subject);
 }
 
-function isQaPreserveArtifactsRequest(request, order) {
-  return isTruthyHeader(request.headers["x-qa-preserve-artifacts"]) && isLoopbackRequest(request) && isQaOrder(order);
+function isQaPreserveArtifactsRequest(request, subject) {
+  return isTruthyHeader(request.headers["x-qa-preserve-artifacts"]) && isLoopbackRequest(request) && isQaExportSubject(subject);
 }
 
 function isTruthyHeader(value) {
@@ -1489,6 +1503,21 @@ function isQaOrder(order) {
       : [])
   ];
   return values.some((value) => /^QA[-_]/i.test(String(value || "").trim()));
+}
+
+function isQaTransfer(transfer) {
+  const values = [
+    transfer?.id,
+    transfer?.materialnummer,
+    transfer?.leNummer,
+    transfer?.referenz,
+    transfer?.gebuchtVon,
+  ];
+  return values.some((value) => /^QA[-_]/i.test(String(value || "").trim()));
+}
+
+function isQaExportSubject(subject) {
+  return isQaOrder(subject) || isQaTransfer(subject);
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
