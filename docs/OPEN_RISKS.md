@@ -1,10 +1,10 @@
 # HLogistik Open Risks
 
-Stand: 2026-07-24 08:27:50 +02:00
+Stand: 2026-07-24 08:50:21 +02:00
 
 ## Aktueller Stand nach Stabilisierung
 
-Keine neuen offenen P0/P1-Risiken aus dem sortierten Stabilitaetsstand. Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung, Umlagerungen und Artikelstamm-Buchungsexport sind in der QA-Matrix abgedeckt. Der aktuelle Service-Worker-/Manifest-Stand ist `1.5.203`.
+Keine neuen offenen P0/P1-Risiken aus dem sortierten Stabilitaetsstand. Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung, Umlagerungen und Artikelstamm-Buchungsexport sind in der QA-Matrix abgedeckt. Der aktuelle Service-Worker-/Manifest-Stand ist `1.5.204`.
 
 Weiter offen bleiben nur bewusst dokumentierte Betriebsentscheidungen: CR-002, automatische SQLite-Wiederherstellung, Passwort-Fallback und echtes Authentifizierungskonzept.
 

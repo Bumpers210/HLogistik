@@ -1,6 +1,24 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-24 08:27:50 +02:00
+Stand: 2026-07-24 08:50:21 +02:00
+
+## 2026-07-24 - SI-LE/HU-Erfolgshinweis aus Zusatzbemerkung entfernt
+
+Ursache:
+
+- Beim eindeutigen Ergaenzen eines SI-Von-Lagerplatzes aus dem LE/HU-System wurde der technische Erfolgshinweis `Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt.` als automatische Zusatzbemerkung erzeugt und mit dem Auftrag gespeichert.
+
+Umgesetzt:
+
+- Der eindeutige Systemtreffer ergaenzt weiterhin den Von-Lagerplatz und behaelt seine strukturierten Diagnosedaten, erzeugt aber keine Zusatzbemerkung mehr.
+- Desktop, modernes Tablet und Legacy-Tablet entfernen den alten Erfolgshinweis beim Anzeigen und vor dem Speichern. Andere manuelle und automatische Bemerkungsteile bleiben unveraendert.
+- Der Server bereinigt denselben Alttext vor jedem Speichern und beim Laden vorhandener Auftraege. Der technische Lookup-Grund wird ohne den entfernten Zusatzbemerkungstext formuliert.
+- Asset-/Cachestand: `app-import-line-helpers.js?v=20260724-2`, `app.js?v=20260724-2`, `tablet-legacy.js?v=20260724-2`, Service Worker/Manifest `1.5.204`.
+
+Validierung:
+
+- QA prueft Erzeugung, Desktop, modernes Tablet, Legacy-Tablet sowie serverseitiges Speichern und Wiederladen. Zwei umgebende manuelle Bemerkungen und ein anderer automatischer Hinweis bleiben wortgleich erhalten.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 244/244 erfolgreich.
 
 ## 2026-07-24 - IndexedDB-Fehlpositiv auf iPad 2
 

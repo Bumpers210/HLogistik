@@ -29,15 +29,31 @@
     return Number.isFinite(number) && number > 0;
   }
 
+  function isLegacySiSystemBinSuccessNote(value) {
+    return /^Von-Lagerplatz aus LE\/HU-System eindeutig erg(?:ae|\u00e4)nzt(?:\s*\([^)]*\)|\s*:\s*[^.]+)?\.?$/i
+      .test(String(value || "").trim());
+  }
+
+  function stripLegacySiSystemBinSuccessNote(value) {
+    var text = String(value || "").trim();
+    if (!text) return "";
+    var parts = text.split(" - ");
+    if (!parts.some(isLegacySiSystemBinSuccessNote)) return text;
+    return parts.filter(function (part) {
+      return !isLegacySiSystemBinSuccessNote(part);
+    }).join(" - ").trim();
+  }
+
   function normalizeAutoPositionNotes(notes) {
     var source = notes && typeof notes === "object" ? notes : {};
+    var sourceBinSystem = String(source.sourceBinSystem || "").trim();
     return {
       destination: String(source.destination || "").trim(),
       quantity: String(source.quantity || "").trim(),
       quantityCorrection: String(source.quantityCorrection || "").trim(),
       storagePallet: String(source.storagePallet || "").trim(),
       loadingSlip: String(source.loadingSlip || "").trim(),
-      sourceBinSystem: String(source.sourceBinSystem || "").trim(),
+      sourceBinSystem: isLegacySiSystemBinSuccessNote(sourceBinSystem) ? "" : sourceBinSystem,
       package: String(source.package || "").trim()
     };
   }
@@ -45,6 +61,7 @@
   function setAutoPositionNote(notes, key, value) {
     var next = normalizeAutoPositionNotes(notes);
     if (Object.prototype.hasOwnProperty.call(next, key)) next[key] = String(value || "").trim();
+    if (key === "sourceBinSystem" && isLegacySiSystemBinSuccessNote(next.sourceBinSystem)) next.sourceBinSystem = "";
     return next;
   }
 
@@ -62,7 +79,7 @@
   }
 
   function manualPositionNoteFromInput(value, line) {
-    var manual = String(value || "").trim();
+    var manual = stripLegacySiSystemBinSuccessNote(value);
     var automaticParts = uniqueNoteParts(autoPositionNoteValues(line));
     var automaticSequence = automaticParts.join(" - ");
     if (!manual || !automaticSequence) return manual;
@@ -127,6 +144,7 @@
     autoPositionNoteValues: autoPositionNoteValues,
     setAutoPositionNote: setAutoPositionNote,
     manualPositionNoteFromInput: manualPositionNoteFromInput,
-    combinedPositionNote: combinedPositionNote
+    combinedPositionNote: combinedPositionNote,
+    stripLegacySiSystemBinSuccessNote: stripLegacySiSystemBinSuccessNote
   };
 })();

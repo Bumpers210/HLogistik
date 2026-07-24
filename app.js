@@ -4186,13 +4186,11 @@ function siSystemFromBinPatchForLine(line, locations) {
   });
   const reason = ocrRawValue
     ? `OCR-Rohwert ${ocrRawValue} durch eindeutigen LE/HU-Systemtreffer ${systemBin} ersetzt.`
-    : `Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt: ${systemBin}.`;
+    : `Eindeutiger LE/HU-Systemtreffer ${systemBin} als Von-Lagerplatz angewendet.`;
   return {
     changed: true,
     applied: true,
-    note: ocrRawValue
-      ? `Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt (OCR-Rohwert: ${ocrRawValue}; Systemtreffer: ${systemBin}).`
-      : "Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt.",
+    note: "",
     patch: {
       ...reviewPatch,
       fromBin: systemBin,

@@ -83,11 +83,13 @@ async function run() {
     manualPositionNoteFromInput: importLineHelpers.manualPositionNoteFromInput,
     normalizePositionNotesForSave: (order) => {
       (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
+        line.autoPositionNotes = importLineHelpers.normalizeAutoPositionNotes(line.autoPositionNotes);
         line.positionNote = importLineHelpers.manualPositionNoteFromInput(line.positionNote, line);
       });
       return order;
     }
   });
+  const legacySiSystemNotePersistence = await legacySiSystemNotePersistenceFixture();
   const packageArticles = await createPackageLookupFixtureArticles();
   check(
     "package lookup QA articles exist in the isolated SSI article database",
@@ -194,6 +196,32 @@ async function run() {
       modern: tabletModernPositionNoteDedupe,
       legacy: tabletLegacyPositionNoteDedupe
     })
+  );
+  check(
+    "legacy SI system-bin success note is removed without changing other manual remarks",
+    [sharedPositionNoteDedupe, desktopPositionNoteDedupe, tabletModernPositionNoteDedupe, tabletLegacyPositionNoteDedupe].every((result) =>
+      result.legacyStored === "Manuell eins - Manuell zwei" &&
+        result.legacyAutoSource === "" &&
+        result.legacyCombined === "Manuell eins - Manuell zwei - Menge" &&
+        !result.legacySerialized.includes("Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt")
+    ),
+    JSON.stringify({
+      shared: sharedPositionNoteDedupe,
+      desktop: desktopPositionNoteDedupe,
+      modern: tabletModernPositionNoteDedupe,
+      legacy: tabletLegacyPositionNoteDedupe
+    })
+  );
+  check(
+    "server never persists the removed SI system-bin success note",
+    legacySiSystemNotePersistence.createStatus === 200 &&
+      legacySiSystemNotePersistence.reloadStatus === 200 &&
+      legacySiSystemNotePersistence.positionNote === "Manuell eins - Manuell zwei" &&
+      legacySiSystemNotePersistence.sourceBinSystem === "" &&
+      legacySiSystemNotePersistence.quantityNote === "Sollmenge" &&
+      legacySiSystemNotePersistence.lookupReason === "Eindeutiger LE/HU-Systemtreffer 002-H7-S12A3 als Von-Lagerplatz angewendet." &&
+      !legacySiSystemNotePersistence.serializedLine.includes("Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt"),
+    JSON.stringify(legacySiSystemNotePersistence)
   );
   check(
     "picking A1 total stays structurally separate from manual order notes",
@@ -843,7 +871,9 @@ async function run() {
     "SI Bestellschein fills missing source bin from unique LE/HU system match",
     siSystemBinUnique.patch.fromBin === "002-H7-S12A3" &&
       siSystemBinUnique.patch.fromBinSystemLookupStatus === "applied" &&
-      siSystemBinUnique.patch.fromBinReviewRequired === false,
+      siSystemBinUnique.patch.fromBinReviewRequired === false &&
+      siSystemBinUnique.note === "" &&
+      !JSON.stringify(siSystemBinUnique).includes("Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt"),
     JSON.stringify(siSystemBinUnique)
   );
   const siSystemBinAmbiguous = await siSystemFromBinFillFixture("ambiguous");
@@ -1732,10 +1762,12 @@ async function run() {
       countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
       tabletHtmlSource.includes("tablet-transfer.js?v=20260724-1") &&
       tabletHtmlSource.includes("offline-store.js?v=20260724-1") &&
-      tabletHtmlSource.includes("tablet-legacy.js?v=20260722-2") &&
+      tabletHtmlSource.includes("tablet-legacy.js?v=20260724-2") &&
       tabletHtmlSource.includes("tablet.css?v=20260722-4") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.203\"") &&
-      manifestSource.includes("\"version\": \"1.5.203\"") &&
+      indexHtmlSource.includes("app-import-line-helpers.js?v=20260724-2") &&
+      indexHtmlSource.includes("app.js?v=20260724-2") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.204\"") &&
+      manifestSource.includes("\"version\": \"1.5.204\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&
@@ -4754,6 +4786,17 @@ function positionNoteDedupeScenario(api) {
   const manualText = api.combinedPositionNote(manualLine);
   api.normalizePositionNotesForSave({ lines: [manualLine] });
 
+  const legacyText = "Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt.";
+  const legacyDetail = "Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt (OCR-Rohwert: H7S12A3; Systemtreffer: 002-H7-S12A3).";
+  const legacyLine = {
+    positionNote: `Manuell eins - ${legacyText} - Manuell zwei`,
+    autoPositionNotes: {
+      quantity: "Menge",
+      sourceBinSystem: legacyDetail
+    }
+  };
+  api.normalizePositionNotesForSave({ lines: [legacyLine] });
+
   return {
     automaticText,
     afterInputManual,
@@ -4766,6 +4809,10 @@ function positionNoteDedupeScenario(api) {
     manualText,
     repeatedStored: manualLine.positionNote,
     repeatedText: api.combinedPositionNote(manualLine),
+    legacyStored: legacyLine.positionNote,
+    legacyAutoSource: legacyLine.autoPositionNotes?.sourceBinSystem || "",
+    legacyCombined: api.combinedPositionNote(legacyLine),
+    legacySerialized: JSON.stringify(legacyLine),
     automaticOrder: api.combinedPositionNote({
       positionNote: "",
       autoPositionNotes: {
@@ -4904,6 +4951,64 @@ function createWebSqlFixture() {
       stats.openCalls += 1;
       return database;
     }
+  };
+}
+
+async function legacySiSystemNotePersistenceFixture() {
+  const legacyText = "Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt.";
+  const legacyDetail = "Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt (OCR-Rohwert: H7S12A3; Systemtreffer: 002-H7-S12A3).";
+  const create = await request("/api/orders", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({
+      order: {
+        orderNumber: `QA-SI-NOTE-${suffix}`,
+        customerName: `QA SI Note ${suffix}`,
+        customerGroupKey: `QA SI NOTE ${suffix}`,
+        orderDate: "2026-07-24",
+        orderTime: "09:00",
+        orderType: "picking",
+        orderWarehouse: "SI",
+        lines: [{
+          warehouseOrder: "1",
+          product: `QA-SI-NOTE-MAT-${suffix}`,
+          description: "QA SI Hinweis",
+          fromHandlingUnit: "72638937",
+          fromBin: "002-H7-S12A3",
+          toBin: "9021-0OUT",
+          targetQty: "1",
+          actualQty: "1",
+          unit: "ST",
+          picked: false,
+          positionNote: `Manuell eins - ${legacyText} - Manuell zwei`,
+          autoPositionNotes: {
+            quantity: "Sollmenge",
+            sourceBinSystem: legacyDetail
+          },
+          fromBinSystemLookupStatus: "applied",
+          fromBinSystemLookupReason: "Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt: 002-H7-S12A3.",
+          fromBinSystemLookupValue: "002-H7-S12A3"
+        }]
+      }
+    })
+  });
+  const id = create.body?.order?.id || "";
+  const reload = id ? await request(`/api/orders/${encodeURIComponent(id)}`) : { status: 0, body: null };
+  if (id) {
+    await request(`/api/orders/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: ADMIN_HEADERS
+    });
+  }
+  const line = reload.body?.lines?.[0] || {};
+  return {
+    createStatus: create.status,
+    reloadStatus: reload.status,
+    positionNote: line.positionNote || "",
+    sourceBinSystem: line.autoPositionNotes?.sourceBinSystem || "",
+    quantityNote: line.autoPositionNotes?.quantity || "",
+    lookupReason: line.fromBinSystemLookupReason || "",
+    serializedLine: JSON.stringify(line)
   };
 }
 

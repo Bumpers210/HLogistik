@@ -672,15 +672,29 @@ function isAcceptedByCurrentUser(order) {
   return sameUserName(order?.acceptedBy, currentUserName());
 }
 
+function isLegacySiSystemBinSuccessNote(value) {
+  return /^Von-Lagerplatz aus LE\/HU-System eindeutig erg(?:ae|ä)nzt(?:\s*\([^)]*\)|\s*:\s*[^.]+)?\.?$/i
+    .test(String(value || "").trim());
+}
+
+function stripLegacySiSystemBinSuccessNote(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const parts = text.split(" - ");
+  if (!parts.some(isLegacySiSystemBinSuccessNote)) return text;
+  return parts.filter((part) => !isLegacySiSystemBinSuccessNote(part)).join(" - ").trim();
+}
+
 function normalizeAutoPositionNotes(notes) {
   const source = notes && typeof notes === "object" ? notes : {};
+  const sourceBinSystem = String(source.sourceBinSystem || "").trim();
   return {
     destination: String(source.destination || "").trim(),
     quantity: String(source.quantity || "").trim(),
     quantityCorrection: String(source.quantityCorrection || "").trim(),
     storagePallet: String(source.storagePallet || "").trim(),
     loadingSlip: String(source.loadingSlip || "").trim(),
-    sourceBinSystem: String(source.sourceBinSystem || "").trim(),
+    sourceBinSystem: isLegacySiSystemBinSuccessNote(sourceBinSystem) ? "" : sourceBinSystem,
     package: String(source.package || "").trim(),
   };
 }
@@ -690,7 +704,7 @@ function combinedPositionNote(line) {
 }
 
 function manualPositionNoteFromInput(value, line) {
-  let manual = String(value || "").trim();
+  let manual = stripLegacySiSystemBinSuccessNote(value);
   const automaticParts = uniqueNoteParts(autoPositionNoteValues(line));
   const automaticSequence = automaticParts.join(" - ");
   if (!manual || !automaticSequence) return manual;

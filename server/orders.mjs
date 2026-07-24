@@ -48,6 +48,7 @@ export function findOrder(id) {
 }
 
 export function upsertOrder(order) {
+  const normalizedLines = normalizeOrderLines(Array.isArray(order.lines) ? order.lines : []);
   getDb()
     .prepare(
       `INSERT INTO auftraege
@@ -122,7 +123,7 @@ export function upsertOrder(order) {
       order.originalArchivedAt,
       order.originalArchivePath,
       order.originalArchiveError,
-      JSON.stringify(Array.isArray(order.lines) ? order.lines : []),
+      JSON.stringify(normalizedLines),
       order.createdAt,
       order.updatedAt
     );
@@ -283,7 +284,7 @@ export function orderSummary(order) {
 function orderFromRow(row) {
   let lines = [];
   try {
-    lines = JSON.parse(row.positionen || "[]");
+    lines = normalizeOrderLines(JSON.parse(row.positionen || "[]"));
   } catch {
     lines = [];
   }
@@ -330,9 +331,52 @@ function normalizeOrderWarehouse(value) {
 function normalizeOrderLines(lines) {
   return lines.map((line) => {
     const normalizedToBin = normalizeDestinationName(line?.toBin);
-    if (!normalizedToBin || normalizedToBin === line?.toBin) return line;
-    return { ...line, toBin: normalizedToBin };
+    const normalizedNotes = normalizeOrderLineNotes(line);
+    if (!normalizedToBin || normalizedToBin === normalizedNotes?.toBin) return normalizedNotes;
+    return { ...normalizedNotes, toBin: normalizedToBin };
   });
+}
+
+function normalizeOrderLineNotes(line) {
+  if (!line || typeof line !== "object") return line;
+  const sourceAutoNotes = line.autoPositionNotes && typeof line.autoPositionNotes === "object"
+    ? line.autoPositionNotes
+    : null;
+  const sourceBinSystem = String(sourceAutoNotes?.sourceBinSystem || "").trim();
+  const normalizedSourceBinSystem = isLegacySiSystemBinSuccessNote(sourceBinSystem) ? "" : sourceBinSystem;
+  const positionNote = stripLegacySiSystemBinSuccessNote(line.positionNote);
+  const legacyReason = isLegacySiSystemBinSuccessNote(line.fromBinSystemLookupReason);
+  const normalizedReason = legacyReason
+    ? `Eindeutiger LE/HU-Systemtreffer ${String(line.fromBinSystemLookupValue || "").trim()} als Von-Lagerplatz angewendet.`.replace(/\s+/g, " ").trim()
+    : line.fromBinSystemLookupReason;
+  const notesChanged = Boolean(sourceAutoNotes && normalizedSourceBinSystem !== sourceBinSystem);
+  if (!notesChanged && positionNote === String(line.positionNote || "") && normalizedReason === line.fromBinSystemLookupReason) {
+    return line;
+  }
+  return {
+    ...line,
+    positionNote,
+    ...(sourceAutoNotes
+      ? { autoPositionNotes: { ...sourceAutoNotes, sourceBinSystem: normalizedSourceBinSystem } }
+      : {}),
+    ...(normalizedReason !== line.fromBinSystemLookupReason
+      ? { fromBinSystemLookupReason: normalizedReason }
+      : {})
+  };
+}
+
+function isLegacySiSystemBinSuccessNote(value) {
+  return /^Von-Lagerplatz aus LE\/HU-System eindeutig erg(?:ae|ä)nzt(?:\s*\([^)]*\)|\s*:\s*[^.]+)?\.?$/i
+    .test(String(value || "").trim());
+}
+
+function stripLegacySiSystemBinSuccessNote(value) {
+  const original = String(value || "");
+  const text = original.trim();
+  if (!text) return "";
+  const parts = text.split(" - ");
+  if (!parts.some(isLegacySiSystemBinSuccessNote)) return original;
+  return parts.filter((part) => !isLegacySiSystemBinSuccessNote(part)).join(" - ").trim();
 }
 
 function userLookupKey(value) {

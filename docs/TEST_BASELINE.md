@@ -1,6 +1,6 @@
 # HLogistik Test Baseline
 
-Stand: 2026-07-24 08:27:50 +02:00
+Stand: 2026-07-24 08:50:21 +02:00
 
 ## Kurzbeschreibung
 
@@ -105,6 +105,7 @@ Die QA-Matrix sucht im Exportziel, in `Exporte/`, in `tmp/` und in gemeldeten Ex
 - Mindestens ein bisher funktionierendes PDF manuell importieren.
 - Browser-Konsole auf `PDF-Import Diagnose` und Positionsdiagnose pruefen.
 - Von-Lagerplatz darf nicht per SSI-Stellplatzregel oder Bestandsdaten korrigiert werden.
+- Ein eindeutiger SI-LE/HU-Systemtreffer darf den Von-Lagerplatz ergaenzen, aber nicht den alten Erfolgstext `Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt.` in der Zusatzbemerkung erzeugen oder speichern. Vorhandener Alttext ist gezielt zu entfernen; andere manuelle und automatische Bemerkungen muessen wortgleich erhalten bleiben.
 
 ### Tablet oder Offline
 
