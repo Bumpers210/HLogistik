@@ -1699,6 +1699,8 @@ async function run() {
   const tabletTransferOffline = await tabletTransferOfflineFixture(tabletTransferSource);
   const offlineStoreIos9 = await offlineStoreIos9Fixture(offlineStoreSource);
   const offlineStoreWebSql = await offlineStoreWebSqlFallbackFixture(offlineStoreSource);
+  const offlineStoreFalsePositive = await offlineStoreFalsePositiveIndexedDbFixture(offlineStoreSource);
+  const offlineStoreNotFoundStages = await offlineStoreNotFoundStagesFixture(offlineStoreSource);
   const tabletLegacyServiceWorkerSource = extractFunctionSource(tabletLegacySource, "function registerTabletServiceWorker(");
   const tabletModernServiceWorkerSource = extractFunctionSource(tabletModernSource, "function registerTabletServiceWorker(");
   const duplicateImportSource = extractFunctionSource(appSource, "async function findDuplicateOrderForImport(");
@@ -1728,12 +1730,12 @@ async function run() {
       tabletModernServiceWorkerSource.includes("updateViaCache: \"none\"") &&
       countSourceOccurrences(tabletLegacyServiceWorkerSource, "registration.update()") === 1 &&
       countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
-      tabletHtmlSource.includes("tablet-transfer.js?v=20260722-8") &&
-      tabletHtmlSource.includes("offline-store.js?v=20260722-5") &&
+      tabletHtmlSource.includes("tablet-transfer.js?v=20260724-1") &&
+      tabletHtmlSource.includes("offline-store.js?v=20260724-1") &&
       tabletHtmlSource.includes("tablet-legacy.js?v=20260722-2") &&
       tabletHtmlSource.includes("tablet.css?v=20260722-4") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.202\"") &&
-      manifestSource.includes("\"version\": \"1.5.202\"") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.203\"") &&
+      manifestSource.includes("\"version\": \"1.5.203\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&
@@ -2315,7 +2317,7 @@ async function run() {
       offlineStoreIos9.usedWebkitKeyRange === true &&
       offlineStoreIos9.domStringListContainsAvailable === false &&
       offlineStoreIos9.objectStoreGetAllAvailable === false &&
-      offlineStoreIos9.snapshotApiVersion === 4 &&
+      offlineStoreIos9.snapshotApiVersion === 5 &&
       offlineStoreIos9.metadataBeforeReload?.rowCount === 30 &&
       offlineStoreIos9.metadataAfterReload?.rowCount === 30 &&
       offlineStoreIos9.articleMatches === 25 &&
@@ -2377,7 +2379,7 @@ async function run() {
       offlineStoreIos9.repairedSchema?.draftCount === 1 &&
       offlineStoreIos9.repairedSchema?.queueCount === 1 &&
       offlineStoreIos9.repairedSchema?.orderCount === 1 &&
-      offlineStoreIos9.repairedSchema?.snapshotReadwriteStarts === 1 &&
+      offlineStoreIos9.repairedSchema?.snapshotReadwriteStarts === 3 &&
       offlineStoreIos9.repairedSchema?.searchMatchesAfterReload === 1,
     JSON.stringify(offlineStoreIos9.repairedSchema)
   );
@@ -2394,17 +2396,66 @@ async function run() {
     JSON.stringify(offlineStoreIos9.blockedDiagnostic)
   );
   check(
-    "snapshot write start error exposes original Safari error, database version and object stores after one controlled retry",
-    offlineStoreIos9.writeFailure?.code === "IDB_SNAPSHOT_WRITE_START_FAILED" &&
-      offlineStoreIos9.writeFailure?.originalName === "NotFoundError" &&
-      offlineStoreIos9.writeFailure?.originalMessage?.includes("transfer-stock-snapshots") &&
-      offlineStoreIos9.writeFailure?.dbVersion === 7 &&
-      offlineStoreIos9.writeFailure?.objectStores?.includes("transfer-stock-snapshots") &&
-      offlineStoreIos9.writeFailure?.message?.includes("Originalfehler: NotFoundError") &&
-      offlineStoreIos9.writeFailure?.message?.includes("DB-Version: 7") &&
-      offlineStoreIos9.writeFailure?.message?.includes("Object-Stores:") &&
-      offlineStoreIos9.writeFailureStarts === 2,
-    JSON.stringify(offlineStoreIos9.writeFailure)
+    "DB version 7 false-positive IndexedDB retries the complete snapshot once in WebSQL without upgrading or losing existing data",
+    offlineStoreFalsePositive.databaseVersion === 7 &&
+      offlineStoreFalsePositive.reportedStores.includes("orders") &&
+      offlineStoreFalsePositive.reportedStores.includes("sync-queue") &&
+      offlineStoreFalsePositive.reportedStores.includes("transfer-drafts") &&
+      offlineStoreFalsePositive.reportedStores.includes("transfer-stock-rows") &&
+      offlineStoreFalsePositive.reportedStores.includes("transfer-stock-snapshots") &&
+      offlineStoreFalsePositive.initialDiagnostic?.backend === "IndexedDB" &&
+      offlineStoreFalsePositive.savedMetadata?.storageBackend === "WebSQL" &&
+      offlineStoreFalsePositive.fallbackDiagnostic?.backend === "WebSQL" &&
+      offlineStoreFalsePositive.fallbackDiagnostic?.fallbackReason?.code === "IDB_SNAPSHOT_WRITE_START_FAILED" &&
+      offlineStoreFalsePositive.fallbackDiagnostic?.fallbackReason?.originalName === "NotFoundError" &&
+      offlineStoreFalsePositive.fallbackDiagnostic?.indexedDbDisabledForSession === true &&
+      offlineStoreFalsePositive.metadataBeforeReload?.rowCount === 40 &&
+      offlineStoreFalsePositive.searchBeforeReload === 25 &&
+      offlineStoreFalsePositive.storedWebSqlRows === 40 &&
+      offlineStoreFalsePositive.preservedBeforeReload?.orders === 1 &&
+      offlineStoreFalsePositive.preservedBeforeReload?.queue === 1 &&
+      offlineStoreFalsePositive.preservedBeforeReload?.drafts === 1 &&
+      offlineStoreFalsePositive.schemaUpgrades === 0 &&
+      offlineStoreFalsePositive.openVersions.every((version) => version == null) &&
+      offlineStoreFalsePositive.attemptsBeforeRepeatedCalls === 2 &&
+      offlineStoreFalsePositive.attemptsAfterRepeatedCalls === 2,
+    JSON.stringify(offlineStoreFalsePositive)
+  );
+  check(
+    "false-positive fallback survives reload, remains searchable offline and prevents repeated IndexedDB attempts",
+    offlineStoreFalsePositive.reloadedDiagnostic?.backend === "WebSQL" &&
+      offlineStoreFalsePositive.reloadedDiagnostic?.fallbackReason?.code === "IDB_PROBE_WRITE_START_FAILED" &&
+      offlineStoreFalsePositive.reloadedDiagnostic?.indexedDbDisabledForSession === true &&
+      offlineStoreFalsePositive.metadataAfterReload?.rowCount === 40 &&
+      offlineStoreFalsePositive.metadataAfterReload?.storageBackend === "WebSQL" &&
+      offlineStoreFalsePositive.searchAfterReload === 1 &&
+      offlineStoreFalsePositive.webSqlDraftCountAfterReload === 1 &&
+      offlineStoreFalsePositive.preservedAfterReload?.orders === 1 &&
+      offlineStoreFalsePositive.preservedAfterReload?.queue === 1 &&
+      offlineStoreFalsePositive.preservedAfterReload?.drafts === 1 &&
+      offlineStoreFalsePositive.snapshotTransactionStarts === 3 &&
+      offlineStoreFalsePositive.snapshotTransactions.every((entry) =>
+        entry.names.length === 2 &&
+        entry.names.includes("transfer-stock-rows") &&
+        entry.names.includes("transfer-stock-snapshots")
+      ),
+    JSON.stringify(offlineStoreFalsePositive)
+  );
+  check(
+    "NotFoundError at multi-store transaction start, write or read disables IndexedDB once per session",
+    offlineStoreNotFoundStages.length === 3 &&
+      offlineStoreNotFoundStages.every((entry) =>
+        entry.databaseVersion === 7 &&
+        entry.schemaUpgrades === 0 &&
+        entry.diagnostic?.backend === "WebSQL" &&
+        entry.diagnostic?.fallbackReason?.code === entry.expectedCode &&
+        entry.diagnostic?.fallbackReason?.originalName === "NotFoundError" &&
+        entry.diagnostic?.indexedDbDisabledForSession === true &&
+        entry.repeatedDiagnostic?.backend === "WebSQL" &&
+        entry.startsBeforeRepeat === 1 &&
+        entry.startsAfterRepeat === 1
+      ),
+    JSON.stringify(offlineStoreNotFoundStages)
   );
   check(
     "snapshot storage diagnostics distinguish missing script, stale API, open, schema and transaction failures",
@@ -2417,6 +2468,10 @@ async function run() {
       offlineStoreSource.includes("IDB_SCHEMA_INCOMPLETE") &&
       offlineStoreSource.includes("IDB_SNAPSHOT_WRITE_FAILED") &&
       offlineStoreSource.includes("IDB_SNAPSHOT_CURSOR_READ_FAILED") &&
+      offlineStoreSource.includes('db.transaction(["transfer-stock-rows", "transfer-stock-snapshots"], "readwrite")') &&
+      offlineStoreSource.includes("_indexedDbTransferDisabled") &&
+      offlineStoreSource.includes("activateWebSqlBackend(error)") &&
+      !offlineStoreSource.includes("retrySnapshotWriteAfterStartFailure") &&
       offlineStoreSource.includes("Originalfehler:") &&
       offlineStoreSource.includes("Object-Stores:") &&
       !offlineStoreSource.includes("localStorage"),
@@ -4939,6 +4994,153 @@ async function offlineStoreWebSqlFallbackFixture(offlineStoreSource) {
   };
 }
 
+async function offlineStoreFalsePositiveIndexedDbFixture(offlineStoreSource) {
+  const indexedDb = createLegacyIndexedDbFixture({
+    initialVersion: 7,
+    initialStores: legacyOfflineStoreDefinitions({
+      draftRows: [{ id: "preserved-idb-draft", warehouse: "SSI", verificationState: "unchecked" }],
+      queueRows: [{ queueId: 71, method: "PUT", url: "/api/orders/preserved", body: { preserved: true } }],
+      orderRows: [{ id: "preserved-idb-order", orderNumber: "QA-IDB-PRESERVED" }]
+    }),
+    snapshotWriteFailureFromStart: 2,
+    snapshotWriteErrorName: "NotFoundError",
+    snapshotWriteErrorMessage: "The specified object store transfer-stock-snapshots was not found"
+  });
+  const webSql = createWebSqlFixture();
+  const context = createOfflineStoreIos9Context(offlineStoreSource, indexedDb, {
+    openDatabase: webSql.openDatabase
+  });
+  const reportedStores = Array.from(indexedDb.databaseState.stores.keys()).sort();
+  const initialDiagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
+  const rows = Array.from({ length: 40 }, (_entry, index) => ({
+    id: `false-positive-stock-${index + 1}`,
+    lager: "SSI",
+    artikelId: `false-positive-article-${index + 1}`,
+    materialnummer: "FALSE-POSITIVE-MATERIAL",
+    barcode: `FALSE-POSITIVE-BC-${String(index + 1).padStart(2, "0")}`,
+    lagerplatz: `002-H4-F${String(index + 1).padStart(2, "0")}A1`,
+    leNummer: `FALSE-POSITIVE-HU-${index + 1}`,
+    mengeStueck: index + 1,
+    paletten: index % 5,
+    aktualisiertAm: `2026-07-24T08:00:${String(index).padStart(2, "0")}.000Z`
+  }));
+  const savedMetadata = await context.OfflineStore.replaceTransferStockSnapshot({
+    warehouse: "SSI",
+    capturedAt: "2026-07-24T08:00:00.000Z",
+    snapshotKey: "false-positive-complete-40",
+    rows
+  });
+  const fallbackDiagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
+  const metadataBeforeReload = await context.OfflineStore.loadTransferStockSnapshotMeta("SSI");
+  const searchBeforeReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "FALSE-POSITIVE-MATERIAL", 25);
+  const attemptsBeforeRepeatedCalls = indexedDb.stats.snapshotReadwriteStarts;
+  await context.OfflineStore.probeTransferStockSnapshotStorage();
+  await context.OfflineStore.probeTransferStockSnapshotStorage();
+  await context.OfflineStore.searchTransferStockSnapshot("SSI", "FALSE-POSITIVE-BC-39", 25);
+  const attemptsAfterRepeatedCalls = indexedDb.stats.snapshotReadwriteStarts;
+  const preservedBeforeReload = {
+    orders: indexedDb.databaseState.stores.get("orders")?.rows.size || 0,
+    queue: indexedDb.databaseState.stores.get("sync-queue")?.rows.size || 0,
+    drafts: indexedDb.databaseState.stores.get("transfer-drafts")?.rows.size || 0
+  };
+
+  vm.runInContext(offlineStoreSource, context, { filename: "offline-store-false-positive-reload.js" });
+  const reloadedDiagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
+  const metadataAfterReload = await context.OfflineStore.loadTransferStockSnapshotMeta("SSI");
+  const searchAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "FALSE-POSITIVE-BC-40", 25);
+  const draftsAfterReload = await context.OfflineStore.loadTransferDrafts();
+  const preservedAfterReload = {
+    orders: indexedDb.databaseState.stores.get("orders")?.rows.size || 0,
+    queue: indexedDb.databaseState.stores.get("sync-queue")?.rows.size || 0,
+    drafts: indexedDb.databaseState.stores.get("transfer-drafts")?.rows.size || 0
+  };
+
+  return {
+    databaseVersion: indexedDb.databaseState.version,
+    reportedStores,
+    initialDiagnostic,
+    savedMetadata,
+    fallbackDiagnostic,
+    reloadedDiagnostic,
+    metadataBeforeReload,
+    metadataAfterReload,
+    searchBeforeReload: searchBeforeReload.rows.length,
+    searchAfterReload: searchAfterReload.rows.length,
+    webSqlDraftCountAfterReload: draftsAfterReload.length,
+    preservedBeforeReload,
+    preservedAfterReload,
+    snapshotTransactionStarts: indexedDb.stats.snapshotReadwriteStarts,
+    attemptsBeforeRepeatedCalls,
+    attemptsAfterRepeatedCalls,
+    schemaUpgrades: indexedDb.stats.schemaUpgrades,
+    openVersions: indexedDb.stats.openVersions.slice(),
+    snapshotTransactions: indexedDb.stats.transactionStoreSets.filter((entry) =>
+      entry.mode === "readwrite" &&
+      entry.names.includes("transfer-stock-rows") &&
+      entry.names.includes("transfer-stock-snapshots")
+    ),
+    storedWebSqlRows: Number(webSql.sqlite.prepare("SELECT COUNT(*) AS count FROM transfer_snapshot_rows").get().count || 0)
+  };
+}
+
+async function offlineStoreNotFoundStagesFixture(offlineStoreSource) {
+  const scenarios = [
+    {
+      stage: "start",
+      options: {
+        failTransferProbe: true,
+        transferProbeErrorName: "NotFoundError",
+        transferProbeErrorMessage: "Multi-store transaction could not be started"
+      },
+      expectedCode: "IDB_PROBE_WRITE_START_FAILED"
+    },
+    {
+      stage: "write",
+      options: {
+        failSnapshotProbeWrite: true,
+        snapshotProbeWriteErrorName: "NotFoundError",
+        snapshotProbeWriteErrorMessage: "Multi-store probe write failed"
+      },
+      expectedCode: "IDB_PROBE_WRITE_FAILED"
+    },
+    {
+      stage: "read",
+      options: {
+        failSnapshotProbeRead: true,
+        snapshotProbeReadErrorName: "NotFoundError",
+        snapshotProbeReadErrorMessage: "Multi-store probe read failed"
+      },
+      expectedCode: "IDB_PROBE_READ_FAILED"
+    }
+  ];
+  const results = [];
+  for (const scenario of scenarios) {
+    const indexedDb = createLegacyIndexedDbFixture({
+      initialVersion: 7,
+      initialStores: legacyOfflineStoreDefinitions(),
+      ...scenario.options
+    });
+    const webSql = createWebSqlFixture();
+    const context = createOfflineStoreIos9Context(offlineStoreSource, indexedDb, {
+      openDatabase: webSql.openDatabase
+    });
+    const diagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
+    const startsBeforeRepeat = indexedDb.stats.snapshotReadwriteStarts;
+    const repeatedDiagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
+    results.push({
+      stage: scenario.stage,
+      expectedCode: scenario.expectedCode,
+      diagnostic,
+      repeatedDiagnostic,
+      startsBeforeRepeat,
+      startsAfterRepeat: indexedDb.stats.snapshotReadwriteStarts,
+      schemaUpgrades: indexedDb.stats.schemaUpgrades,
+      databaseVersion: indexedDb.databaseState.version
+    });
+  }
+  return results;
+}
+
 function legacyOfflineStoreDefinitions(options = {}) {
   const definitions = [
     { name: "orders", keyPath: "id", rows: options.orderRows || [] },
@@ -4959,6 +5161,7 @@ function legacyOfflineStoreDefinitions(options = {}) {
   if (options.withSnapshotStore !== false) {
     definitions.push({ name: "transfer-stock-snapshots", keyPath: "warehouse", rows: options.snapshotRows || [] });
   }
+  definitions.push({ name: "transfer-storage-probe", keyPath: "id", rows: options.probeRows || [] });
   return definitions;
 }
 
@@ -5117,9 +5320,13 @@ function createLegacyIndexedDbFixture(options = {}) {
     nameListsHaveContains: false,
     objectStoresHaveGetAll: false,
     blockedUpgrades: 0,
+    schemaUpgrades: 0,
     transferProbeFailures: 0,
     snapshotReadwriteStarts: 0,
-    snapshotReadwriteFailures: 0
+    snapshotReadwriteFailures: 0,
+    snapshotProbeWriteFailures: 0,
+    snapshotProbeReadFailures: 0,
+    transactionStoreSets: []
   };
 
   function clone(value) {
@@ -5210,8 +5417,10 @@ function createLegacyIndexedDbFixture(options = {}) {
   }
 
   class LegacyObjectStore {
-    constructor(storeState) {
+    constructor(storeState, storeName = "", transaction = null) {
       this.storeState = storeState;
+      this.storeName = storeName;
+      this.transaction = transaction;
     }
     get indexNames() {
       return legacyNameList(this.storeState.indexes.keys());
@@ -5228,6 +5437,17 @@ function createLegacyIndexedDbFixture(options = {}) {
     put(value) {
       const stored = clone(value);
       const key = stored[this.storeState.keyPath];
+      if (this.transaction && this.transaction.isSnapshotTransaction &&
+          options.failSnapshotProbeWrite &&
+          String(key || "").includes("__transfer-probe__") &&
+          stats.snapshotProbeWriteFailures === 0) {
+        stats.snapshotProbeWriteFailures += 1;
+        return asyncRequest(() => {
+          const error = new Error(options.snapshotProbeWriteErrorMessage || "The specified object store was not found while writing");
+          error.name = options.snapshotProbeWriteErrorName || "NotFoundError";
+          throw error;
+        });
+      }
       this.storeState.rows.set(key, stored);
       return asyncRequest(() => key);
     }
@@ -5235,6 +5455,17 @@ function createLegacyIndexedDbFixture(options = {}) {
       return this.put(value);
     }
     get(key) {
+      if (this.transaction && this.transaction.isSnapshotTransaction &&
+          options.failSnapshotProbeRead &&
+          String(key || "").includes("__transfer-probe__") &&
+          stats.snapshotProbeReadFailures === 0) {
+        stats.snapshotProbeReadFailures += 1;
+        return asyncRequest(() => {
+          const error = new Error(options.snapshotProbeReadErrorMessage || "The specified object store was not found while reading");
+          error.name = options.snapshotProbeReadErrorName || "NotFoundError";
+          throw error;
+        });
+      }
       return asyncRequest(() => clone(this.storeState.rows.get(key)));
     }
     delete(key) {
@@ -5260,16 +5491,19 @@ function createLegacyIndexedDbFixture(options = {}) {
       this.oncomplete = null;
       this.onerror = null;
       this.onabort = null;
+      this.isSnapshotTransaction = !upgrade && mode === "readwrite" &&
+        this.storeNames.includes("transfer-stock-rows") &&
+        this.storeNames.includes("transfer-stock-snapshots");
       if (!upgrade) {
         setTimeout(() => {
           if (!this.aborted && typeof this.oncomplete === "function") this.oncomplete({ target: this });
-        }, 25);
+        }, this.isSnapshotTransaction ? 100 : 25);
       }
     }
     objectStore(name) {
       const storeState = databaseState.stores.get(name);
       if (!storeState) throw new Error(`Store fehlt: ${name}`);
-      return new LegacyObjectStore(storeState);
+      return new LegacyObjectStore(storeState, name, this);
     }
     abort() {
       this.aborted = true;
@@ -5296,17 +5530,25 @@ function createLegacyIndexedDbFixture(options = {}) {
     }
     transaction(storeNames, mode) {
       const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+      stats.transactionStoreSets.push({ names: names.slice(), mode });
       names.forEach((name) => {
         if (!databaseState.stores.has(name)) throw new Error(`Store fehlt: ${name}`);
       });
-      if (mode === "readwrite" && names.includes("transfer-storage-probe") && options.failTransferProbe) {
-        stats.transferProbeFailures += 1;
-        const error = new Error(options.transferProbeErrorMessage || "IndexedDB backing store is not writable");
-        error.name = options.transferProbeErrorName || "UnknownError";
-        throw error;
-      }
       if (mode === "readwrite" && names.includes("transfer-stock-rows") && names.includes("transfer-stock-snapshots")) {
         stats.snapshotReadwriteStarts += 1;
+        if (options.failTransferProbe) {
+          stats.transferProbeFailures += 1;
+          const error = new Error(options.transferProbeErrorMessage || "IndexedDB backing store is not writable");
+          error.name = options.transferProbeErrorName || "UnknownError";
+          throw error;
+        }
+        if (Number(options.snapshotWriteFailureFromStart || 0) > 0 &&
+            stats.snapshotReadwriteStarts >= Number(options.snapshotWriteFailureFromStart)) {
+          stats.snapshotReadwriteFailures += 1;
+          const error = new Error(options.snapshotWriteErrorMessage || "The specified object store was not found");
+          error.name = options.snapshotWriteErrorName || "NotFoundError";
+          throw error;
+        }
         if (stats.snapshotReadwriteFailures < Number(options.snapshotWriteFailures || 0)) {
           stats.snapshotReadwriteFailures += 1;
           const error = new Error(options.snapshotWriteErrorMessage || "The specified object store was not found");
@@ -5341,6 +5583,7 @@ function createLegacyIndexedDbFixture(options = {}) {
             if (typeof request.onblocked === "function") request.onblocked({ target: request });
             return;
           }
+          stats.schemaUpgrades += 1;
           const upgradeTransaction = new LegacyTransaction(Array.from(databaseState.stores.keys()), "versionchange", true);
           request.transaction = upgradeTransaction;
           if (typeof request.onupgradeneeded === "function") {
@@ -5547,7 +5790,7 @@ async function tabletTransferOfflineFixture(tabletTransferSource) {
     cancelAnimationFrame() {},
     confirm: () => true,
     OfflineStore: {
-      transferSnapshotApiVersion: 4,
+      transferSnapshotApiVersion: 5,
       probeTransferStockSnapshotStorage: () => Promise.resolve({
         ok: true,
         code: "WEBSQL_FALLBACK_READY",

@@ -1,6 +1,6 @@
 # HLogistik Test Baseline
 
-Stand: 2026-07-22 10:05:00 +02:00
+Stand: 2026-07-24 08:27:50 +02:00
 
 ## Kurzbeschreibung
 
@@ -123,11 +123,12 @@ Die QA-Matrix sucht im Exportziel, in `Exporte/`, in `tmp/` und in gemeldeten Ex
 - Entwurf speichern, Seite neu laden, Entwurf oeffnen und Quellsnapshot online erneut validieren.
 - Offline darf kein `POST /api/storage/transfers` und kein Eintrag in die bestehende Sync-Queue entstehen.
 - Online fuer das gewaehlte Lager einen vollstaendigen Snapshot aller positiven Bestandszeilen speichern; nur ID, Lager, Artikel-ID, Materialnummer, Barcode, Stellplatz, HU/LE, Menge, Paletten und Aktualisierungszeitpunkt duerfen enthalten sein.
-- Offline-Suche direkt in IndexedDB nach Artikel/Material, Barcode, Stellplatz und HU/LE pruefen; die Oberflaeche zeigt maximal 25 Treffer. Verlauf und Bewegungen duerfen nicht offline persistiert werden.
+- Offline-Suche direkt im aktiven Snapshot-Backend nach Artikel/Material, Barcode, Stellplatz und HU/LE pruefen; die Oberflaeche zeigt maximal 25 Treffer. Verlauf und Bewegungen duerfen nicht offline persistiert werden.
 - Snapshot-Lager, Zeitpunkt und Zeilenzahl sichtbar pruefen. Eine simuliert unterbrochene Aktualisierung muss den zuvor vollstaendigen Snapshot unveraendert aktiv lassen.
 - iOS-9-Kompatibilitaet ohne `IDBObjectStore.getAll()` und `DOMStringList.contains()` sowie mit `webkitIndexedDB`/`webkitIDBKeyRange` pruefen. Snapshot muss nach neuem Store-Aufruf und Reload suchbar bleiben.
 - Fehlerfaelle fuer fehlendes/veraltetes Offline-Store-Skript, blockiertes Upgrade, unvollstaendiges Schema sowie Schreib-/Cursorfehler muessen einen konkreten Diagnosecode statt einer Sammelmeldung zeigen.
-- Bei `IDB_SNAPSHOT_WRITE_START_FAILED` muessen nativer Fehlername, native Meldung, Ist-DB-Version und vorhandene Object-Stores sichtbar sein. Ein fehlender Snapshot-Store beziehungsweise Index ist per hoeherer DB-Version zu ergaenzen; bestehende Entwuerfe, Queue-Eintraege, Auftraege und sonstige Stores muessen erhalten bleiben. Blockiertes Upgrade separat pruefen.
+- Bei `IDB_SNAPSHOT_WRITE_START_FAILED` muessen nativer Fehlername, native Meldung, Ist-DB-Version und vorhandene Object-Stores sichtbar sein. Fuer die gemeldete DB-Version 7 mit vollstaendigem Schema darf der Fehlerpfad weder loeschen noch upgraden; Entwuerfe, Queue-Eintraege, Auftraege und sonstige Stores muessen erhalten bleiben.
+- Die IndexedDB-Bereitschaftspruefung muss exakt die gemeinsame `readwrite`-Transaktion ueber `transfer-stock-rows` und `transfer-stock-snapshots` verwenden und Schreiben sowie Lesen in beiden Stores nachweisen. `NotFoundError` bei Start, Schreiben, Lesen oder beim anschliessenden Snapshot markiert IndexedDB fuer die Sitzung einmalig als unbrauchbar; derselbe vollstaendige Snapshot wird automatisch ueber WebSQL wiederholt. Wiederholte IndexedDB-Versuche und Fallback-Schleifen sind unzulaessig.
 - Eine IndexedDB, deren echte Schreib-/Leseprobe fehlschlaegt, muss fuer Umlagerung auf die isolierte WebSQL-Datenbank wechseln. Backend und IndexedDB-Ursache sichtbar pruefen. WebSQL darf nur Snapshot, ungepruefte Umlagerungsentwuerfe und Probedaten enthalten; keine Auftraege oder Sync-Queue. Snapshot seitenweise schreiben, erst nach exakter Zeilenzahl aktivieren und nach Reload per SQL nach Artikel, Barcode, Stellplatz und HU/LE mit maximal 25 Treffern suchen. Eine unvollstaendige Generation darf den vorherigen Stand nicht ersetzen.
 - Fuer den vollstaendigen Snapshot darf kein LocalStorage-Fallback eingefuehrt werden.
 - Verlauf online auf maximal 30 Zeilen begrenzen.

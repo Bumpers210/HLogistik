@@ -1,6 +1,27 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-22 14:48:09 +02:00
+Stand: 2026-07-24 08:27:50 +02:00
+
+## 2026-07-24 - IndexedDB-Fehlpositiv auf iPad 2
+
+Ursache:
+
+- Die bisherige IndexedDB-Bereitschaftspruefung testete nur den Hilfs-Store `transfer-storage-probe`.
+- Der echte Snapshot startet dagegen eine gemeinsame `readwrite`-Transaktion ueber `transfer-stock-rows` und `transfer-stock-snapshots`. Safari 9 konnte deshalb die Einzel-Store-Probe bestehen und anschliessend den Snapshot-Start trotz DB-Version 7 und gemeldeter Stores mit `NotFoundError` ablehnen.
+
+Umgesetzt:
+
+- Die Probe verwendet jetzt exakt dieselbe Zwei-Store-Transaktion wie der Snapshot und weist Schreiben sowie anschliessendes Lesen in beiden Stores nach.
+- Ein `NotFoundError` bei Transaktionsstart, Schreiben oder Lesen markiert IndexedDB fuer die laufende Sitzung als unbrauchbar. Weitere IndexedDB-Versuche werden unterbunden.
+- Schlaegt erst die anschliessende Snapshot-Transaktion mit `NotFoundError` fehl, wird derselbe vollstaendige Snapshot automatisch und atomar in WebSQL neu geschrieben. Das aktive Backend wird danach sofort sichtbar als `WebSQL (Legacy-Fallback)` ausgegeben.
+- Der Fehlerpfad loescht oder migriert keine IndexedDB. Auftraege, Sync-Queue und vorhandene Entwuerfe bleiben erhalten; Umlagerungsentwuerfe werden lediglich nicht-destruktiv in den isolierten WebSQL-Fallback kopiert.
+- Asset-/Cachestand: `offline-store.js?v=20260724-1`, `tablet-transfer.js?v=20260724-1`, Service Worker/Manifest `1.5.203`, Snapshot-API 5.
+
+Validierung:
+
+- DB-Version 7 mit den gemeldeten acht Stores wurde ohne Versionsupgrade reproduziert. Die QA weist den Fehlpositiv-Fall, den automatischen WebSQL-Neustart, unterbundene Wiederholungsversuche, Reload und Offline-Suche nach.
+- `NotFoundError` bei Start, Schreiben und Lesen der Zwei-Store-Probe wird jeweils einmalig auf WebSQL umgeschaltet.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 242/242 erfolgreich.
 
 ## 2026-07-22 - Isolierter WebSQL-Fallback fuer iPad 2
 

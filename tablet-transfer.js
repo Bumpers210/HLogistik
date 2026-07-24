@@ -362,6 +362,11 @@
       });
       });
     }).then(function (metadata) {
+      return window.OfflineStore.probeTransferStockSnapshotStorage().then(function (diagnostic) {
+        snapshotStorageInfo = diagnostic || null;
+        return metadata;
+      });
+    }).then(function (metadata) {
       if (token !== snapshotRefreshToken || warehouse !== currentWarehouse()) return metadata;
       snapshotMeta = metadata;
       renderSnapshotStatus();
@@ -473,7 +478,7 @@
         storageDiagnosticError("OFFLINE_STORE_SCRIPT_MISSING", "offline-store.js wurde nicht geladen oder von diesem Browser nicht ausgeführt")
       );
     }
-    if (Number(window.OfflineStore.transferSnapshotApiVersion || 0) < 4 ||
+    if (Number(window.OfflineStore.transferSnapshotApiVersion || 0) < 5 ||
         typeof window.OfflineStore[methodName] !== "function" ||
         typeof window.OfflineStore.probeTransferStockSnapshotStorage !== "function") {
       var version = String(window.OfflineStore.transferSnapshotApiVersion || "alt");
