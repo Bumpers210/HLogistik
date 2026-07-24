@@ -74,6 +74,7 @@ function bindElements() {
     "connectionText",
     "warehouseSelect",
     "currentUserName",
+    "transferNavLink",
     "switchUserButton",
     "fromInput",
     "toInput",
@@ -140,6 +141,7 @@ function enforceAccess() {
     return false;
   }
   HLogistikUi.applyCurrentUserName(elements.currentUserName, userName, userGroup);
+  if (elements.transferNavLink) elements.transferNavLink.hidden = !HLogistikUi.canAccessTransfers(userGroup);
   return true;
 }
 

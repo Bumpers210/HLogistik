@@ -401,13 +401,14 @@ function replacementCounts(db, articleAlias) {
     ssiStock: Number(db.prepare("SELECT COUNT(*) AS count FROM main.lagerbestand WHERE lager = 'SSI'").get().count),
     orders: count(db, "main.auftraege"),
     movements: count(db, "main.lagerbewegung"),
+    transfers: count(db, "main.umlagerung"),
     issueErrors: count(db, "main.bestandsbuchung_fehler"),
     ssiArticles: Number(getArticleDb("SSI").prepare("SELECT COUNT(*) AS count FROM artikel").get().count)
   };
 }
 
 function assertProtectedCounts(before, after) {
-  for (const key of ["ssiStock", "orders", "movements", "issueErrors", "ssiArticles"]) {
+  for (const key of ["ssiStock", "orders", "movements", "transfers", "issueErrors", "ssiArticles"]) {
     if (before[key] !== after[key]) throw new Error(`Geschuetzte Zaehlung ${key} hat sich geaendert.`);
   }
 }

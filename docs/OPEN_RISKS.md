@@ -1,14 +1,24 @@
 # HLogistik Open Risks
 
-Stand: 2026-07-02 11:23:22 +02:00
+Stand: 2026-07-22 14:48:09 +02:00
 
 ## Aktueller Stand nach Stabilisierung
 
-Keine neuen offenen P0/P1-Risiken aus dem sortierten Stabilitaetsstand. Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung und Artikelstamm-Buchungsexport sind in der QA-Matrix abgedeckt. Der aktuelle Clientstand ist `app.js?v=20260702-2`, Service Worker/Manifest `1.5.152`.
+Keine neuen offenen P0/P1-Risiken aus dem sortierten Stabilitaetsstand. Import, Export, Archivierung, Tablet-Direktexport, manuelle Einlagerung, Umlagerungen und Artikelstamm-Buchungsexport sind in der QA-Matrix abgedeckt. Der aktuelle Service-Worker-/Manifest-Stand ist `1.5.202`.
 
 Weiter offen bleiben nur bewusst dokumentierte Betriebsentscheidungen: CR-002, automatische SQLite-Wiederherstellung, Passwort-Fallback und echtes Authentifizierungskonzept.
 
 Die Testbasis ist verbindlich in `docs/TEST_BASELINE.md` beschrieben. Die normale QA-Matrix muss gegen eine isolierte Kopie auf Port `4175` laufen; Live-Port `4174` ist fuer Schreibtests gesperrt.
+
+## Aktueller Lauf - Umlagerungen
+
+Die serverseitige Buchung ist transaktional, idempotent und prueft Menge, Paletten und Quellzeitstempel erneut. Offline-Entwuerfe buchen nicht automatisch und verwenden nicht die bestehende Sync-Queue. Der Umlagerungsbereich ist direkt in `tablet.html` integriert und nutzt fuer Modern/Legacy denselben Controller sowie den vorhandenen Arbeitsbereichs- und Auftragsschutz. Buero, Tablet und Verwaltung sind berechtigt; Lager und unbekannte Rollen nicht. Fuer das iPad 2 werden maximal 25 Suchtreffer und 30 Online-Verlaufszeilen angezeigt. Offline liegt je Lager nur eine minimale, versionierte Projektion positiver Bestandszeilen im ausgewaehlten Transfer-Backend; Bewegungen und Verlaeufe werden nicht gespeichert. Eine neue Snapshot-Generation wird erst nach vollstaendigem Schreiben atomar aktiviert, sodass ein Abbruch den letzten vollstaendigen Stand nicht beschaedigt. Ein geoeffneter Entwurf muss nach dem Wiederverbinden erfolgreich validiert werden; bei Abweichung ist eine erneute Quellauswahl erforderlich.
+
+Der Offline-Store ist fuer den iOS-9-Pfad ES5-kompatibel und unterstuetzt die alten WebKit-IndexedDB-Namen sowie Cursor-Lesen ohne `getAll()`. IndexedDB bleibt Standard und wird mit einem echten Schreib-/Leseprobewert geprueft. Nur bei fehlgeschlagener Probe wird fuer Snapshot und ungepruefte Umlagerungsentwuerfe die isolierte WebSQL-Datenbank verwendet; andere Offline-Daten wechseln nicht das Backend. Fehler und aktives Backend werden sichtbar ausgegeben. Ein LocalStorage-Fallback fuer Bestandszeilen existiert bewusst nicht.
+
+Restempfehlung:
+
+Die native Kamera und den Browser-Berechtigungsdialog einmal auf einem physischen Tablet pruefen. In der automatisierten Browserumgebung war `BarcodeDetector` nicht verfuegbar; der vorgesehene Scanner-/Tastatur-Fallback wurde erfolgreich getestet.
 
 ## Aktueller Lauf - PDF-Import OCR-Kandidatenbewertung
 

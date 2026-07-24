@@ -34,6 +34,7 @@ function bindElements() {
     "connectionText",
     "warehouseSelect",
     "storageAppLink",
+    "transferNavLink",
     "currentUserName",
     "switchUserButton",
     "searchInput",
@@ -149,6 +150,7 @@ function enforceArticleAccess() {
     elements.storageAppLink.textContent = HLogistikUi.storageNavLabel(userGroup);
   }
   HLogistikUi.applyCurrentUserName(elements.currentUserName, userName, userGroup);
+  if (elements.transferNavLink) elements.transferNavLink.hidden = !HLogistikUi.canAccessTransfers(userGroup);
   if (elements.resetArticleDataButton) {
     elements.resetArticleDataButton.hidden = !["buero", "verwaltung"].includes(userGroup);
   }

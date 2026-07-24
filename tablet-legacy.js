@@ -39,6 +39,7 @@ registerTabletServiceWorker();
 
 document.addEventListener("DOMContentLoaded", function () {
   bindElements();
+  initializeTransferController();
   bindEvents();
   loadUser();
   renderCompletionFields();
@@ -82,10 +83,17 @@ function bindElements() {
     "tabletTitle",
     "pickingModeButton",
     "storageModeButton",
+    "transferModeButton",
     "userNameInput",
+    "orderSelectRow",
     "orderSelect",
     "acceptedGroupInfo",
+    "sortModeRow",
     "sortModeSelect",
+    "orderActionRow",
+    "orderDangerRow",
+    "orderStatusPanel",
+    "orderWorkspace",
     "refreshButton",
     "manualStorageCustomerRow",
     "manualStorageCustomerInput",
@@ -123,12 +131,15 @@ function bindElements() {
 function bindEvents() {
   elements.pickingModeButton.onclick = function () { setMode("picking"); };
   elements.storageModeButton.onclick = function () { setMode("storage"); };
+  elements.transferModeButton.onclick = function () { setMode("transfer"); };
   elements.userNameInput.onchange = function () {
     saveUser();
+    updateTransferContext();
     renderManualStorageStartButton();
     renderTakeOverButton();
   };
   elements.userNameInput.onkeyup = function () {
+    updateTransferContext();
     renderManualStorageStartButton();
     renderTakeOverButton();
   };
@@ -195,13 +206,19 @@ function initialize(options) {
     serverOnline = true;
     setConnectionStatus(true);
     flushSyncQueue(function () {
-      loadOrderList();
+      if (currentMode !== "transfer") loadOrderList();
       finishConnectionCheck();
     });
-    if (!orderListTimer) orderListTimer = window.setInterval(function () { loadOrderList({ silent: true }); }, ORDER_LIST_REFRESH_MS);
+    if (!orderListTimer) orderListTimer = window.setInterval(function () {
+      if (currentMode !== "transfer") loadOrderList({ silent: true });
+    }, ORDER_LIST_REFRESH_MS);
   }, function (message) {
     serverOnline = false;
     setConnectionStatus(false);
+    if (currentMode === "transfer") {
+      finishConnectionCheck();
+      return;
+    }
     loadOrderListFromCache(function (cached) {
       setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden: " + message, !cached);
       finishConnectionCheck();
@@ -749,9 +766,17 @@ function normalizePositionNotesForSave(order) {
 function loadUser() {
   try {
     elements.userNameInput.value = localStorage.getItem(USER_KEY) || localStorage.getItem(MAIN_USER_KEY) || "";
-    currentMode = localStorage.getItem(MODE_KEY) === "storage" ? "storage" : "picking";
+    var storedMode = localStorage.getItem(MODE_KEY);
+    var storedGroup = String(localStorage.getItem(USER_GROUP_KEY) || "").toLowerCase();
+    var requestedTransfer = transferModeRequested();
+    if (!storedGroup || (!canAccessTransfers(storedGroup) && !requestedTransfer)) {
+      storedGroup = "tablet";
+      localStorage.setItem(USER_GROUP_KEY, storedGroup);
+    }
+    currentMode = (requestedTransfer || storedMode === "transfer") && canAccessTransfers(storedGroup)
+      ? "transfer"
+      : storedMode === "storage" ? "storage" : "picking";
     elements.sortModeSelect.value = localStorage.getItem(SORT_MODE_KEY) || "fromBin";
-    localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch (error) {
     void error;
     elements.userNameInput.value = "";
@@ -766,7 +791,8 @@ function saveUser() {
     var name = elements.userNameInput.value || "";
     localStorage.setItem(USER_KEY, name);
     localStorage.setItem(MAIN_USER_KEY, name);
-    localStorage.setItem(USER_GROUP_KEY, "tablet");
+    var group = String(localStorage.getItem(USER_GROUP_KEY) || "").trim().toLowerCase();
+    if (!group || (!canAccessTransfers(group) && !transferModeRequested())) localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch (error) {
     void error;
     // Lokaler Speicher ist auf alten Browsern manchmal eingeschraenkt.
@@ -781,13 +807,81 @@ function saveSortMode() {
   }
 }
 
+function initializeTransferController() {
+  if (!window.HLogistikTransfer) return;
+  window.HLogistikTransfer.initialize({
+    getUserName: currentUserName,
+    getUserGroup: transferUserGroup,
+    getWarehouse: transferWarehouse,
+    onWarehouseChange: saveTransferWarehouse
+  });
+}
+
+function updateTransferContext() {
+  if (!window.HLogistikTransfer || currentMode !== "transfer") return;
+  window.HLogistikTransfer.updateContext({
+    userName: currentUserName(),
+    userGroup: transferUserGroup(),
+    warehouse: transferWarehouse(),
+    online: serverOnline
+  });
+}
+
+function transferWarehouse() {
+  try {
+    var stored = String(localStorage.getItem("hlogistik-warehouse-v1") || "").toUpperCase();
+    if (stored === "SI" || stored === "SSI") return stored;
+  } catch (error) {
+    void error;
+  }
+  return elements.manualStorageWarehouseSelect && elements.manualStorageWarehouseSelect.value || "SSI";
+}
+
+function saveTransferWarehouse(warehouse) {
+  var value = String(warehouse || "").toUpperCase() === "SI" ? "SI" : "SSI";
+  if (elements.manualStorageWarehouseSelect) elements.manualStorageWarehouseSelect.value = value;
+  try {
+    localStorage.setItem("hlogistik-warehouse-v1", value);
+  } catch (error) {
+    void error;
+  }
+}
+
+function transferModeRequested() {
+  return /(?:^|[?&])bereich=umlagerungen(?:&|$)/i.test(String(window.location.search || ""));
+}
+
+function canAccessTransfers(group) {
+  return ["buero", "tablet", "verwaltung"].indexOf(String(group || "").trim().toLowerCase()) >= 0;
+}
+
+function transferUserGroup() {
+  try {
+    var group = String(localStorage.getItem(USER_GROUP_KEY) || "").trim().toLowerCase();
+    return group || "tablet";
+  } catch (error) {
+    void error;
+    return "tablet";
+  }
+}
+
+function tabletApiGroup() {
+  return currentMode === "transfer" ? transferUserGroup() : "tablet";
+}
+
 function setMode(mode) {
-  var nextMode = mode === "storage" ? "storage" : "picking";
+  var nextMode = mode === "transfer" ? "transfer" : mode === "storage" ? "storage" : "picking";
   if (nextMode === currentMode) return;
+  if (nextMode === "transfer" && !canAccessTransfers(transferUserGroup())) {
+    setMessage("Keine Berechtigung für Umlagerungen.", true);
+    return;
+  }
   if (currentOrderLocksModeSwitch(nextMode)) {
     keepCurrentOrderSelected();
     return;
   }
+  if (currentMode === "transfer" && window.HLogistikTransfer && window.HLogistikTransfer.hasUnsavedChanges() &&
+      !window.confirm("Es gibt einen noch nicht gespeicherten Umlagerungsentwurf. Bereich trotzdem wechseln?")) return;
   if (dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
   currentMode = nextMode;
   try {
@@ -797,11 +891,11 @@ function setMode(mode) {
   }
   resetToStart("Bitte " + modeLabel() + " waehlen.");
   updateModeUi();
-  loadOrderList();
+  if (currentMode !== "transfer") loadOrderList();
 }
 
 function modeLabel() {
-  return currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
+  return currentMode === "transfer" ? "Umlagerung" : currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
 }
 
 function isStorageOrder() {
@@ -822,10 +916,19 @@ function isLocalStorageOrderId(id) {
 }
 
 function updateModeUi() {
+  var isTransfer = currentMode === "transfer";
   var isStorage = isStorageOrder();
-  if (elements.tabletTitle) elements.tabletTitle.textContent = isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
+  if (elements.tabletTitle) elements.tabletTitle.textContent = isTransfer ? "Tablet Umlagerungen" : isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
   if (elements.pickingModeButton) elements.pickingModeButton.className = currentMode === "picking" ? "is-active" : "";
   if (elements.storageModeButton) elements.storageModeButton.className = currentMode === "storage" ? "is-active" : "";
+  if (elements.transferModeButton) elements.transferModeButton.className = isTransfer ? "is-active" : "";
+  setHidden(elements.orderSelectRow, isTransfer);
+  setHidden(elements.sortModeRow, isTransfer);
+  if (isTransfer) setHidden(elements.acceptedGroupInfo, true);
+  setHidden(elements.orderActionRow, isTransfer);
+  setHidden(elements.orderDangerRow, isTransfer);
+  setHidden(elements.orderStatusPanel, isTransfer);
+  setHidden(elements.orderWorkspace, isTransfer);
   if (elements.orderSelect && !elements.orderSelect.value && elements.orderSelect.options[0]) {
     elements.orderSelect.options[0].text = isStorage ? "Einlagerung waehlen" : "Auftrag waehlen";
   }
@@ -845,6 +948,18 @@ function updateModeUi() {
   }
   if (elements.exportPdfButton) elements.exportPdfButton.textContent = exportingPdf ? "PDF wird erstellt..." : exportButtonLabel();
   renderManualStorageStartButton();
+  if (window.HLogistikTransfer) {
+    if (isTransfer) {
+      window.HLogistikTransfer.activate({
+        userName: currentUserName(),
+        userGroup: transferUserGroup(),
+        warehouse: transferWarehouse(),
+        online: serverOnline
+      });
+    } else {
+      window.HLogistikTransfer.deactivate();
+    }
+  }
 }
 
 function exportButtonLabel() {
@@ -862,6 +977,7 @@ function isManualStorageHeader() {
 }
 
 function loadOrderList(options) {
+  if (currentMode === "transfer") return;
   var silent = options && options.silent === true;
   if (!serverOnline) {
     loadOrderListFromCache(function (cached) {
@@ -2898,7 +3014,7 @@ function apiJson(url, options, success, failure) {
   xhr.setRequestHeader("Content-Type", "application/json");
   xhr.setRequestHeader("Cache-Control", "no-cache");
   xhr.setRequestHeader("Pragma", "no-cache");
-  xhr.setRequestHeader("X-User-Group", "tablet");
+  xhr.setRequestHeader("X-User-Group", tabletApiGroup());
   xhr.onreadystatechange = function () {
     if (xhr.readyState !== 4) return;
     var data = null;
@@ -2928,6 +3044,9 @@ function setConnectionStatus(isOnline) {
   serverOnline = isOnline === true;
   elements.connectionStatus.className = "connection-status" + (isOnline === true ? " is-online" : isOnline === false ? " is-offline" : "");
   elements.connectionStatus.innerHTML = isOnline === true ? "Online" : isOnline === false ? "Offline" : "Pruefe Verbindung";
+  if (window.HLogistikTransfer && (isOnline === true || isOnline === false)) {
+    window.HLogistikTransfer.setOnline(isOnline);
+  }
 }
 
 function setMessage(message, isError) {

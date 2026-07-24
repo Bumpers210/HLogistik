@@ -75,6 +75,7 @@ function bindElements() {
     "storageBookingLink",
     "articleOverviewNavLink",
     "issueLogNavLink",
+    "transferNavLink",
     "storageBookingPanel",
     "storageLocationsPanel",
     "articleOverviewPanel",
@@ -153,6 +154,7 @@ function enforceStorageAccess() {
   }
   applyStoragePageLabels(userGroup);
   HLogistikUi.applyCurrentUserName(elements.currentUserName, userName, userGroup);
+  if (elements.transferNavLink) elements.transferNavLink.hidden = !HLogistikUi.canAccessTransfers(userGroup);
   return true;
 }
 
@@ -657,7 +659,9 @@ function renderMovements(movements) {
 
   movements.forEach((movement) => {
     const row = document.createElement("tr");
-    row.className = movement.bewegungsart === "Warenausgang" ? "is-issue" : "is-receipt";
+    row.className = movement.bewegungsart.indexOf("Umlagerung-") === 0
+      ? "is-transfer"
+      : movement.bewegungsart === "Warenausgang" ? "is-issue" : "is-receipt";
     row.innerHTML = `
       <td>${escapeHtml(formatDateTime(movement.erstelltAm))}</td>
       <td>${escapeHtml(movement.bewegungsart)}</td>

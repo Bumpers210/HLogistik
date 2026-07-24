@@ -38,6 +38,7 @@ registerTabletServiceWorker();
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
+  initializeTransferController();
   bindEvents();
   loadUser();
   initialize();
@@ -72,16 +73,84 @@ function registerTabletServiceWorker() {
   });
 }
 
+function initializeTransferController() {
+  if (!window.HLogistikTransfer) return;
+  window.HLogistikTransfer.initialize({
+    getUserName: currentUserName,
+    getUserGroup: transferUserGroup,
+    getWarehouse: transferWarehouse,
+    onWarehouseChange: saveTransferWarehouse,
+  });
+}
+
+function updateTransferContext() {
+  if (!window.HLogistikTransfer || currentMode !== "transfer") return;
+  window.HLogistikTransfer.updateContext({
+    userName: currentUserName(),
+    userGroup: transferUserGroup(),
+    warehouse: transferWarehouse(),
+    online: serverOnline,
+  });
+}
+
+function transferWarehouse() {
+  try {
+    const stored = String(localStorage.getItem("hlogistik-warehouse-v1") || "").toUpperCase();
+    if (["SI", "SSI"].includes(stored)) return stored;
+  } catch {
+    // Local storage may be restricted.
+  }
+  return elements.manualStorageWarehouseSelect?.value || "SSI";
+}
+
+function saveTransferWarehouse(warehouse) {
+  const value = String(warehouse || "").toUpperCase() === "SI" ? "SI" : "SSI";
+  if (elements.manualStorageWarehouseSelect) elements.manualStorageWarehouseSelect.value = value;
+  try {
+    localStorage.setItem("hlogistik-warehouse-v1", value);
+  } catch {
+    // Local storage may be restricted.
+  }
+}
+
+function transferModeRequested() {
+  return /(?:^|[?&])bereich=umlagerungen(?:&|$)/i.test(String(window.location.search || ""));
+}
+
+function canAccessTransfers(group) {
+  return ["buero", "tablet", "verwaltung"].includes(String(group || "").trim().toLowerCase());
+}
+
+function transferUserGroup() {
+  try {
+    const group = String(localStorage.getItem(USER_GROUP_KEY) || "").trim().toLowerCase();
+    return group || "tablet";
+  } catch {
+    return "tablet";
+  }
+}
+
+function tabletApiGroup() {
+  return currentMode === "transfer" ? transferUserGroup() : "tablet";
+}
+
 function bindElements() {
   [
     "connectionStatus",
     "tabletTitle",
     "pickingModeButton",
     "storageModeButton",
+    "transferModeButton",
     "userNameInput",
+    "orderSelectRow",
     "orderSelect",
     "acceptedGroupInfo",
+    "sortModeRow",
     "sortModeSelect",
+    "orderActionRow",
+    "orderDangerRow",
+    "orderStatusPanel",
+    "orderWorkspace",
     "refreshButton",
     "manualStorageCustomerRow",
     "manualStorageCustomerInput",
@@ -115,12 +184,15 @@ function bindElements() {
 function bindEvents() {
   elements.pickingModeButton.addEventListener("click", () => setMode("picking"));
   elements.storageModeButton.addEventListener("click", () => setMode("storage"));
+  elements.transferModeButton.addEventListener("click", () => setMode("transfer"));
   elements.userNameInput.addEventListener("change", () => {
     saveUser();
+    updateTransferContext();
     renderManualStorageStartButton();
     renderTakeOverButton();
   });
   elements.userNameInput.addEventListener("keyup", () => {
+    updateTransferContext();
     renderManualStorageStartButton();
     renderTakeOverButton();
   });
@@ -180,8 +252,10 @@ async function initialize(options = {}) {
     serverOnline = true;
     setConnectionStatus(true);
     await flushSyncQueue();
-    loadOrderList();
-    if (!orderListTimer) orderListTimer = window.setInterval(() => loadOrderList({ silent: true }), ORDER_LIST_REFRESH_MS);
+    if (currentMode !== "transfer") loadOrderList();
+    if (!orderListTimer) orderListTimer = window.setInterval(() => {
+      if (currentMode !== "transfer") loadOrderList({ silent: true });
+    }, ORDER_LIST_REFRESH_MS);
     if (!saveTimer) {
       saveTimer = window.setInterval(async () => {
         if (dirty) await saveOrder(true);
@@ -194,6 +268,7 @@ async function initialize(options = {}) {
   } catch {
     serverOnline = false;
     setConnectionStatus(false);
+    if (currentMode === "transfer") return;
     const cached = await loadOrderListFromCache();
     setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden.", !cached);
   } finally {
@@ -684,9 +759,17 @@ function normalizePositionNotesForSave(order) {
 function loadUser() {
   try {
     elements.userNameInput.value = localStorage.getItem(USER_KEY) || localStorage.getItem(MAIN_USER_KEY) || "";
-    currentMode = localStorage.getItem(MODE_KEY) === "storage" ? "storage" : "picking";
+    const storedMode = localStorage.getItem(MODE_KEY);
+    let storedGroup = String(localStorage.getItem(USER_GROUP_KEY) || "").toLowerCase();
+    const requestedTransfer = transferModeRequested();
+    if (!storedGroup || (!canAccessTransfers(storedGroup) && !requestedTransfer)) {
+      storedGroup = "tablet";
+      localStorage.setItem(USER_GROUP_KEY, storedGroup);
+    }
+    currentMode = (requestedTransfer || storedMode === "transfer") && canAccessTransfers(storedGroup)
+      ? "transfer"
+      : storedMode === "storage" ? "storage" : "picking";
     elements.sortModeSelect.value = localStorage.getItem(SORT_MODE_KEY) || "fromBin";
-    localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch {
     elements.userNameInput.value = "";
     currentMode = "picking";
@@ -700,7 +783,8 @@ function saveUser() {
     const name = elements.userNameInput.value || "";
     localStorage.setItem(USER_KEY, name);
     localStorage.setItem(MAIN_USER_KEY, name);
-    localStorage.setItem(USER_GROUP_KEY, "tablet");
+    const group = String(localStorage.getItem(USER_GROUP_KEY) || "").trim().toLowerCase();
+    if (!group || (!canAccessTransfers(group) && !transferModeRequested())) localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch {
     // Alte Browser können lokalen Speicher blockieren; die Pickliste bleibt trotzdem nutzbar.
   }
@@ -715,12 +799,18 @@ function saveSortMode() {
 }
 
 function setMode(mode) {
-  const nextMode = mode === "storage" ? "storage" : "picking";
+  const nextMode = mode === "transfer" ? "transfer" : mode === "storage" ? "storage" : "picking";
   if (nextMode === currentMode) return;
+  if (nextMode === "transfer" && !canAccessTransfers(transferUserGroup())) {
+    setMessage("Keine Berechtigung für Umlagerungen.", true);
+    return;
+  }
   if (currentOrderLocksModeSwitch(nextMode)) {
     keepCurrentOrderSelected();
     return;
   }
+  if (currentMode === "transfer" && window.HLogistikTransfer?.hasUnsavedChanges() &&
+      !window.confirm("Es gibt einen noch nicht gespeicherten Umlagerungsentwurf. Bereich trotzdem wechseln?")) return;
   if (dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
   currentMode = nextMode;
   try {
@@ -730,11 +820,11 @@ function setMode(mode) {
   }
   resetToStart(`Bitte ${modeLabel()} waehlen.`);
   updateModeUi();
-  loadOrderList();
+  if (currentMode !== "transfer") loadOrderList();
 }
 
 function modeLabel() {
-  return currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
+  return currentMode === "transfer" ? "Umlagerung" : currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
 }
 
 function isStorageOrder() {
@@ -754,10 +844,19 @@ function isLocalStorageOrderId(id) {
 }
 
 function updateModeUi() {
+  const isTransfer = currentMode === "transfer";
   const isStorage = isStorageOrder();
-  if (elements.tabletTitle) elements.tabletTitle.textContent = isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
+  if (elements.tabletTitle) elements.tabletTitle.textContent = isTransfer ? "Tablet Umlagerungen" : isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
   if (elements.pickingModeButton) elements.pickingModeButton.classList.toggle("is-active", currentMode === "picking");
   if (elements.storageModeButton) elements.storageModeButton.classList.toggle("is-active", currentMode === "storage");
+  if (elements.transferModeButton) elements.transferModeButton.classList.toggle("is-active", isTransfer);
+  setHidden(elements.orderSelectRow, isTransfer);
+  setHidden(elements.sortModeRow, isTransfer);
+  if (isTransfer) setHidden(elements.acceptedGroupInfo, true);
+  setHidden(elements.orderActionRow, isTransfer);
+  setHidden(elements.orderDangerRow, isTransfer);
+  setHidden(elements.orderStatusPanel, isTransfer);
+  setHidden(elements.orderWorkspace, isTransfer);
   if (elements.orderSelect && !elements.orderSelect.value && elements.orderSelect.options[0]) {
     elements.orderSelect.options[0].text = isStorage ? "Einlagerung waehlen" : "Auftrag waehlen";
   }
@@ -776,6 +875,18 @@ function updateModeUi() {
   }
   if (elements.exportPdfButton) elements.exportPdfButton.textContent = exportingPdf ? "PDF wird erstellt..." : exportButtonLabel();
   renderManualStorageStartButton();
+  if (window.HLogistikTransfer) {
+    if (isTransfer) {
+      window.HLogistikTransfer.activate({
+        userName: currentUserName(),
+        userGroup: transferUserGroup(),
+        warehouse: transferWarehouse(),
+        online: serverOnline,
+      });
+    } else {
+      window.HLogistikTransfer.deactivate();
+    }
+  }
 }
 
 function exportButtonLabel() {
@@ -791,6 +902,7 @@ function isManualStorageHeader() {
 }
 
 async function loadOrderList(options = {}) {
+  if (currentMode === "transfer") return;
   const silent = options?.silent === true;
   if (!serverOnline) {
     await loadOrderListFromCache();
@@ -2645,6 +2757,7 @@ function setConnectionStatus(value) {
   } else {
     elements.connectionStatus.innerHTML = "Prüfe Verbindung";
   }
+  if (window.HLogistikTransfer && (value === true || value === false)) window.HLogistikTransfer.setOnline(value);
 }
 
 function setMessage(text, isError) {
@@ -2652,8 +2765,15 @@ function setMessage(text, isError) {
   elements.message.innerHTML = escapeHtml(text);
 }
 
+function setHidden(element, hidden) {
+  if (!element) return;
+  element.hidden = hidden;
+  if (hidden) element.setAttribute("hidden", "");
+  else element.removeAttribute("hidden");
+}
+
 async function apiJson(url, options = {}) {
-  const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
+  const userGroup = tabletApiGroup();
   const { headers: extraHeaders, ...rest } = options;
   if (!rest.cache && String(rest.method || "GET").toUpperCase() === "GET") {
     rest.cache = "no-store";

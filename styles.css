@@ -1453,6 +1453,10 @@ input.is-warning[readonly] {
   gap: 10px;
 }
 
+.storage-table tr.is-transfer td {
+  background: #eef5ff;
+}
+
 @media (max-width: 980px) {
   .app-header,
   .header-actions {

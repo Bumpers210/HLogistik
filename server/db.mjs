@@ -77,8 +77,31 @@ export function initializeDatabase() {
       lagerplatz TEXT NOT NULL,
       le_nummer TEXT NOT NULL,
       referenz TEXT,
+      umlagerung_id TEXT NOT NULL DEFAULT '',
       erstellt_am TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS umlagerung (
+      id TEXT PRIMARY KEY,
+      lager TEXT NOT NULL,
+      artikel_id TEXT NOT NULL,
+      materialnummer TEXT NOT NULL,
+      quell_bestand_id TEXT NOT NULL,
+      quell_lagerplatz TEXT NOT NULL,
+      quell_le_nummer TEXT NOT NULL,
+      ziel_bestand_id TEXT NOT NULL,
+      ziel_lagerplatz TEXT NOT NULL,
+      ziel_le_nummer TEXT NOT NULL,
+      menge_stueck INTEGER NOT NULL,
+      paletten INTEGER NOT NULL DEFAULT 0,
+      referenz TEXT NOT NULL DEFAULT '',
+      gebucht_von TEXT NOT NULL DEFAULT '',
+      quell_aktualisiert_am TEXT NOT NULL,
+      erstellt_am TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_umlagerung_lager_zeit
+      ON umlagerung(lager, erstellt_am);
+    CREATE INDEX IF NOT EXISTS idx_umlagerung_lager_artikel
+      ON umlagerung(lager, materialnummer, erstellt_am);
     CREATE TABLE IF NOT EXISTS bestandsbuchung_fehler (
       id TEXT PRIMARY KEY,
       lager TEXT NOT NULL DEFAULT 'SSI',
@@ -147,6 +170,7 @@ export function initializeDatabase() {
   ensureOrderColumn("original_archiviert_am", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("original_archiv_pfad", "TEXT NOT NULL DEFAULT ''");
   ensureOrderColumn("original_archiv_fehler", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(getDb(), "lagerbewegung", "umlagerung_id", "TEXT NOT NULL DEFAULT ''");
   migrateStorageWarehouseTables();
 }
 
@@ -206,6 +230,8 @@ function migrateStorageWarehouseTables() {
       ON lagerbestand(lager, materialnummer, lagerplatz, le_nummer);
     CREATE INDEX IF NOT EXISTS idx_lagerbewegung_lager_artikel
       ON lagerbewegung(lager, materialnummer, erstellt_am);
+    CREATE INDEX IF NOT EXISTS idx_lagerbewegung_umlagerung
+      ON lagerbewegung(umlagerung_id, erstellt_am);
   `);
 }
 

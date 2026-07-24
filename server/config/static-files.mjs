@@ -19,6 +19,7 @@ export const PUBLIC_STATIC_FILES = new Set([
   "/artikel.js",
   "/xlsx.full.min.js",
   "/lager.js",
+  "/tablet-transfer.js",
   "/auswertungen.js",
   "/tablet.js",
   "/tablet-legacy.js",

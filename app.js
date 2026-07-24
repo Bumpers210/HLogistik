@@ -147,6 +147,7 @@ function bindElements() {
     "storageModeButton",
     "storageAppLink",
     "articleOverviewNavLink",
+    "transferNavLink",
     "articleNavLink",
     "orderNumber",
     "customerName",
@@ -427,6 +428,7 @@ function applyUserAccess() {
   }
   if (elements.articleNavLink) elements.articleNavLink.hidden = isWarehouse;
   if (elements.articleOverviewNavLink) elements.articleOverviewNavLink.hidden = isWarehouse;
+  if (elements.transferNavLink) elements.transferNavLink.hidden = !HLogistikUi.canAccessTransfers(currentUser.group);
   return true;
 }
 

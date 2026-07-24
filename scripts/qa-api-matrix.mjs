@@ -16,6 +16,7 @@ import {
 } from "../server/rules/order-rules.mjs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
@@ -29,6 +30,16 @@ const ROLE_HEADERS = {
 const TABLET_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "x-user-group": "tablet",
+  "x-qa-preserve-artifacts": "1"
+};
+const ADMIN_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "x-user-group": "verwaltung",
+  "x-qa-preserve-artifacts": "1"
+};
+const WAREHOUSE_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "x-user-group": "lager",
   "x-qa-preserve-artifacts": "1"
 };
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
@@ -1666,7 +1677,7 @@ async function run() {
     });
   }
 
-  for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/app-import-line-helpers.js", "/app-import-diagnostics.js", "/app-state-helpers.js", "/app-ui-helpers.js", "/app-picking-parser.js", "/tablet.html", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
+  for (const path of ["/", "/order-hint-rules.js", "/shared/storage-hu-rules.js", "/shared/manual-storage-rules.js", "/app-import-line-helpers.js", "/app-import-diagnostics.js", "/app-state-helpers.js", "/app-ui-helpers.js", "/app-picking-parser.js", "/tablet.html", "/tablet-transfer.js", "/lager.html", "/artikel.html", "/auswertungen.html", "/api/health"]) {
     const response = await request(path);
     check(`static ${path}`, response.status === 200, `${response.status}`);
   }
@@ -1683,6 +1694,11 @@ async function run() {
   const articleJsSource = await readFile(new URL("../artikel.js", import.meta.url), "utf8");
   const serverSource = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
   const storageSource = await readFile(new URL("../server/storage.mjs", import.meta.url), "utf8");
+  const tabletTransferSource = await readFile(new URL("../tablet-transfer.js", import.meta.url), "utf8");
+  const offlineStoreSource = await readFile(new URL("../offline-store.js", import.meta.url), "utf8");
+  const tabletTransferOffline = await tabletTransferOfflineFixture(tabletTransferSource);
+  const offlineStoreIos9 = await offlineStoreIos9Fixture(offlineStoreSource);
+  const offlineStoreWebSql = await offlineStoreWebSqlFallbackFixture(offlineStoreSource);
   const tabletLegacyServiceWorkerSource = extractFunctionSource(tabletLegacySource, "function registerTabletServiceWorker(");
   const tabletModernServiceWorkerSource = extractFunctionSource(tabletModernSource, "function registerTabletServiceWorker(");
   const duplicateImportSource = extractFunctionSource(appSource, "async function findDuplicateOrderForImport(");
@@ -1693,7 +1709,8 @@ async function run() {
       tabletLegacySource.includes("isCompleteOrderDetail(cached, id)") &&
       tabletLegacySource.includes("xhr.onerror") &&
       tabletLegacySource.includes("xhr.ontimeout") &&
-      !/=>|\?\.|\?\?|\basync\b|\bawait\b|\bconst\b|\blet\b/.test(tabletLegacySource),
+      !/=>|\?\.|\?\?|\basync\b|\bawait\b|\bconst\b|\blet\b/.test(tabletLegacySource) &&
+      !/=>|\?\.|\?\?|\basync\b|\bawait\b|\bconst\b|\blet\b/.test(tabletTransferSource),
     "legacy detail validation and Safari syntax"
   );
   check(
@@ -1711,10 +1728,12 @@ async function run() {
       tabletModernServiceWorkerSource.includes("updateViaCache: \"none\"") &&
       countSourceOccurrences(tabletLegacyServiceWorkerSource, "registration.update()") === 1 &&
       countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
-      tabletHtmlSource.includes("tablet-legacy.js?v=20260721-2") &&
-      tabletHtmlSource.includes("tablet.css?v=20260720-1") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.193\"") &&
-      manifestSource.includes("\"version\": \"1.5.193\"") &&
+      tabletHtmlSource.includes("tablet-transfer.js?v=20260722-8") &&
+      tabletHtmlSource.includes("offline-store.js?v=20260722-5") &&
+      tabletHtmlSource.includes("tablet-legacy.js?v=20260722-2") &&
+      tabletHtmlSource.includes("tablet.css?v=20260722-4") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.202\"") &&
+      manifestSource.includes("\"version\": \"1.5.202\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&
@@ -2004,7 +2023,7 @@ async function run() {
   const siArticlesAfterReplace = await request("/api/articles?warehouse=SI");
   const ssiArticlesAfterReplace = await request("/api/articles?warehouse=SSI");
   const ssiLocationsAfterReplace = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(siProtectedMaterial)}`);
-  const protectedCountKeys = ["ssiStock", "orders", "movements", "issueErrors", "ssiArticles"];
+  const protectedCountKeys = ["ssiStock", "orders", "movements", "transfers", "issueErrors", "ssiArticles"];
   check(
     "SI replace API swaps only SI article and stock data transactionally",
     siProtectedArticle.status === 200 && siProtectedReceipt.status === 200 &&
@@ -2159,6 +2178,519 @@ async function run() {
   });
   check("storage mutation without role rejected", roleGuard.status === 403, `${roleGuard.status} ${JSON.stringify(roleGuard.body)}`);
 
+  const transferMaterial = `78${suffix}`;
+  const transferHu = `QA-TRANSFER-HU-${suffix}`;
+  const transferArticle = await request("/api/articles?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({
+      materialnummer: transferMaterial,
+      materialbezeichnung: "QA Umlagerungsartikel",
+      gebindeArt: "STK",
+      mengeProKarton: 0,
+      mengeProPalette: 5
+    })
+  });
+  const transferSourceReceipt = await request("/api/storage/receipts?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ materialnummer: transferMaterial, lagerplatz: "002-H3-SQA", leNummer: transferHu, mengeStueck: 10, paletten: 2, referenz: `QA transfer source ${suffix}` })
+  });
+  const transferTargetReceipt = await request("/api/storage/receipts?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ materialnummer: transferMaterial, lagerplatz: "002-H1-SAB1", leNummer: transferHu, mengeStueck: 4, paletten: 1, referenz: `QA transfer target ${suffix}` })
+  });
+  const transferLocationsBefore = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}`);
+  const transferLocationsLimited = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}&limit=1`);
+  const transferSource = Array.isArray(transferLocationsBefore.body)
+    ? transferLocationsBefore.body.find((row) => row.lagerplatz === "002-H3-SQA" && row.leNummer === transferHu)
+    : null;
+  const allTransferSnapshotLocations = await request("/api/storage/locations?warehouse=SSI");
+  const transferStockSnapshot = await request("/api/storage/locations/snapshot?warehouse=SSI");
+  const transferStockSnapshotPage = await request("/api/storage/locations/snapshot?warehouse=SSI&offset=0&limit=1");
+  const exactTransferSource = await request(`/api/storage/locations?warehouse=SSI&id=${encodeURIComponent(transferSource?.id || "")}&limit=1`);
+  const snapshotFields = ["aktualisiertAm", "artikelId", "barcode", "id", "lager", "lagerplatz", "leNummer", "materialnummer", "mengeStueck", "paletten"];
+  check(
+    "transfer snapshot API returns every positive warehouse row with only the minimal offline projection",
+    allTransferSnapshotLocations.status === 200 &&
+      transferStockSnapshot.status === 200 &&
+      transferStockSnapshot.body?.warehouse === "SSI" &&
+      Boolean(transferStockSnapshot.body?.capturedAt) &&
+      Boolean(transferStockSnapshot.body?.snapshotKey) &&
+      transferStockSnapshot.body?.rowCount === allTransferSnapshotLocations.body?.length &&
+      transferStockSnapshot.body?.rows?.length === allTransferSnapshotLocations.body?.length &&
+      transferStockSnapshot.body.rows.every((row) => row.mengeStueck > 0 && JSON.stringify(Object.keys(row).sort()) === JSON.stringify(snapshotFields)) &&
+      JSON.stringify(transferStockSnapshot.body.rows.map((row) => row.id).sort()) === JSON.stringify(allTransferSnapshotLocations.body.map((row) => row.id).sort()) &&
+      transferStockSnapshotPage.status === 200 &&
+      transferStockSnapshotPage.body?.snapshotKey === transferStockSnapshot.body?.snapshotKey &&
+      transferStockSnapshotPage.body?.rowCount === transferStockSnapshot.body?.rowCount &&
+      transferStockSnapshotPage.body?.rows?.length === Math.min(1, transferStockSnapshot.body?.rowCount || 0) &&
+      transferStockSnapshotPage.body?.limit === 1 &&
+      exactTransferSource.status === 200 && exactTransferSource.body?.length === 1 && exactTransferSource.body[0]?.id === transferSource?.id,
+    JSON.stringify({ snapshot: transferStockSnapshot.body, exact: exactTransferSource.body })
+  );
+  const transferId = `qa-transfer-${suffix}`;
+  const transferPayload = {
+    id: transferId,
+    sourceLocationId: transferSource?.id,
+    expectedQuantity: transferSource?.mengeStueck,
+    expectedUpdatedAt: transferSource?.aktualisiertAm,
+    targetBin: "002-H1-SAB1",
+    reference: `QA Umlagerung ${suffix}`,
+    userName: `QA Tablet ${suffix}`
+  };
+  const transferBooking = await request("/api/storage/transfers?warehouse=SSI", {
+    method: "POST",
+    headers: TABLET_HEADERS,
+    body: JSON.stringify({ transfer: transferPayload })
+  });
+  const transferLocationsAfter = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}`);
+  const transferTargetAfter = Array.isArray(transferLocationsAfter.body)
+    ? transferLocationsAfter.body.find((row) => row.lagerplatz === "002-H1-SAB1" && row.leNummer === transferHu)
+    : null;
+  check(
+    "atomic transfer moves one complete stock row and preserves quantity and pallets",
+    transferArticle.status === 200 &&
+      transferSourceReceipt.status === 200 &&
+      transferTargetReceipt.status === 200 &&
+      transferBooking.status === 200 &&
+      transferBooking.body?.ok === true &&
+      transferBooking.body?.replayed === false &&
+      transferBooking.body?.transfer?.mengeStueck === 10 &&
+      transferBooking.body?.transfer?.paletten === 2 &&
+      transferBooking.body?.sourceLocation?.mengeStueck === 0 &&
+      transferBooking.body?.sourceLocation?.paletten === 0 &&
+      transferTargetAfter?.mengeStueck === 14 &&
+      transferTargetAfter?.paletten === 3 &&
+      transferLocationsAfter.body.length === 1,
+    JSON.stringify({ before: transferLocationsBefore.body, booking: transferBooking.body, after: transferLocationsAfter.body })
+  );
+  check(
+    "storage location API limits transfer search payloads without changing the unrestricted caller",
+    transferLocationsBefore.status === 200 && transferLocationsBefore.body.length === 2 &&
+      transferLocationsLimited.status === 200 && transferLocationsLimited.body.length === 1,
+    JSON.stringify({ unrestricted: transferLocationsBefore.body, limited: transferLocationsLimited.body })
+  );
+  check(
+    "tablet transfer workspace exposes scan, complete-row booking and history controls through one controller",
+    tabletHtmlSource.includes('id="transferWorkspace"') &&
+      tabletHtmlSource.includes('id="transferSourceSearchInput"') &&
+      tabletHtmlSource.includes('id="transferSourceCameraButton"') &&
+      tabletHtmlSource.includes('id="transferTargetCameraButton"') &&
+      tabletHtmlSource.includes('id="transferBookButton"') &&
+      tabletHtmlSource.includes('id="transferDraftList"') &&
+      tabletHtmlSource.includes('id="transferHistoryTableBody"') &&
+      tabletTransferSource.includes("window.BarcodeDetector") &&
+      tabletTransferSource.includes("expectedQuantity: selectedSource.mengeStueck") &&
+      tabletTransferSource.includes("expectedUpdatedAt: selectedSource.aktualisiertAm") &&
+      tabletTransferSource.includes('apiJson("/api/storage/transfers?warehouse="') &&
+      tabletTransferSource.includes("validateResumedSource") &&
+      tabletTransferSource.includes('transferSourceSearchInput.addEventListener("keydown", handleSourceScannerEnter)') &&
+      tabletTransferSource.includes('transferTargetBinInput.addEventListener("keydown", preventTargetScannerSubmit)') &&
+      tabletTransferSource.includes("currentDraftId = transferId") &&
+      !tabletTransferSource.includes("OfflineStore.enqueue"),
+    "integrated tablet transfer UI and online-only booking markers"
+  );
+  check(
+    "transfer drafts use a dedicated offline store without automatic synchronization",
+    offlineStoreSource.includes("var DB_VERSION = 7") &&
+      offlineStoreSource.includes('createObjectStore("transfer-drafts"') &&
+      offlineStoreSource.includes('createObjectStore("transfer-stock-rows"') &&
+      offlineStoreSource.includes('createObjectStore("transfer-stock-snapshots"') &&
+      offlineStoreSource.includes("saveTransferDraft") &&
+      offlineStoreSource.includes("loadTransferDrafts") &&
+      offlineStoreSource.includes("deleteTransferDraft") &&
+      tabletTransferSource.includes("Offline – keine Buchung möglich") &&
+      tabletTransferSource.includes('verificationState: "unchecked"') &&
+      !offlineStoreSource.includes('createObjectStore("storage-locations"') &&
+      !offlineStoreSource.includes('createObjectStore("transfer-movements"') &&
+      !offlineStoreSource.includes('createObjectStore("transfer-history"'),
+    "dedicated transfer draft and minimal snapshot persistence"
+  );
+  check(
+    "iOS 9 compatible offline store creates schema, persists a snapshot across reload and searches without modern IndexedDB helpers",
+    offlineStoreIos9.ecma5Syntax === true &&
+      offlineStoreIos9.usedWebkitIndexedDb === true &&
+      offlineStoreIos9.usedWebkitKeyRange === true &&
+      offlineStoreIos9.domStringListContainsAvailable === false &&
+      offlineStoreIos9.objectStoreGetAllAvailable === false &&
+      offlineStoreIos9.snapshotApiVersion === 4 &&
+      offlineStoreIos9.metadataBeforeReload?.rowCount === 30 &&
+      offlineStoreIos9.metadataAfterReload?.rowCount === 30 &&
+      offlineStoreIos9.articleMatches === 25 &&
+      offlineStoreIos9.barcodeMatches === 1 &&
+      offlineStoreIos9.binMatches === 1 &&
+      offlineStoreIos9.draftCount === 1 &&
+      offlineStoreIos9.diagnostic?.code === "IDB_READY" &&
+      offlineStoreIos9.unavailableDiagnostic?.code === "TRANSFER_STORAGE_UNAVAILABLE" &&
+      offlineStoreIos9.unavailableDiagnostic?.backend === "Keines",
+    JSON.stringify(offlineStoreIos9)
+  );
+  check(
+    "iPad 2 selects isolated WebSQL only after a real IndexedDB write-read probe fails",
+    offlineStoreWebSql.initialDiagnostic?.ok === true &&
+      offlineStoreWebSql.initialDiagnostic?.backend === "WebSQL" &&
+      offlineStoreWebSql.initialDiagnostic?.code === "WEBSQL_FALLBACK_READY" &&
+      offlineStoreWebSql.initialDiagnostic?.fallbackReason?.code === "IDB_PROBE_WRITE_START_FAILED" &&
+      offlineStoreWebSql.initialDiagnostic?.fallbackReason?.originalName === "UnknownError" &&
+      offlineStoreWebSql.reloadedDiagnostic?.backend === "WebSQL" &&
+      offlineStoreWebSql.idbProbeFailures >= 2 &&
+      offlineStoreWebSql.webSqlOpenCalls >= 2,
+    JSON.stringify({ initial: offlineStoreWebSql.initialDiagnostic, reloaded: offlineStoreWebSql.reloadedDiagnostic })
+  );
+  check(
+    "WebSQL fallback writes and reloads an atomic snapshot and searches article barcode bin and handling unit with a 25-row cap",
+    offlineStoreWebSql.metadataAfterReload?.capturedAt === "2026-07-22T15:00:00.000Z" &&
+      offlineStoreWebSql.metadataAfterReload?.rowCount === 60 &&
+      offlineStoreWebSql.metadataAfterReload?.storageBackend === "WebSQL" &&
+      offlineStoreWebSql.articleMatches === 25 &&
+      offlineStoreWebSql.barcodeMatches === 1 &&
+      offlineStoreWebSql.binMatches === 1 &&
+      offlineStoreWebSql.handlingUnitMatches === 1 &&
+      offlineStoreWebSql.storedRowCount === 60 &&
+      offlineStoreWebSql.maxRowsReturned <= 25,
+    JSON.stringify(offlineStoreWebSql)
+  );
+  check(
+    "WebSQL fallback preserves the last complete snapshot and stores only unchecked transfer drafts",
+    offlineStoreWebSql.incompleteError?.code === "WEBSQL_SNAPSHOT_INCOMPLETE" &&
+      offlineStoreWebSql.metadataAfterIncomplete?.capturedAt === "2026-07-22T15:00:00.000Z" &&
+      offlineStoreWebSql.draftCount === 1 &&
+      offlineStoreWebSql.draftVerificationState === "unchecked" &&
+      offlineStoreSource.includes("CREATE TABLE IF NOT EXISTS transfer_snapshot_meta") &&
+      offlineStoreSource.includes("CREATE TABLE IF NOT EXISTS transfer_snapshot_rows") &&
+      offlineStoreSource.includes("CREATE TABLE IF NOT EXISTS transfer_drafts") &&
+      !offlineStoreSource.includes("CREATE TABLE IF NOT EXISTS sync_queue") &&
+      !offlineStoreSource.includes("localStorage"),
+    JSON.stringify(offlineStoreWebSql)
+  );
+  check(
+    "iOS 9 repairs missing snapshot store and indexes without deleting drafts, queue or orders",
+    offlineStoreIos9.repairedSchema?.diagnostic?.ok === true &&
+      offlineStoreIos9.repairedSchema?.diagnostic?.dbVersion === 7 &&
+      offlineStoreIos9.repairedSchema?.diagnostic?.objectStores?.includes("transfer-stock-snapshots") &&
+      offlineStoreIos9.repairedSchema?.diagnostic?.schemaRepair?.fromVersion === 6 &&
+      offlineStoreIos9.repairedSchema?.diagnostic?.schemaRepair?.toVersion === 7 &&
+      offlineStoreIos9.repairedSchema?.diagnostic?.schemaRepair?.missingStores?.includes("transfer-stock-snapshots") &&
+      offlineStoreIos9.repairedSchema?.diagnostic?.schemaRepair?.missingIndexes?.includes("warehouse-generation") &&
+      offlineStoreIos9.repairedSchema?.draftCount === 1 &&
+      offlineStoreIos9.repairedSchema?.queueCount === 1 &&
+      offlineStoreIos9.repairedSchema?.orderCount === 1 &&
+      offlineStoreIos9.repairedSchema?.snapshotReadwriteStarts === 1 &&
+      offlineStoreIos9.repairedSchema?.searchMatchesAfterReload === 1,
+    JSON.stringify(offlineStoreIos9.repairedSchema)
+  );
+  check(
+    "iOS 9 reports a blocked schema repair with database version and existing stores",
+    offlineStoreIos9.blockedDiagnostic?.code === "TRANSFER_STORAGE_UNAVAILABLE" &&
+      offlineStoreIos9.blockedDiagnostic?.fallbackReason?.code === "IDB_UPGRADE_BLOCKED" &&
+      offlineStoreIos9.blockedDiagnostic?.fallbackReason?.originalName === "BlockedError" &&
+      offlineStoreIos9.blockedDiagnostic?.fallbackReason?.dbVersion === 6 &&
+      offlineStoreIos9.blockedDiagnostic?.fallbackReason?.objectStores?.includes("transfer-drafts") &&
+      offlineStoreIos9.blockedDiagnostic?.fallbackReason?.message?.includes("DB-Version: 6") &&
+      offlineStoreIos9.blockedDiagnostic?.fallbackReason?.message?.includes("Object-Stores:") &&
+      offlineStoreIos9.blockedUpgrades === 1,
+    JSON.stringify(offlineStoreIos9.blockedDiagnostic)
+  );
+  check(
+    "snapshot write start error exposes original Safari error, database version and object stores after one controlled retry",
+    offlineStoreIos9.writeFailure?.code === "IDB_SNAPSHOT_WRITE_START_FAILED" &&
+      offlineStoreIos9.writeFailure?.originalName === "NotFoundError" &&
+      offlineStoreIos9.writeFailure?.originalMessage?.includes("transfer-stock-snapshots") &&
+      offlineStoreIos9.writeFailure?.dbVersion === 7 &&
+      offlineStoreIos9.writeFailure?.objectStores?.includes("transfer-stock-snapshots") &&
+      offlineStoreIos9.writeFailure?.message?.includes("Originalfehler: NotFoundError") &&
+      offlineStoreIos9.writeFailure?.message?.includes("DB-Version: 7") &&
+      offlineStoreIos9.writeFailure?.message?.includes("Object-Stores:") &&
+      offlineStoreIos9.writeFailureStarts === 2,
+    JSON.stringify(offlineStoreIos9.writeFailure)
+  );
+  check(
+    "snapshot storage diagnostics distinguish missing script, stale API, open, schema and transaction failures",
+    tabletTransferOffline.outdatedStoreDiagnostic.includes("OFFLINE_STORE_API_OUTDATED") &&
+      tabletTransferOffline.missingStoreDiagnostic.includes("OFFLINE_STORE_SCRIPT_MISSING") &&
+    tabletTransferSource.includes("OFFLINE_STORE_SCRIPT_MISSING") &&
+      tabletTransferSource.includes("OFFLINE_STORE_API_OUTDATED") &&
+      offlineStoreSource.includes("IDB_UNAVAILABLE") &&
+      offlineStoreSource.includes("IDB_UPGRADE_FAILED") &&
+      offlineStoreSource.includes("IDB_SCHEMA_INCOMPLETE") &&
+      offlineStoreSource.includes("IDB_SNAPSHOT_WRITE_FAILED") &&
+      offlineStoreSource.includes("IDB_SNAPSHOT_CURSOR_READ_FAILED") &&
+      offlineStoreSource.includes("Originalfehler:") &&
+      offlineStoreSource.includes("Object-Stores:") &&
+      !offlineStoreSource.includes("localStorage"),
+    "concrete snapshot storage error codes without LocalStorage fallback"
+  );
+  check(
+    "iPad transfer persists a complete minimal warehouse snapshot and searches it offline with a 25-row UI limit",
+    tabletTransferOffline.snapshotRowCount === 40 &&
+      tabletTransferOffline.snapshotWarehouse === "SSI" &&
+      tabletTransferOffline.snapshotStatus.includes("Snapshot SSI") &&
+      tabletTransferOffline.snapshotStatus.includes("40") &&
+      tabletTransferOffline.snapshotStatus.includes("Speicher: WebSQL") &&
+      tabletTransferOffline.snapshotStatus.includes("IDB_PROBE_WRITE_START_FAILED") &&
+      tabletTransferOffline.paginatedSnapshotRequests >= 1 &&
+      tabletTransferOffline.onlineRowsVisible === 25 &&
+      tabletTransferOffline.sourceRequestLimited === true &&
+      tabletTransferOffline.offlineArticleRowsVisible === 25 &&
+      tabletTransferOffline.offlineBarcodeRowsVisible === 1 &&
+      tabletTransferOffline.offlineBinRowsVisible === 1 &&
+      tabletTransferOffline.offlineSearchDisabled === false &&
+      tabletTransferOffline.offlineBookDisabled === true &&
+      tabletTransferOffline.offlineCapability.includes("keine Buchung möglich") &&
+      tabletTransferOffline.offlineHistoryRequests === 0 &&
+      tabletTransferOffline.savedDraft?.verificationState === "unchecked" &&
+      tabletTransferOffline.savedDraft?.source?.materialnummer === "QA-TRANSFER-MAT" &&
+      tabletTransferOffline.transferPostsBeforeReconnect === 0,
+    JSON.stringify(tabletTransferOffline)
+  );
+  check(
+    "interrupted transfer snapshot refresh preserves the prior completed generation",
+      tabletTransferOffline.interruptedSnapshotPreserved === true &&
+      tabletTransferOffline.interruptedSnapshotDiagnostic.includes("WEBSQL_SNAPSHOT_PAGE_WRITE_FAILED") &&
+      tabletTransferOffline.interruptedSnapshotDiagnostic.includes("Originalfehler: WebSQLError 1") &&
+      tabletTransferOffline.interruptedSnapshotDiagnostic.includes("Speicher: WebSQL") &&
+      offlineStoreSource.includes('db.transaction(["transfer-stock-rows", "transfer-stock-snapshots"], "readwrite")') &&
+      offlineStoreSource.includes('tx.objectStore("transfer-stock-snapshots").put(metadata)') &&
+      offlineStoreSource.includes('snapshotKeyRange(metadata.generation)') &&
+      offlineStoreSource.includes("Math.min(Math.max(Number(limit) || 25, 1), 25)") &&
+      tabletTransferSource.includes("beginTransferStockSnapshotUpdate") &&
+      tabletTransferSource.includes("appendTransferStockSnapshotPage") &&
+      tabletTransferSource.includes("completeTransferStockSnapshotUpdate") &&
+      !offlineStoreSource.includes('createObjectStore("transfer-movements"') &&
+      !offlineStoreSource.includes('createObjectStore("transfer-history"'),
+    JSON.stringify(tabletTransferOffline)
+  );
+  check(
+    "iPad transfer revalidates on reconnect and blocks a conflicting source until it is selected again",
+    tabletTransferOffline.reconnectedBookEnabled === true &&
+      tabletTransferOffline.reconnectedStatus.includes("geprüft") &&
+      tabletTransferOffline.reconnectUsedExactSourceId === true &&
+      tabletTransferOffline.conflictBookDisabled === true &&
+      tabletTransferOffline.conflictSelectionStale === true &&
+      tabletTransferOffline.conflictStatus.includes("erneut") &&
+      tabletTransferOffline.transferPostsAfterConflict === 0,
+    JSON.stringify(tabletTransferOffline)
+  );
+  check(
+    "transfer navigation and service worker use the integrated tablet workspace without a standalone page",
+    indexHtmlSource.includes('href="/tablet.html?bereich=umlagerungen"') &&
+      tabletHtmlSource.includes('id="transferModeButton"') &&
+      tabletLegacySource.includes('setMode("transfer")') &&
+      tabletModernSource.includes('setMode("transfer")') &&
+      tabletLegacySource.includes("currentOrderLocksModeSwitch(nextMode)") &&
+      tabletModernSource.includes("currentOrderLocksModeSwitch(nextMode)") &&
+      serviceWorkerSource.includes('"/tablet-transfer.js"') &&
+      !serviceWorkerSource.includes("umlagerungen.html") &&
+      !serviceWorkerSource.includes("umlagerungen.js") &&
+      !tabletLegacySource.includes("openTransferPage") &&
+      !tabletModernSource.includes("openTransferPage") &&
+      !tabletLegacySource.includes("/api/storage/transfers") &&
+      !tabletModernSource.includes("/api/storage/transfers") &&
+      serverSource.includes('pathname === "/api/storage/transfers"') &&
+      serverSource.includes("ROLE_PERMISSIONS.storageTransfer"),
+    "integrated transfer navigation, offline shell and API role markers"
+  );
+  check(
+    "atomic transfer writes paired correlated movements",
+    transferBooking.body?.movements?.length === 2 &&
+      JSON.stringify(transferBooking.body.movements.map((entry) => entry.bewegungsart).sort()) === JSON.stringify(["Umlagerung-Ausgang", "Umlagerung-Eingang"].sort()) &&
+      transferBooking.body.movements.every((entry) => entry.umlagerungId === transferId && entry.mengeStueck === 10 && entry.paletten === 2),
+    JSON.stringify(transferBooking.body?.movements)
+  );
+
+  const transferReplay = await request("/api/storage/transfers?warehouse=SSI", {
+    method: "POST",
+    headers: TABLET_HEADERS,
+    body: JSON.stringify({ transfer: transferPayload })
+  });
+  const transferConflict = await request("/api/storage/transfers?warehouse=SSI", {
+    method: "POST",
+    headers: TABLET_HEADERS,
+    body: JSON.stringify({ transfer: { ...transferPayload, targetBin: "002-H4-SBA1" } })
+  });
+  const transferHistory = await request(`/api/storage/transfers?warehouse=SSI&q=${encodeURIComponent(transferId)}`, { headers: TABLET_HEADERS });
+  check(
+    "transfer idempotency replays exactly once and rejects changed payload",
+    transferReplay.status === 200 &&
+      transferReplay.body?.replayed === true &&
+      transferConflict.status === 409 &&
+      Array.isArray(transferHistory.body) &&
+      transferHistory.body.length === 1 &&
+      transferHistory.body[0]?.id === transferId,
+    JSON.stringify({ replay: transferReplay.body, conflict: transferConflict.body, history: transferHistory.body })
+  );
+
+  const transferBookingExport = await request(`/api/articles/bookings/export?from=${today}&to=${today}&warehouse=SSI`, { headers: ROLE_HEADERS });
+  const transferExportRows = Array.isArray(transferBookingExport.body?.items)
+    ? transferBookingExport.body.items.filter((row) => String(row.referenz || "").includes(transferId))
+    : [];
+  const transferArticleReport = await request(`/api/storage/reports/article-movements?warehouse=SSI&from=${today}&to=${today}`);
+  const transferReportRow = transferArticleReport.body?.items?.find((row) => row.materialnummer === transferMaterial);
+  check(
+    "transfer export uses UML directions while receipt and issue reports stay unchanged",
+    JSON.stringify(transferExportRows.map((row) => row.buchungsrichtung).sort()) === JSON.stringify(["UML-AUS", "UML-EIN"].sort()) &&
+      transferReportRow?.zugaenge === 14 &&
+      transferReportRow?.entnahmen === 0 &&
+      transferReportRow?.bestand === 14,
+    JSON.stringify({ exportRows: transferExportRows, report: transferReportRow })
+  );
+
+  const staleHu = `QA-STALE-HU-${suffix}`;
+  await request("/api/storage/receipts?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ materialnummer: transferMaterial, lagerplatz: "002-H4-SBA1", leNummer: staleHu, mengeStueck: 5, paletten: 1 })
+  });
+  const staleLocationsBefore = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}`);
+  const staleSource = staleLocationsBefore.body.find((row) => row.leNummer === staleHu);
+  await request("/api/storage/issues?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ materialnummer: transferMaterial, lagerplatz: staleSource.lagerplatz, leNummer: staleHu, mengeStueck: 1 })
+  });
+  const staleTransferId = `qa-transfer-stale-${suffix}`;
+  const staleTransfer = await request("/api/storage/transfers?warehouse=SSI", {
+    method: "POST",
+    headers: ADMIN_HEADERS,
+    body: JSON.stringify({ transfer: {
+      id: staleTransferId,
+      sourceLocationId: staleSource.id,
+      expectedQuantity: staleSource.mengeStueck,
+      expectedUpdatedAt: staleSource.aktualisiertAm,
+      targetBin: "002-H4-SCA1",
+      userName: `QA Verwaltung ${suffix}`
+    } })
+  });
+  const staleLocationsAfter = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}`);
+  const staleCurrent = staleLocationsAfter.body.find((row) => row.id === staleSource.id);
+  const sameTargetTransfer = await request("/api/storage/transfers?warehouse=SSI", {
+    method: "POST",
+    headers: ADMIN_HEADERS,
+    body: JSON.stringify({ transfer: {
+      id: `qa-transfer-same-${suffix}`,
+      sourceLocationId: staleCurrent.id,
+      expectedQuantity: staleCurrent.mengeStueck,
+      expectedUpdatedAt: staleCurrent.aktualisiertAm,
+      targetBin: staleCurrent.lagerplatz,
+      userName: `QA Verwaltung ${suffix}`
+    } })
+  });
+  const failedTransferHistory = await request(`/api/storage/transfers?warehouse=SSI&q=${encodeURIComponent(staleTransferId)}`, { headers: ADMIN_HEADERS });
+  check(
+    "stale and same-target transfers roll back without transfer history",
+    staleTransfer.status === 409 &&
+      staleCurrent?.mengeStueck === 4 &&
+      sameTargetTransfer.status === 400 &&
+      Array.isArray(failedTransferHistory.body) &&
+      failedTransferHistory.body.length === 0,
+    JSON.stringify({ stale: staleTransfer.body, sameTarget: sameTargetTransfer.body, stock: staleCurrent, history: failedTransferHistory.body })
+  );
+
+  const concurrentHu = `QA-CONCURRENT-HU-${suffix}`;
+  await request("/api/storage/receipts?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ materialnummer: transferMaterial, lagerplatz: "002-H4-SCA1", leNummer: concurrentHu, mengeStueck: 6, paletten: 2 })
+  });
+  const concurrentLocationsBefore = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}`);
+  const concurrentSource = concurrentLocationsBefore.body.find((row) => row.leNummer === concurrentHu);
+  const concurrentBase = {
+    sourceLocationId: concurrentSource.id,
+    expectedQuantity: concurrentSource.mengeStueck,
+    expectedUpdatedAt: concurrentSource.aktualisiertAm,
+    userName: `QA Tablet ${suffix}`
+  };
+  const concurrentTransfers = await Promise.all([
+    request("/api/storage/transfers?warehouse=SSI", {
+      method: "POST",
+      headers: TABLET_HEADERS,
+      body: JSON.stringify({ transfer: { ...concurrentBase, id: `qa-transfer-race-a-${suffix}`, targetBin: "002-H4-SDA1" } })
+    }),
+    request("/api/storage/transfers?warehouse=SSI", {
+      method: "POST",
+      headers: TABLET_HEADERS,
+      body: JSON.stringify({ transfer: { ...concurrentBase, id: `qa-transfer-race-b-${suffix}`, targetBin: "002-H4-SEA1" } })
+    })
+  ]);
+  const concurrentLocationsAfter = await request(`/api/storage/locations?warehouse=SSI&materialnummer=${encodeURIComponent(transferMaterial)}`);
+  const concurrentTargets = concurrentLocationsAfter.body.filter((row) => row.leNummer === concurrentHu);
+  check(
+    "concurrent complete-row transfers allow exactly one winner",
+    JSON.stringify(concurrentTransfers.map((response) => response.status).sort()) === JSON.stringify([200, 409]) &&
+      concurrentTargets.length === 1 &&
+      concurrentTargets[0]?.mengeStueck === 6 &&
+      concurrentTargets[0]?.paletten === 2,
+    JSON.stringify({ responses: concurrentTransfers, locations: concurrentTargets })
+  );
+
+  const transferRolePayload = {
+    id: `qa-transfer-role-${suffix}`,
+    sourceLocationId: concurrentTargets[0]?.id,
+    expectedQuantity: concurrentTargets[0]?.mengeStueck,
+    expectedUpdatedAt: concurrentTargets[0]?.aktualisiertAm,
+    targetBin: "002-H4-SFA1",
+    userName: `QA Rolle ${suffix}`
+  };
+  const transferOfficeAllowed = await request("/api/storage/transfers?warehouse=SSI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ transfer: transferRolePayload })
+  });
+  const transferWarehouseDenied = await request("/api/storage/transfers?warehouse=SSI", {
+    method: "POST",
+    headers: WAREHOUSE_HEADERS,
+    body: JSON.stringify({ transfer: transferRolePayload })
+  });
+  const transferAnonymousDenied = await request("/api/storage/transfers?warehouse=SSI", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ transfer: transferRolePayload })
+  });
+  check(
+    "transfer mutation allows office, tablet and administration roles but rejects warehouse and anonymous access",
+    transferOfficeAllowed.status === 200 && transferWarehouseDenied.status === 403 && transferAnonymousDenied.status === 403,
+    JSON.stringify({ office: transferOfficeAllowed.body, warehouse: transferWarehouseDenied.body, anonymous: transferAnonymousDenied.body })
+  );
+
+  const siTransferMaterial = `79${suffix}`;
+  const siTransferHu = `QA-SI-LE-${suffix}`;
+  const siTransferArticle = await request("/api/articles?warehouse=SI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ materialnummer: siTransferMaterial, materialbezeichnung: "QA SI Umlagerung", gebindeArt: "STK", mengeProKarton: 0, mengeProPalette: 8 })
+  });
+  await request("/api/storage/receipts?warehouse=SI", {
+    method: "POST",
+    headers: ROLE_HEADERS,
+    body: JSON.stringify({ materialnummer: siTransferMaterial, lagerplatz: "si-a1", leNummer: siTransferHu, mengeStueck: 8, paletten: 1 })
+  });
+  const siTransferBefore = await request(`/api/storage/locations?warehouse=SI&materialnummer=${encodeURIComponent(siTransferMaterial)}`);
+  const siTransferSource = siTransferBefore.body[0];
+  const siTransferBooking = await request("/api/storage/transfers?warehouse=SI", {
+    method: "POST",
+    headers: ADMIN_HEADERS,
+    body: JSON.stringify({ transfer: {
+      id: `qa-transfer-si-${suffix}`,
+      sourceLocationId: siTransferSource?.id,
+      expectedQuantity: siTransferSource?.mengeStueck,
+      expectedUpdatedAt: siTransferSource?.aktualisiertAm,
+      targetBin: "si-b2",
+      userName: `QA Verwaltung ${suffix}`
+    } })
+  });
+  check(
+    "SI transfer uppercases target bin without SSI normalization",
+    siTransferArticle.status === 200 &&
+      siTransferBooking.status === 200 &&
+      siTransferBooking.body?.transfer?.quellLagerplatz === "SI-A1" &&
+      siTransferBooking.body?.transfer?.zielLagerplatz === "SI-B2" &&
+      siTransferBooking.body?.targetLocation?.mengeStueck === 8 &&
+      siTransferBooking.body?.targetLocation?.paletten === 1,
+    JSON.stringify(siTransferBooking.body)
+  );
+
   const packageA1PersistencePayload = {
     ...packageA1OrderNote.savedPayload,
     id: "",
@@ -2188,6 +2720,10 @@ async function run() {
       method: "DELETE",
       headers: ROLE_HEADERS
     });
+  }
+  for (const path of ["/umlagerungen.html", "/umlagerungen.js"]) {
+    const response = await request(path);
+    check(`removed standalone transfer ${path}`, response.status === 404, `${response.status}`);
   }
 
   const orderPayload = {
@@ -4205,6 +4741,1030 @@ async function tabletPositionNoteDedupeFixture(fileName) {
     manualPositionNoteFromInput: context.__manualPositionNoteFromInput,
     normalizePositionNotesForSave: context.__normalizePositionNotesForSave
   });
+}
+
+function createOfflineStoreIos9Context(offlineStoreSource, legacyIndexedDb, extraGlobals = {}) {
+  const globals = {
+    console,
+    Date,
+    Math,
+    JSON,
+    Promise,
+    String,
+    Number,
+    Array,
+    Error,
+    setTimeout,
+    clearTimeout,
+    webkitIndexedDB: legacyIndexedDb.api,
+    webkitIDBKeyRange: legacyIndexedDb.keyRange,
+    ...extraGlobals
+  };
+  const context = vm.createContext(globals);
+  context.window = context;
+  context.globalThis = context;
+  vm.runInContext(offlineStoreSource, context, { filename: "offline-store-ios9.js" });
+  return context;
+}
+
+function createWebSqlFixture() {
+  const sqlite = new DatabaseSync(":memory:");
+  const stats = {
+    openCalls: 0,
+    transactions: 0,
+    readTransactions: 0,
+    sqlStatements: 0,
+    maxRowsReturned: 0
+  };
+
+  function resultRows(rows) {
+    stats.maxRowsReturned = Math.max(stats.maxRowsReturned, rows.length);
+    return {
+      length: rows.length,
+      item(index) { return rows[index]; }
+    };
+  }
+
+  function sqlError(error) {
+    return { code: 1, message: String(error?.message || error || "WebSQL fixture error") };
+  }
+
+  function runTransaction(callback, errorCallback, successCallback, readOnly) {
+    if (readOnly) stats.readTransactions += 1;
+    else stats.transactions += 1;
+    let completed = false;
+    try {
+      sqlite.exec("BEGIN");
+      const tx = {
+        executeSql(sql, parameters = [], success, statementError) {
+          stats.sqlStatements += 1;
+          try {
+            const statement = sqlite.prepare(sql);
+            let result;
+            if (/^\s*(SELECT|PRAGMA)\b/i.test(sql)) {
+              const rows = statement.all(...parameters);
+              result = { rows: resultRows(rows), rowsAffected: 0, insertId: undefined };
+            } else {
+              const runResult = statement.run(...parameters);
+              result = {
+                rows: resultRows([]),
+                rowsAffected: Number(runResult.changes || 0),
+                insertId: runResult.lastInsertRowid == null ? undefined : Number(runResult.lastInsertRowid)
+              };
+            }
+            if (typeof success === "function") success(tx, result);
+            return result;
+          } catch (error) {
+            if (typeof statementError === "function" && statementError(tx, sqlError(error)) === true) return null;
+            throw error;
+          }
+        }
+      };
+      callback(tx);
+      sqlite.exec("COMMIT");
+      completed = true;
+      if (typeof successCallback === "function") successCallback();
+    } catch (error) {
+      if (!completed) {
+        try { sqlite.exec("ROLLBACK"); } catch { /* Transaktion war bereits beendet. */ }
+      }
+      if (typeof errorCallback === "function") errorCallback(sqlError(error));
+    }
+  }
+
+  const database = {
+    version: "1.0",
+    transaction(callback, errorCallback, successCallback) {
+      runTransaction(callback, errorCallback, successCallback, false);
+    },
+    readTransaction(callback, errorCallback, successCallback) {
+      runTransaction(callback, errorCallback, successCallback, true);
+    }
+  };
+
+  return {
+    stats,
+    sqlite,
+    openDatabase() {
+      stats.openCalls += 1;
+      return database;
+    }
+  };
+}
+
+async function offlineStoreWebSqlFallbackFixture(offlineStoreSource) {
+  const brokenIndexedDb = createLegacyIndexedDbFixture({
+    failTransferProbe: true,
+    transferProbeErrorName: "UnknownError",
+    transferProbeErrorMessage: "IndexedDB backing store is not writable"
+  });
+  const webSql = createWebSqlFixture();
+  const context = createOfflineStoreIos9Context(offlineStoreSource, brokenIndexedDb, {
+    openDatabase: webSql.openDatabase
+  });
+  const initialDiagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
+  await context.OfflineStore.saveTransferDraft({
+    id: "websql-draft",
+    warehouse: "SSI",
+    verificationState: "verified",
+    source: { id: "websql-stock-1", materialnummer: "WEBSQL-MATERIAL" },
+    targetBin: "002-H4-S99A1"
+  });
+
+  const rows = Array.from({ length: 60 }, (_entry, index) => ({
+    id: `websql-stock-${index + 1}`,
+    lager: "SSI",
+    artikelId: `websql-article-${index + 1}`,
+    materialnummer: "WEBSQL-MATERIAL",
+    barcode: `WEBSQL-BC-${String(index + 1).padStart(2, "0")}`,
+    lagerplatz: `002-H4-W${String(index + 1).padStart(2, "0")}A1`,
+    leNummer: `WEBSQL-HU-${index + 1}`,
+    mengeStueck: index + 1,
+    paletten: index % 4,
+    aktualisiertAm: `2026-07-22T15:00:${String(index).padStart(2, "0")}.000Z`
+  }));
+  const session = await context.OfflineStore.beginTransferStockSnapshotUpdate({
+    warehouse: "SSI",
+    capturedAt: "2026-07-22T15:00:00.000Z",
+    rowCount: rows.length,
+    snapshotKey: "websql-complete-60"
+  });
+  for (let offset = 0; offset < rows.length; offset += 20) {
+    await context.OfflineStore.appendTransferStockSnapshotPage(session, rows.slice(offset, offset + 20));
+  }
+  await context.OfflineStore.completeTransferStockSnapshotUpdate(session);
+
+  const incompleteSession = await context.OfflineStore.beginTransferStockSnapshotUpdate({
+    warehouse: "SSI",
+    capturedAt: "2026-07-22T15:30:00.000Z",
+    rowCount: 2,
+    snapshotKey: "websql-incomplete"
+  });
+  await context.OfflineStore.appendTransferStockSnapshotPage(incompleteSession, [rows[0]]);
+  let incompleteError = null;
+  try {
+    await context.OfflineStore.completeTransferStockSnapshotUpdate(incompleteSession);
+  } catch (error) {
+    incompleteError = { code: error.offlineStoreCode, message: error.message };
+  }
+  await context.OfflineStore.abortTransferStockSnapshotUpdate(incompleteSession);
+  const metadataAfterIncomplete = await context.OfflineStore.loadTransferStockSnapshotMeta("SSI");
+
+  vm.runInContext(offlineStoreSource, context, { filename: "offline-store-websql-reload.js" });
+  const reloadedDiagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
+  const metadataAfterReload = await context.OfflineStore.loadTransferStockSnapshotMeta("SSI");
+  const articleMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-MATERIAL", 25);
+  const barcodeMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-BC-59", 25);
+  const binMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "002-H4-W60A1", 25);
+  const handlingUnitMatches = await context.OfflineStore.searchTransferStockSnapshot("SSI", "WEBSQL-HU-58", 25);
+  const drafts = await context.OfflineStore.loadTransferDrafts();
+  const storedRowCount = Number(webSql.sqlite.prepare("SELECT COUNT(*) AS count FROM transfer_snapshot_rows").get().count || 0);
+
+  return {
+    initialDiagnostic,
+    reloadedDiagnostic,
+    metadataAfterIncomplete,
+    metadataAfterReload,
+    incompleteError,
+    articleMatches: articleMatches.rows.length,
+    barcodeMatches: barcodeMatches.rows.length,
+    binMatches: binMatches.rows.length,
+    handlingUnitMatches: handlingUnitMatches.rows.length,
+    draftCount: drafts.length,
+    draftVerificationState: drafts[0]?.verificationState || "",
+    storedRowCount,
+    idbProbeFailures: brokenIndexedDb.stats.transferProbeFailures,
+    webSqlOpenCalls: webSql.stats.openCalls,
+    maxRowsReturned: webSql.stats.maxRowsReturned
+  };
+}
+
+function legacyOfflineStoreDefinitions(options = {}) {
+  const definitions = [
+    { name: "orders", keyPath: "id", rows: options.orderRows || [] },
+    { name: "order-summaries", keyPath: "id", rows: options.summaryRows || [] },
+    { name: "sync-queue", keyPath: "queueId", rows: options.queueRows || [] },
+    { name: "order-groups", keyPath: "groupId", rows: options.groupRows || [] },
+    { name: "transfer-drafts", keyPath: "id", rows: options.draftRows || [] },
+    {
+      name: "transfer-stock-rows",
+      keyPath: "key",
+      rows: options.stockRows || [],
+      indexes: options.withSnapshotIndexes === false ? [] : [
+        { name: "warehouse-generation", keyPath: "warehouseGeneration" },
+        { name: "warehouse", keyPath: "warehouse" }
+      ]
+    }
+  ];
+  if (options.withSnapshotStore !== false) {
+    definitions.push({ name: "transfer-stock-snapshots", keyPath: "warehouse", rows: options.snapshotRows || [] });
+  }
+  return definitions;
+}
+
+async function offlineStoreIos9Fixture(offlineStoreSource) {
+  let ecma5Syntax = !/\b(?:const|let|class)\b|=>|\?\.|\?\?|`/.test(offlineStoreSource);
+  try {
+    new vm.Script(offlineStoreSource, { filename: "offline-store-ios9-parse.js" });
+  } catch (error) {
+    void error;
+    ecma5Syntax = false;
+  }
+
+  const legacyIndexedDb = createLegacyIndexedDbFixture();
+  const context = createOfflineStoreIos9Context(offlineStoreSource, legacyIndexedDb);
+
+  const rows = Array.from({ length: 30 }, (_entry, index) => ({
+    id: `ios9-stock-${index + 1}`,
+    lager: "SSI",
+    artikelId: `ios9-article-${index + 1}`,
+    materialnummer: "IOS9-MATERIAL",
+    barcode: `IOS9-BC-${String(index + 1).padStart(2, "0")}`,
+    lagerplatz: `002-H4-S${String(index + 1).padStart(2, "0")}A1`,
+    leNummer: `IOS9-HU-${index + 1}`,
+    mengeStueck: index + 1,
+    paletten: index % 3,
+    aktualisiertAm: `2026-07-22T12:00:${String(index).padStart(2, "0")}.000Z`,
+    ignoredHistory: "must-not-be-stored"
+  }));
+  await context.OfflineStore.saveTransferDraft({ id: "ios9-draft", warehouse: "SSI" });
+  await context.OfflineStore.replaceTransferStockSnapshot({
+    warehouse: "SSI",
+    capturedAt: "2026-07-22T12:00:00.000Z",
+    rows
+  });
+  const metadataBeforeReload = await context.OfflineStore.loadTransferStockSnapshotMeta("SSI");
+  const articleBeforeReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-MATERIAL", 25);
+
+  vm.runInContext(offlineStoreSource, context, { filename: "offline-store-ios9-reload.js" });
+  const metadataAfterReload = await context.OfflineStore.loadTransferStockSnapshotMeta("SSI");
+  const articleAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-MATERIAL", 25);
+  const barcodeAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-BC-29", 25);
+  const binAfterReload = await context.OfflineStore.searchTransferStockSnapshot("SSI", "002-H4-S30A1", 25);
+  const draftsAfterReload = await context.OfflineStore.loadTransferDrafts();
+  const diagnostic = await context.OfflineStore.probeTransferStockSnapshotStorage();
+  const unavailableContext = vm.createContext({
+    console, Date, Math, JSON, Promise, String, Number, Array, Error, setTimeout, clearTimeout
+  });
+  unavailableContext.window = unavailableContext;
+  unavailableContext.globalThis = unavailableContext;
+  vm.runInContext(offlineStoreSource, unavailableContext, { filename: "offline-store-ios9-no-idb.js" });
+  const unavailableDiagnostic = await unavailableContext.OfflineStore.probeTransferStockSnapshotStorage();
+
+  const repairIndexedDb = createLegacyIndexedDbFixture({
+    initialVersion: 6,
+    initialStores: legacyOfflineStoreDefinitions({
+      withSnapshotStore: false,
+      withSnapshotIndexes: false,
+      draftRows: [{ id: "preserved-draft", warehouse: "SSI", targetBin: "002-H4-S99A1" }],
+      queueRows: [{ queueId: 17, method: "PUT", url: "/api/orders/preserved", body: { preserved: true } }],
+      orderRows: [{ id: "preserved-order", orderNumber: "QA-PRESERVED" }]
+    })
+  });
+  const repairContext = createOfflineStoreIos9Context(offlineStoreSource, repairIndexedDb);
+  const repairProbe = await repairContext.OfflineStore.probeTransferStockSnapshotStorage();
+  const repairDrafts = await repairContext.OfflineStore.loadTransferDrafts();
+  const repairQueue = await repairContext.OfflineStore.getPending();
+  const repairOrders = await repairContext.OfflineStore.loadOrders();
+  await repairContext.OfflineStore.replaceTransferStockSnapshot({
+    warehouse: "SSI",
+    capturedAt: "2026-07-22T13:00:00.000Z",
+    rows: [{
+      id: "ios9-repair-stock",
+      lager: "SSI",
+      artikelId: "ios9-repair-article",
+      materialnummer: "IOS9-REPAIRED",
+      barcode: "IOS9-REPAIR-BC",
+      lagerplatz: "002-H4-S88A1",
+      leNummer: "IOS9-REPAIR-HU",
+      mengeStueck: 9,
+      paletten: 2,
+      aktualisiertAm: "2026-07-22T13:00:00.000Z"
+    }]
+  });
+  vm.runInContext(offlineStoreSource, repairContext, { filename: "offline-store-ios9-repair-reload.js" });
+  const repairedSearch = await repairContext.OfflineStore.searchTransferStockSnapshot("SSI", "IOS9-REPAIR-HU", 25);
+
+  const blockedIndexedDb = createLegacyIndexedDbFixture({
+    initialVersion: 6,
+    initialStores: legacyOfflineStoreDefinitions({ withSnapshotStore: false }),
+    blockUpgrade: true
+  });
+  const blockedContext = createOfflineStoreIos9Context(offlineStoreSource, blockedIndexedDb);
+  const blockedDiagnostic = await blockedContext.OfflineStore.probeTransferStockSnapshotStorage();
+
+  const writeFailureIndexedDb = createLegacyIndexedDbFixture({
+    snapshotWriteFailures: 2,
+    snapshotWriteErrorName: "NotFoundError",
+    snapshotWriteErrorMessage: "The specified object store transfer-stock-snapshots was not found"
+  });
+  const writeFailureContext = createOfflineStoreIos9Context(offlineStoreSource, writeFailureIndexedDb);
+  let writeFailure = null;
+  try {
+    await writeFailureContext.OfflineStore.replaceTransferStockSnapshot({
+      warehouse: "SSI",
+      capturedAt: "2026-07-22T14:00:00.000Z",
+      rows: [{ id: "write-failure", lager: "SSI", materialnummer: "WRITE-FAIL", mengeStueck: 1 }]
+    });
+  } catch (error) {
+    writeFailure = {
+      code: error.offlineStoreCode,
+      message: error.message,
+      originalName: error.originalName,
+      originalMessage: error.originalMessage,
+      dbVersion: error.dbVersion,
+      objectStores: error.objectStores
+    };
+  }
+
+  return {
+    ecma5Syntax,
+    usedWebkitIndexedDb: legacyIndexedDb.stats.openCalls > 0,
+    usedWebkitKeyRange: legacyIndexedDb.stats.keyRangeCalls > 0,
+    domStringListContainsAvailable: legacyIndexedDb.stats.nameListsHaveContains,
+    objectStoreGetAllAvailable: legacyIndexedDb.stats.objectStoresHaveGetAll,
+    snapshotApiVersion: context.OfflineStore.transferSnapshotApiVersion,
+    metadataBeforeReload,
+    metadataAfterReload,
+    beforeReloadMatches: articleBeforeReload.rows.length,
+    articleMatches: articleAfterReload.rows.length,
+    barcodeMatches: barcodeAfterReload.rows.length,
+    binMatches: binAfterReload.rows.length,
+    draftCount: draftsAfterReload.length,
+    diagnostic,
+    unavailableDiagnostic,
+    repairedSchema: {
+      diagnostic: repairProbe,
+      draftCount: repairDrafts.length,
+      queueCount: repairQueue.length,
+      orderCount: repairOrders.length,
+      searchMatchesAfterReload: repairedSearch.rows.length,
+      snapshotReadwriteStarts: repairIndexedDb.stats.snapshotReadwriteStarts
+    },
+    blockedDiagnostic,
+    blockedUpgrades: blockedIndexedDb.stats.blockedUpgrades,
+    writeFailure,
+    writeFailureStarts: writeFailureIndexedDb.stats.snapshotReadwriteStarts
+  };
+}
+
+function createLegacyIndexedDbFixture(options = {}) {
+  const databaseState = { version: Number(options.initialVersion || 0), stores: new Map() };
+  const stats = {
+    openCalls: 0,
+    openVersions: [],
+    keyRangeCalls: 0,
+    nameListsHaveContains: false,
+    objectStoresHaveGetAll: false,
+    blockedUpgrades: 0,
+    transferProbeFailures: 0,
+    snapshotReadwriteStarts: 0,
+    snapshotReadwriteFailures: 0
+  };
+
+  function clone(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+
+  (options.initialStores || []).forEach((definition) => {
+    const storeState = {
+      keyPath: definition.keyPath || "id",
+      rows: new Map(),
+      indexes: new Map()
+    };
+    (definition.indexes || []).forEach((index) => {
+      storeState.indexes.set(index.name, { keyPath: index.keyPath });
+    });
+    (definition.rows || []).forEach((row) => {
+      const stored = clone(row);
+      storeState.rows.set(stored[storeState.keyPath], stored);
+    });
+    databaseState.stores.set(definition.name, storeState);
+  });
+
+  function legacyNameList(names) {
+    const values = Array.from(names);
+    const list = {
+      length: values.length,
+      item(index) { return values[index] || null; }
+    };
+    values.forEach((value, index) => { list[index] = value; });
+    return list;
+  }
+
+  function asyncRequest(resolveValue) {
+    const request = { result: undefined, error: null, onsuccess: null, onerror: null };
+    setTimeout(() => {
+      try {
+        request.result = resolveValue();
+        if (typeof request.onsuccess === "function") request.onsuccess({ target: request });
+      } catch (error) {
+        request.error = error;
+        if (typeof request.onerror === "function") request.onerror({ target: request });
+      }
+    }, 0);
+    return request;
+  }
+
+  function cursorRequest(entries, deleteEntry) {
+    const request = { result: undefined, error: null, onsuccess: null, onerror: null };
+    let cursorIndex = 0;
+    function deliver() {
+      try {
+        if (cursorIndex >= entries.length) {
+          request.result = null;
+        } else {
+          const current = entries[cursorIndex];
+          request.result = {
+            value: clone(current.value),
+            continue() {
+              cursorIndex += 1;
+              setTimeout(deliver, 0);
+            },
+            delete() {
+              deleteEntry(current.key);
+            }
+          };
+        }
+        if (typeof request.onsuccess === "function") request.onsuccess({ target: request });
+      } catch (error) {
+        request.error = error;
+        if (typeof request.onerror === "function") request.onerror({ target: request });
+      }
+    }
+    setTimeout(deliver, 0);
+    return request;
+  }
+
+  class LegacyIndex {
+    constructor(storeState, indexState) {
+      this.storeState = storeState;
+      this.indexState = indexState;
+    }
+    openCursor(range) {
+      const entries = Array.from(this.storeState.rows.entries())
+        .filter(([_key, value]) => !range || value[this.indexState.keyPath] === range.value)
+        .map(([key, value]) => ({ key, value }));
+      return cursorRequest(entries, (key) => this.storeState.rows.delete(key));
+    }
+  }
+
+  class LegacyObjectStore {
+    constructor(storeState) {
+      this.storeState = storeState;
+    }
+    get indexNames() {
+      return legacyNameList(this.storeState.indexes.keys());
+    }
+    createIndex(name, keyPath) {
+      this.storeState.indexes.set(name, { keyPath });
+      return new LegacyIndex(this.storeState, this.storeState.indexes.get(name));
+    }
+    index(name) {
+      const indexState = this.storeState.indexes.get(name);
+      if (!indexState) throw new Error(`Index fehlt: ${name}`);
+      return new LegacyIndex(this.storeState, indexState);
+    }
+    put(value) {
+      const stored = clone(value);
+      const key = stored[this.storeState.keyPath];
+      this.storeState.rows.set(key, stored);
+      return asyncRequest(() => key);
+    }
+    add(value) {
+      return this.put(value);
+    }
+    get(key) {
+      return asyncRequest(() => clone(this.storeState.rows.get(key)));
+    }
+    delete(key) {
+      this.storeState.rows.delete(key);
+      return asyncRequest(() => undefined);
+    }
+    clear() {
+      this.storeState.rows.clear();
+      return asyncRequest(() => undefined);
+    }
+    openCursor() {
+      const entries = Array.from(this.storeState.rows.entries()).map(([key, value]) => ({ key, value }));
+      return cursorRequest(entries, (key) => this.storeState.rows.delete(key));
+    }
+  }
+
+  class LegacyTransaction {
+    constructor(storeNames, mode, upgrade = false) {
+      this.storeNames = Array.isArray(storeNames) ? storeNames : [storeNames];
+      this.mode = mode;
+      this.aborted = false;
+      this.error = null;
+      this.oncomplete = null;
+      this.onerror = null;
+      this.onabort = null;
+      if (!upgrade) {
+        setTimeout(() => {
+          if (!this.aborted && typeof this.oncomplete === "function") this.oncomplete({ target: this });
+        }, 25);
+      }
+    }
+    objectStore(name) {
+      const storeState = databaseState.stores.get(name);
+      if (!storeState) throw new Error(`Store fehlt: ${name}`);
+      return new LegacyObjectStore(storeState);
+    }
+    abort() {
+      this.aborted = true;
+      this.error = new Error("Transaktion abgebrochen");
+      if (typeof this.onabort === "function") this.onabort({ target: this });
+    }
+  }
+
+  class LegacyDatabase {
+    constructor() {
+      this.version = databaseState.version;
+    }
+    get objectStoreNames() {
+      return legacyNameList(databaseState.stores.keys());
+    }
+    createObjectStore(name, options = {}) {
+      const storeState = {
+        keyPath: options.keyPath || "id",
+        rows: new Map(),
+        indexes: new Map()
+      };
+      databaseState.stores.set(name, storeState);
+      return new LegacyObjectStore(storeState);
+    }
+    transaction(storeNames, mode) {
+      const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+      names.forEach((name) => {
+        if (!databaseState.stores.has(name)) throw new Error(`Store fehlt: ${name}`);
+      });
+      if (mode === "readwrite" && names.includes("transfer-storage-probe") && options.failTransferProbe) {
+        stats.transferProbeFailures += 1;
+        const error = new Error(options.transferProbeErrorMessage || "IndexedDB backing store is not writable");
+        error.name = options.transferProbeErrorName || "UnknownError";
+        throw error;
+      }
+      if (mode === "readwrite" && names.includes("transfer-stock-rows") && names.includes("transfer-stock-snapshots")) {
+        stats.snapshotReadwriteStarts += 1;
+        if (stats.snapshotReadwriteFailures < Number(options.snapshotWriteFailures || 0)) {
+          stats.snapshotReadwriteFailures += 1;
+          const error = new Error(options.snapshotWriteErrorMessage || "The specified object store was not found");
+          error.name = options.snapshotWriteErrorName || "NotFoundError";
+          throw error;
+        }
+      }
+      return new LegacyTransaction(names, mode);
+    }
+    close() {}
+  }
+
+  const api = {
+    open(_name, version) {
+      stats.openCalls += 1;
+      stats.openVersions.push(version == null ? null : Number(version));
+      const request = {
+        result: null,
+        error: null,
+        transaction: null,
+        onupgradeneeded: null,
+        onsuccess: null,
+        onerror: null,
+        onblocked: null
+      };
+      setTimeout(() => {
+        const db = new LegacyDatabase();
+        request.result = db;
+        if (version > databaseState.version) {
+          if (options.blockUpgrade) {
+            stats.blockedUpgrades += 1;
+            if (typeof request.onblocked === "function") request.onblocked({ target: request });
+            return;
+          }
+          const upgradeTransaction = new LegacyTransaction(Array.from(databaseState.stores.keys()), "versionchange", true);
+          request.transaction = upgradeTransaction;
+          if (typeof request.onupgradeneeded === "function") {
+            request.onupgradeneeded({ target: request, oldVersion: databaseState.version, newVersion: version });
+          }
+          if (upgradeTransaction.aborted) {
+            request.error = upgradeTransaction.error;
+            if (typeof request.onerror === "function") request.onerror({ target: request });
+            return;
+          }
+          databaseState.version = version;
+          db.version = version;
+        }
+        if (typeof request.onsuccess === "function") request.onsuccess({ target: request });
+      }, 0);
+      return request;
+    }
+  };
+  const keyRange = {
+    only(value) {
+      stats.keyRangeCalls += 1;
+      return { value };
+    }
+  };
+
+  return { api, keyRange, stats, databaseState };
+}
+
+async function tabletTransferOfflineFixture(tabletTransferSource) {
+  const elementIds = [
+    "transferWorkspace", "transferCapabilityStatus", "transferSnapshotStatus", "transferRefreshSnapshotButton",
+    "transferWarehouseSelect", "transferSourceSearchForm",
+    "transferSourceSearchInput", "transferSourceCameraButton", "transferSourceSearchButton", "transferSourceStatus",
+    "transferSourceCount", "transferSourceTableBody", "transferSelectedSourceCard", "transferSelectedSourceTitle",
+    "transferSelectedSourceBin", "transferSelectedSourceUnit", "transferSelectedSourceQuantity",
+    "transferSelectedSourcePallets", "transferForm", "transferTargetBinInput", "transferTargetCameraButton",
+    "transferReferenceInput", "transferSaveDraftButton", "transferBookButton", "transferStatus",
+    "transferDraftCount", "transferDraftList", "transferHistoryCount", "transferHistorySearchInput",
+    "transferRefreshHistoryButton", "transferHistoryTableBody", "transferCameraOverlay", "transferCameraVideo",
+    "transferCameraStatus", "transferCloseCameraButton"
+  ];
+  const elements = new Map();
+  class FixtureElement {
+    constructor(id = "") {
+      this.id = id;
+      this.value = "";
+      this.textContent = "";
+      this.className = "";
+      this.hidden = false;
+      this.disabled = false;
+      this.children = [];
+      this.parentNode = null;
+      this.listeners = new Map();
+      this.attributes = new Map();
+      this._innerHTML = "";
+      this.srcObject = null;
+    }
+    addEventListener(type, handler) {
+      const handlers = this.listeners.get(type) || [];
+      handlers.push(handler);
+      this.listeners.set(type, handlers);
+    }
+    emit(type, properties = {}) {
+      const event = {
+        target: properties.target || this,
+        currentTarget: this,
+        key: properties.key || "",
+        preventDefault() {}
+      };
+      (this.listeners.get(type) || []).forEach((handler) => handler(event));
+    }
+    appendChild(child) {
+      child.parentNode = this;
+      this.children.push(child);
+      return child;
+    }
+    querySelectorAll() {
+      return [];
+    }
+    focus() {}
+    play() {
+      return Promise.resolve();
+    }
+    getAttribute(name) {
+      return this.attributes.has(name) ? this.attributes.get(name) : null;
+    }
+    setAttribute(name, value) {
+      this.attributes.set(name, String(value));
+    }
+    set innerHTML(value) {
+      this._innerHTML = String(value || "");
+      this.children = [];
+      const sourceMatch = this._innerHTML.match(/data-transfer-source-id="([^"]+)"/);
+      if (sourceMatch) {
+        const button = new FixtureElement();
+        button.setAttribute("data-transfer-source-id", sourceMatch[1]);
+        button.parentNode = this;
+        this.sourceButton = button;
+      }
+    }
+    get innerHTML() {
+      return this._innerHTML;
+    }
+  }
+
+  elementIds.forEach((id) => elements.set(id, new FixtureElement(id)));
+  elements.get("transferWarehouseSelect").value = "SSI";
+  elements.get("transferSelectedSourceCard").className = "tablet-transfer-selection is-empty";
+  elements.get("transferCapabilityStatus").className = "tablet-transfer-capability is-online";
+  elements.get("transferSnapshotStatus").className = "tablet-transfer-snapshot-status";
+  const document = {
+    getElementById: (id) => elements.get(id) || null,
+    createElement: () => new FixtureElement(),
+    createEvent: () => ({ initEvent() {} })
+  };
+  const drafts = [];
+  const requestLog = [];
+  let uuidCounter = 0;
+  let snapshotCapturedAt = "2026-07-22T09:00:00.000Z";
+  let activeSnapshot = { metadata: null, rows: [] };
+  let pendingSnapshot = null;
+  let failNextSnapshotReplace = false;
+  let currentLocations = Array.from({ length: 40 }, (_entry, index) => ({
+    id: `qa-source-${index + 1}`,
+    lager: "SSI",
+    artikelId: `qa-article-${index + 1}`,
+    materialnummer: "QA-TRANSFER-MAT",
+    barcode: `QA-BC-${String(index + 1).padStart(2, "0")}`,
+    materialbezeichnung: "QA kleiner Bestand",
+    lagerplatz: `002-H4-S${String(index + 1).padStart(2, "0")}A1`,
+    leNummer: `QA-HU-${index + 1}`,
+    mengeStueck: 10 + index,
+    paletten: 1,
+    aktualisiertAm: `2026-07-22T10:00:${String(index).padStart(2, "0")}.000Z`
+  }));
+
+  class FixtureXhr {
+    open(method, url) {
+      this.method = method;
+      this.url = url;
+      this.readyState = 1;
+    }
+    setRequestHeader() {}
+    send(body) {
+      requestLog.push({ method: this.method, url: this.url, body: body || "" });
+      let responseBody = null;
+      if (this.url.includes("/api/articles/lookup/")) {
+        responseBody = { materialnummer: "QA-TRANSFER-MAT" };
+      } else if (this.url.includes("/api/storage/locations/snapshot")) {
+        const parsed = new URL(this.url, "http://qa.local");
+        const offset = Number(parsed.searchParams.get("offset") || 0);
+        const limit = Number(parsed.searchParams.get("limit") || currentLocations.length);
+        const pageRows = currentLocations.slice(offset, offset + limit);
+        responseBody = {
+          warehouse: "SSI",
+          capturedAt: snapshotCapturedAt,
+          rowCount: currentLocations.length,
+          snapshotKey: `qa-snapshot-${snapshotCapturedAt}-${currentLocations.length}`,
+          offset,
+          limit,
+          hasMore: offset + pageRows.length < currentLocations.length,
+          rows: pageRows.map(snapshotStockRow)
+        };
+      } else if (this.url.includes("/api/storage/locations")) {
+        const parsed = new URL(this.url, "http://qa.local");
+        const locationId = parsed.searchParams.get("id") || "";
+        const materialnummer = parsed.searchParams.get("materialnummer") || "";
+        const query = String(parsed.searchParams.get("q") || "").toLowerCase();
+        const limit = Number(parsed.searchParams.get("limit") || 0);
+        responseBody = currentLocations.filter((location) => {
+          if (locationId && location.id !== locationId) return false;
+          if (materialnummer && location.materialnummer !== materialnummer) return false;
+          if (!query) return true;
+          return [location.id, location.artikelId, location.materialnummer, location.barcode, location.lagerplatz, location.leNummer]
+            .join(" ").toLowerCase().includes(query);
+        }).slice(0, limit > 0 ? limit : currentLocations.length).map((location) => ({ ...location }));
+      } else if (this.url.includes("/api/storage/transfers") && this.method === "GET") {
+        responseBody = [];
+      } else if (this.url.includes("/api/storage/transfers") && this.method === "POST") {
+        responseBody = { ok: true };
+      }
+      this.status = 200;
+      this.responseText = JSON.stringify(responseBody);
+      this.readyState = 4;
+      if (typeof this.onreadystatechange === "function") this.onreadystatechange();
+    }
+  }
+
+  const globals = {
+    console,
+    Date,
+    Math,
+    Intl,
+    JSON,
+    Promise,
+    XMLHttpRequest: FixtureXhr,
+    document,
+    navigator: {},
+    crypto: { randomUUID: () => `qa-transfer-draft-${++uuidCounter}` },
+    addEventListener() {},
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 0,
+    cancelAnimationFrame() {},
+    confirm: () => true,
+    OfflineStore: {
+      transferSnapshotApiVersion: 4,
+      probeTransferStockSnapshotStorage: () => Promise.resolve({
+        ok: true,
+        code: "WEBSQL_FALLBACK_READY",
+        backend: "WebSQL",
+        webSqlVersion: "1.0",
+        fallbackReason: {
+          code: "IDB_PROBE_WRITE_START_FAILED",
+          message: "IndexedDB-Schreib-/Leseprobe konnte nicht gestartet werden (Originalfehler: UnknownError: backing store not writable)"
+        }
+      }),
+      saveTransferDraft: (draft) => {
+        const index = drafts.findIndex((entry) => entry.id === draft.id);
+        const stored = JSON.parse(JSON.stringify(draft));
+        if (index >= 0) drafts[index] = stored;
+        else drafts.push(stored);
+        return Promise.resolve();
+      },
+      loadTransferDrafts: () => Promise.resolve(drafts.map((draft) => JSON.parse(JSON.stringify(draft)))),
+      deleteTransferDraft: (id) => {
+        const index = drafts.findIndex((draft) => draft.id === id);
+        if (index >= 0) drafts.splice(index, 1);
+        return Promise.resolve();
+      },
+      replaceTransferStockSnapshot: (snapshot) => {
+        if (failNextSnapshotReplace) {
+          failNextSnapshotReplace = false;
+          const error = new Error("Snapshot-Schreibtransaktion konnte nicht gestartet werden");
+          error.offlineStoreCode = "IDB_SNAPSHOT_WRITE_START_FAILED";
+          error.originalName = "NotFoundError";
+          error.originalMessage = "The specified object store transfer-stock-snapshots was not found";
+          error.dbVersion = 7;
+          error.objectStores = ["orders", "sync-queue", "transfer-drafts", "transfer-stock-rows"];
+          return Promise.reject(error);
+        }
+        const rows = (snapshot.rows || []).filter((row) => Number(row.mengeStueck) > 0).map(snapshotStockRow);
+        activeSnapshot = {
+          metadata: {
+            warehouse: snapshot.warehouse,
+            capturedAt: snapshot.capturedAt,
+            rowCount: rows.length,
+            generation: `qa-generation-${snapshot.capturedAt}`
+          },
+          rows
+        };
+        return Promise.resolve({ ...activeSnapshot.metadata });
+      },
+      beginTransferStockSnapshotUpdate: (snapshot) => {
+        pendingSnapshot = {
+          backend: "WebSQL",
+          warehouse: snapshot.warehouse,
+          capturedAt: snapshot.capturedAt,
+          rowCount: snapshot.rowCount,
+          snapshotKey: snapshot.snapshotKey,
+          generation: `qa-websql-${snapshot.capturedAt}`,
+          rows: []
+        };
+        return Promise.resolve(pendingSnapshot);
+      },
+      appendTransferStockSnapshotPage: (session, rows) => {
+        if (failNextSnapshotReplace) {
+          failNextSnapshotReplace = false;
+          const error = new Error("WebSQL-Snapshot-Seite konnte nicht gespeichert werden");
+          error.offlineStoreCode = "WEBSQL_SNAPSHOT_PAGE_WRITE_FAILED";
+          error.originalName = "WebSQLError 1";
+          error.originalMessage = "database or disk is full";
+          return Promise.reject(error);
+        }
+        session.rows.push(...rows.map(snapshotStockRow));
+        return Promise.resolve(session);
+      },
+      completeTransferStockSnapshotUpdate: (session) => {
+        if (session.rows.length !== session.rowCount) {
+          const error = new Error("Unvollständiger WebSQL-Snapshot wurde nicht aktiviert");
+          error.offlineStoreCode = "WEBSQL_SNAPSHOT_INCOMPLETE";
+          return Promise.reject(error);
+        }
+        activeSnapshot = {
+          metadata: {
+            warehouse: session.warehouse,
+            capturedAt: session.capturedAt,
+            rowCount: session.rowCount,
+            generation: session.generation,
+            storageBackend: "WebSQL"
+          },
+          rows: session.rows.map((row) => ({ ...row }))
+        };
+        pendingSnapshot = null;
+        return Promise.resolve({ ...activeSnapshot.metadata });
+      },
+      abortTransferStockSnapshotUpdate: () => {
+        pendingSnapshot = null;
+        return Promise.resolve();
+      },
+      loadTransferStockSnapshotMeta: () => Promise.resolve(activeSnapshot.metadata ? { ...activeSnapshot.metadata } : null),
+      searchTransferStockSnapshot: (warehouse, query, limit) => {
+        const terms = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+        const rows = activeSnapshot.rows.filter((row) => {
+          if (row.lager !== warehouse) return false;
+          const haystack = [row.id, row.artikelId, row.materialnummer, row.barcode, row.lagerplatz, row.leNummer]
+            .join(" ").toLowerCase();
+          return terms.every((term) => haystack.includes(term));
+        }).slice(0, Math.min(Number(limit) || 25, 25)).map((row) => ({ ...row }));
+        return Promise.resolve({ metadata: activeSnapshot.metadata ? { ...activeSnapshot.metadata } : null, rows });
+      }
+    }
+  };
+  const context = vm.createContext(globals);
+  context.window = context;
+  context.globalThis = context;
+  vm.runInContext(tabletTransferSource, context, { filename: "tablet-transfer.js" });
+  context.HLogistikTransfer.initialize();
+  context.HLogistikTransfer.activate({ userName: "QA iPad", userGroup: "tablet", warehouse: "SSI", online: true });
+  await drainFixturePromises(8);
+
+  elements.get("transferSourceSearchInput").value = "QA-TRANSFER-MAT";
+  elements.get("transferSourceSearchForm").emit("submit");
+  await drainFixturePromises();
+  const onlineRowsVisible = elements.get("transferSourceTableBody").children.length;
+  const sourceRows = elements.get("transferSourceTableBody").children;
+  elements.get("transferSourceTableBody").emit("click", { target: sourceRows[0].sourceButton });
+  const historyRequestsBeforeOffline = requestLog.filter((entry) => entry.url.includes("/api/storage/transfers") && entry.method === "GET").length;
+  context.HLogistikTransfer.setOnline(false);
+
+  elements.get("transferSourceSearchInput").value = "QA-TRANSFER-MAT";
+  elements.get("transferSourceSearchForm").emit("submit");
+  await drainFixturePromises();
+  const offlineArticleRowsVisible = elements.get("transferSourceTableBody").children.length;
+  elements.get("transferSourceSearchInput").value = "QA-BC-32";
+  elements.get("transferSourceSearchForm").emit("submit");
+  await drainFixturePromises();
+  const offlineBarcodeRowsVisible = elements.get("transferSourceTableBody").children.length;
+  elements.get("transferSourceSearchInput").value = "002-H4-S36A1";
+  elements.get("transferSourceSearchForm").emit("submit");
+  await drainFixturePromises();
+  const offlineBinRowsVisible = elements.get("transferSourceTableBody").children.length;
+
+  elements.get("transferTargetBinInput").value = "002-H4-S99A1";
+  elements.get("transferTargetBinInput").emit("input");
+  elements.get("transferSaveDraftButton").emit("click");
+  await drainFixturePromises();
+
+  const offlineResult = {
+    snapshotRowCount: activeSnapshot.metadata?.rowCount || 0,
+    snapshotWarehouse: activeSnapshot.metadata?.warehouse || "",
+    snapshotStatus: elements.get("transferSnapshotStatus").textContent,
+    paginatedSnapshotRequests: requestLog.filter((entry) => entry.url.includes("/api/storage/locations/snapshot") && entry.url.includes("limit=100")).length,
+    onlineRowsVisible,
+    sourceRequestLimited: requestLog.some((entry) => entry.url.includes("/api/storage/locations?") && !entry.url.includes("/snapshot") && entry.url.includes("limit=25")),
+    offlineArticleRowsVisible,
+    offlineBarcodeRowsVisible,
+    offlineBinRowsVisible,
+    offlineSearchDisabled: elements.get("transferSourceSearchInput").disabled || elements.get("transferSourceSearchButton").disabled,
+    offlineBookDisabled: elements.get("transferBookButton").disabled,
+    offlineCapability: elements.get("transferCapabilityStatus").textContent,
+    offlineHistoryRequests: requestLog.filter((entry) => entry.url.includes("/api/storage/transfers") && entry.method === "GET").length - historyRequestsBeforeOffline,
+    savedDraft: drafts[0] ? JSON.parse(JSON.stringify(drafts[0])) : null,
+    transferPostsBeforeReconnect: requestLog.filter((entry) => entry.method === "POST").length
+  };
+
+  context.HLogistikTransfer.setOnline(true);
+  await drainFixturePromises(8);
+  offlineResult.reconnectedBookEnabled = elements.get("transferBookButton").disabled === false;
+  offlineResult.reconnectedStatus = elements.get("transferStatus").textContent;
+  offlineResult.reconnectUsedExactSourceId = requestLog.some((entry) => entry.url.includes("/api/storage/locations?") && entry.url.includes("id=qa-source-1") && entry.url.includes("limit=1"));
+
+  const preservedSnapshot = JSON.parse(JSON.stringify(activeSnapshot));
+  failNextSnapshotReplace = true;
+  snapshotCapturedAt = "2026-07-22T10:30:00.000Z";
+  elements.get("transferRefreshSnapshotButton").emit("click");
+  await drainFixturePromises(8);
+  offlineResult.interruptedSnapshotPreserved =
+    activeSnapshot.metadata?.capturedAt === preservedSnapshot.metadata?.capturedAt &&
+    activeSnapshot.rows.length === preservedSnapshot.rows.length &&
+    elements.get("transferSnapshotStatus").textContent.includes("bleibt erhalten");
+  offlineResult.interruptedSnapshotDiagnostic = elements.get("transferSnapshotStatus").textContent;
+
+  context.HLogistikTransfer.setOnline(false);
+  currentLocations = currentLocations.map((location, index) => index === 0
+    ? { ...location, mengeStueck: location.mengeStueck + 1, aktualisiertAm: "2026-07-22T11:00:00.000Z" }
+    : location);
+  context.HLogistikTransfer.setOnline(true);
+  await drainFixturePromises(8);
+  offlineResult.conflictBookDisabled = elements.get("transferBookButton").disabled;
+  offlineResult.conflictSelectionStale = elements.get("transferSelectedSourceCard").className.includes("is-stale");
+  offlineResult.conflictStatus = elements.get("transferStatus").textContent;
+  offlineResult.transferPostsAfterConflict = requestLog.filter((entry) => entry.method === "POST").length;
+  const completeOfflineStore = context.OfflineStore;
+  delete completeOfflineStore.loadTransferStockSnapshotMeta;
+  context.HLogistikTransfer.activate({ userName: "QA iPad", userGroup: "tablet", warehouse: "SSI", online: false });
+  await drainFixturePromises();
+  offlineResult.outdatedStoreDiagnostic = elements.get("transferSnapshotStatus").textContent;
+  context.OfflineStore = null;
+  context.HLogistikTransfer.activate({ userName: "QA iPad", userGroup: "tablet", warehouse: "SSI", online: false });
+  await drainFixturePromises();
+  offlineResult.missingStoreDiagnostic = elements.get("transferSnapshotStatus").textContent;
+  return offlineResult;
+}
+
+function snapshotStockRow(location) {
+  return {
+    id: location.id,
+    lager: location.lager,
+    artikelId: location.artikelId,
+    materialnummer: location.materialnummer,
+    barcode: location.barcode,
+    lagerplatz: location.lagerplatz,
+    leNummer: location.leNummer,
+    mengeStueck: location.mengeStueck,
+    paletten: location.paletten,
+    aktualisiertAm: location.aktualisiertAm
+  };
+}
+
+async function drainFixturePromises(rounds = 2) {
+  for (let index = 0; index < rounds; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 async function createTabletValidationContext(fileName, options = {}) {

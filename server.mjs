@@ -38,7 +38,10 @@ import {
 } from "./server/articles.mjs";
 import {
   readStorageLocations,
+  readStorageLocationSnapshot,
   readStorageMovements,
+  readStorageTransfers,
+  bookStorageTransfer,
   bookStorageReceipt,
   bookStorageReceipts,
   bookStorageIssue,
@@ -210,11 +213,21 @@ async function route(request, response) {
     return;
   }
 
+  // Storage location snapshot (minimal offline transfer projection)
+  if (pathname === "/api/storage/locations/snapshot" && request.method === "GET") {
+    const offset = url.searchParams.has("offset") ? readInteger(url.searchParams.get("offset")) : 0;
+    const limit = url.searchParams.has("limit") ? readInteger(url.searchParams.get("limit")) : 0;
+    sendJson(response, 200, readStorageLocationSnapshot({ warehouse, offset, limit }));
+    return;
+  }
+
   // Storage locations
   if (pathname === "/api/storage/locations" && request.method === "GET") {
     const query = url.searchParams.get("q") || "";
     const materialnummer = url.searchParams.get("materialnummer") || "";
-    sendJson(response, 200, readStorageLocations({ query, materialnummer, warehouse }));
+    const locationId = url.searchParams.get("id") || "";
+    const limit = url.searchParams.has("limit") ? readInteger(url.searchParams.get("limit")) : 0;
+    sendJson(response, 200, readStorageLocations({ query, materialnummer, locationId, limit, warehouse }));
     return;
   }
 
@@ -331,6 +344,21 @@ async function route(request, response) {
     requireSiWarehouse(warehouse);
     const body = await readBody(request, siStockImportMaxBodyBytes);
     sendJson(response, 200, { ok: true, preview: previewSiStockImportRows(body) });
+    return;
+  }
+
+  // Atomic storage transfers
+  if (pathname === "/api/storage/transfers" && request.method === "GET") {
+    requireGroup(request, ROLE_PERMISSIONS.storageTransfer);
+    const query = url.searchParams.get("q") || "";
+    const limit = readInteger(url.searchParams.get("limit") || 100);
+    sendJson(response, 200, readStorageTransfers({ query, limit, warehouse }));
+    return;
+  }
+  if (pathname === "/api/storage/transfers" && request.method === "POST") {
+    requireGroup(request, ROLE_PERMISSIONS.storageTransfer);
+    const body = await readBody(request, maxBodyBytes);
+    sendJson(response, 200, { ok: true, ...bookStorageTransfer(body.transfer || body, warehouse) });
     return;
   }
 
@@ -1365,6 +1393,7 @@ function resetArticleMasterData() {
   try {
     db.prepare("DELETE FROM lagerbestand").run();
     db.prepare("DELETE FROM lagerbewegung").run();
+    db.prepare("DELETE FROM umlagerung").run();
     db.prepare("DELETE FROM bestandsbuchung_fehler").run();
     db.exec("COMMIT");
     db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
@@ -1412,6 +1441,7 @@ function articleMasterCounts() {
     artikelSi: countRows(getArticleDb("SI"), "artikel"),
     lagerbestand: countRows(getDb(), "lagerbestand"),
     lagerbewegung: countRows(getDb(), "lagerbewegung"),
+    umlagerungen: countRows(getDb(), "umlagerung"),
     bestandsbuchungFehler: countRows(getDb(), "bestandsbuchung_fehler"),
     auftraege: countRows(getDb(), "auftraege")
   };

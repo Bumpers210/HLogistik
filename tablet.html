@@ -6,13 +6,14 @@
     <meta name="theme-color" content="#167a58">
     <title>Tablet Logistik</title>
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="tablet.css?v=20260720-1">
-    <script src="offline-store.js?v=20260623-7"></script>
+    <link rel="stylesheet" href="tablet.css?v=20260722-4">
+    <script src="offline-store.js?v=20260722-5"></script>
     <script src="shared/storage-hu-rules.js?v=20260702-2"></script>
     <script src="shared/storage-bin-rules.js?v=20260707-1"></script>
     <script src="shared/manual-storage-rules.js?v=20260702-2"></script>
     <script src="shared/quantity-format.js?v=20260720-2"></script>
-    <script src="tablet-legacy.js?v=20260721-2"></script>
+    <script src="tablet-transfer.js?v=20260722-8"></script>
+    <script src="tablet-legacy.js?v=20260722-2"></script>
   </head>
   <body>
     <header class="tablet-header">
@@ -28,20 +29,21 @@
         <div class="tablet-mode-switch" role="group" aria-label="Arbeitsbereich">
           <button id="pickingModeButton" type="button" class="is-active">Kommissionierung</button>
           <button id="storageModeButton" type="button">Einlagerung</button>
+          <button id="transferModeButton" type="button">Umlagerungen</button>
         </div>
         <div class="tablet-control-fields">
           <label>
             Mitarbeiter
             <input id="userNameInput" type="text" autocomplete="name" placeholder="Name">
           </label>
-          <label>
+          <label id="orderSelectRow">
             Auftrag
             <select id="orderSelect">
               <option value="">Auftrag wählen</option>
             </select>
           </label>
           <div id="acceptedGroupInfo" class="tablet-group-info" hidden></div>
-          <label>
+          <label id="sortModeRow">
             Sortierung
             <select id="sortModeSelect">
               <option value="fromBin">Lagerplatz</option>
@@ -62,26 +64,27 @@
             </select>
           </label>
         </div>
-        <div class="tablet-action-row tablet-action-row-main">
+        <div id="orderActionRow" class="tablet-action-row tablet-action-row-main">
           <button id="refreshButton" type="button">Aktualisieren</button>
           <button id="saveButton" type="button">Jetzt speichern</button>
           <button id="manualStorageStartButton" type="button" hidden>Manuelle Einlagerung starten</button>
           <button id="takeOverButton" type="button" hidden>Bearbeitung übernehmen</button>
           <button id="exportPdfButton" type="button">PDF exportieren</button>
         </div>
-        <div class="tablet-action-row tablet-action-row-danger">
+        <div id="orderDangerRow" class="tablet-action-row tablet-action-row-danger">
           <button id="leaveOrderButton" class="danger-action" type="button" hidden>Auftrag verlassen</button>
           <button id="discardOrderButton" class="danger-action" type="button" hidden>Einlagerung abbrechen</button>
           <button id="deleteStorageOrderButton" class="danger-action danger-action-strong" type="button" hidden>Einlagerung loeschen</button>
         </div>
       </section>
 
-      <section class="tablet-status">
+      <section id="orderStatusPanel" class="tablet-status">
         <div><strong id="doneCount">0</strong><span>erledigt</span></div>
         <div><strong id="openCount">0</strong><span>offen</span></div>
         <div><strong id="changedCount">0</strong><span>korrigiert</span></div>
       </section>
 
+      <div id="orderWorkspace">
       <p id="message" class="message">Bitte Auftrag laden.</p>
       <section id="tabletListPanel" class="tablet-list-panel" hidden>
         <div id="pickHeader" class="pick-column-header" hidden>
@@ -130,6 +133,101 @@
           <textarea id="orderNoteInput" rows="3" placeholder="Schäden, Fehlmengen, Besonderheiten"></textarea>
         </label>
       </section>
+      </div>
+
+      <section id="transferWorkspace" class="tablet-transfer-workspace" hidden aria-label="Umlagerungen">
+        <p id="transferCapabilityStatus" class="tablet-transfer-capability is-online" role="status">
+          Online: Verbindliche Buchungen sind nach aktueller Bestandsprüfung möglich.
+        </p>
+        <div class="tablet-transfer-snapshot">
+          <p id="transferSnapshotStatus" class="tablet-transfer-snapshot-status" role="status">
+            Snapshot SSI: noch kein vollständiger Stand gespeichert.
+          </p>
+          <button id="transferRefreshSnapshotButton" type="button">Snapshot aktualisieren</button>
+        </div>
+        <section class="tablet-transfer-card tablet-transfer-source-panel">
+          <div class="tablet-transfer-heading">
+            <div><p>1. Quelle</p><h2>Bestand suchen oder scannen</h2></div>
+            <span id="transferSourceCount">0 Treffer</span>
+          </div>
+          <label class="tablet-transfer-warehouse">
+            Lager
+            <select id="transferWarehouseSelect">
+              <option value="SSI">SSI</option>
+              <option value="SI">SI</option>
+            </select>
+          </label>
+          <form id="transferSourceSearchForm" class="tablet-transfer-search-form">
+            <label>
+              Artikel, Barcode, Stellplatz oder <span data-transfer-unit="short">HU</span>
+              <input id="transferSourceSearchInput" type="search" autocomplete="off" autocapitalize="characters" placeholder="Scannen oder Suchbegriff eingeben" required>
+            </label>
+            <button id="transferSourceCameraButton" type="button" data-camera-target="transferSourceSearchInput">Kamera</button>
+            <button id="transferSourceSearchButton" type="submit">Suchen</button>
+          </form>
+          <p id="transferSourceStatus" class="message" role="status">Bitte Suchbegriff eingeben.</p>
+          <div class="tablet-transfer-table-wrap">
+            <table class="tablet-transfer-table">
+              <thead><tr><th>Artikel</th><th>Stellplatz</th><th data-transfer-unit="singular">HU-Nummer</th><th>Stück</th><th>Paletten</th><th></th></tr></thead>
+              <tbody id="transferSourceTableBody"><tr><td colspan="6">Noch keine Suche ausgeführt.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="tablet-transfer-card tablet-transfer-editor-panel">
+          <div class="tablet-transfer-heading"><div><p>2. Ziel</p><h2>Vollständige Bestandszeile verschieben</h2></div></div>
+          <div id="transferSelectedSourceCard" class="tablet-transfer-selection is-empty">
+            <strong id="transferSelectedSourceTitle">Keine Quelle gewählt</strong>
+            <dl>
+              <div><dt>Quelle</dt><dd id="transferSelectedSourceBin">-</dd></div>
+              <div><dt data-transfer-unit="short">HU</dt><dd id="transferSelectedSourceUnit">-</dd></div>
+              <div><dt>Stück</dt><dd id="transferSelectedSourceQuantity">-</dd></div>
+              <div><dt>Paletten</dt><dd id="transferSelectedSourcePallets">-</dd></div>
+            </dl>
+          </div>
+          <form id="transferForm" class="tablet-transfer-form">
+            <div class="tablet-transfer-target-field">
+              <label>Zielstellplatz<input id="transferTargetBinInput" type="text" autocomplete="off" autocapitalize="characters" required></label>
+              <button id="transferTargetCameraButton" type="button" data-camera-target="transferTargetBinInput">Kamera</button>
+            </div>
+            <label>Referenz / Bemerkung<input id="transferReferenceInput" type="text" autocomplete="off" maxlength="500"></label>
+            <div class="tablet-transfer-actions">
+              <button id="transferSaveDraftButton" type="button">Als Entwurf speichern</button>
+              <button id="transferBookButton" type="submit" disabled>Umlagerung bestätigen</button>
+            </div>
+          </form>
+          <p id="transferStatus" class="message" role="status">Die Buchung ist nur online möglich.</p>
+        </section>
+
+        <section class="tablet-transfer-card tablet-transfer-drafts-panel">
+          <div class="tablet-transfer-heading"><h2>Offline-Entwürfe</h2><span id="transferDraftCount">0 Entwürfe</span></div>
+          <p>Entwürfe sind ungeprüft und werden nie automatisch gebucht. Der geöffnete Entwurf wird online gegen den aktuellen Quellbestand geprüft.</p>
+          <p>Die Offline-Suche nutzt den letzten vollständigen Lager-Snapshot. Verlauf und Bewegungsdaten werden nicht offline gespeichert.</p>
+          <div id="transferDraftList" class="tablet-transfer-draft-list"></div>
+        </section>
+
+        <section class="tablet-transfer-card tablet-transfer-history-panel">
+          <div class="tablet-transfer-heading"><h2>Umlagerungsverlauf</h2><span id="transferHistoryCount">0 Buchungen</span></div>
+          <div class="tablet-transfer-history-search">
+            <label>Verlauf suchen<input id="transferHistorySearchInput" type="search" autocomplete="off" placeholder="Artikel, Stellplatz, HU/LE, Mitarbeiter oder Referenz"></label>
+            <button id="transferRefreshHistoryButton" type="button">Aktualisieren</button>
+          </div>
+          <div class="tablet-transfer-table-wrap">
+            <table class="tablet-transfer-table">
+              <thead><tr><th>Zeit</th><th>Artikel</th><th>Quelle</th><th>Ziel</th><th data-transfer-unit="singular">HU-Nummer</th><th>Stück</th><th>Paletten</th><th>Mitarbeiter / Referenz</th></tr></thead>
+              <tbody id="transferHistoryTableBody"><tr><td colspan="8">Verlauf wird geladen.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
     </main>
+
+    <section id="transferCameraOverlay" class="tablet-transfer-camera-overlay" hidden aria-label="Barcode mit Kamera scannen">
+      <div class="tablet-transfer-camera-dialog">
+        <div class="tablet-transfer-heading"><h2>Barcode scannen</h2><button id="transferCloseCameraButton" type="button">Schließen</button></div>
+        <video id="transferCameraVideo" playsinline muted></video>
+        <p id="transferCameraStatus" class="message" role="status">Kamera wird gestartet...</p>
+      </div>
+    </section>
   </body>
 </html>
