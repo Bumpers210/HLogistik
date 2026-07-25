@@ -19,7 +19,7 @@ export function readOrders() {
   return getDb()
     .prepare(
       `SELECT id, auftragsnummer, kundenname, kunden_gruppe, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
-              auftrags_notiz, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
+              auftrags_notiz, automatische_auftragsnotizen, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
               uebernommen_von, uebernommen_am,
               abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
@@ -35,7 +35,7 @@ export function findOrder(id) {
   const row = getDb()
     .prepare(
       `SELECT id, auftragsnummer, kundenname, kunden_gruppe, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
-              auftrags_notiz, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
+              auftrags_notiz, automatische_auftragsnotizen, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
               zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
               uebernommen_von, uebernommen_am,
               abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
@@ -48,17 +48,19 @@ export function findOrder(id) {
 }
 
 export function upsertOrder(order) {
+  const normalizedLines = normalizeOrderLines(Array.isArray(order.lines) ? order.lines : []);
+  const normalizedAutoOrderNotes = normalizeAutoOrderNotes(order.autoOrderNotes, normalizedLines, order.orderType);
   getDb()
     .prepare(
       `INSERT INTO auftraege
          (id, auftragsnummer, kundenname, kunden_gruppe, auftragsdatum, auftragszeit, euro_paletten, stellplaetze,
-         auftrags_notiz, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
+         auftrags_notiz, automatische_auftragsnotizen, rohtext, collapse_done, auftrags_typ, auftrags_lager, erstellt_von,
           zuletzt_bearbeitet_von, aktiver_benutzer, aktiver_benutzer_am,
           uebernommen_von, uebernommen_am,
           abgeschlossen_von, abgeschlossen_am, exportiert_am, exportiert_pdf_datei,
           exportiert_pdf_pfad, original_dateiname, original_dateipfad, original_archiviert_am,
           original_archiv_pfad, original_archiv_fehler, positionen, erstellt_am, aktualisiert_am)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET
          auftragsnummer = excluded.auftragsnummer,
          kundenname = excluded.kundenname,
@@ -68,6 +70,7 @@ export function upsertOrder(order) {
          euro_paletten = excluded.euro_paletten,
          stellplaetze = excluded.stellplaetze,
          auftrags_notiz = excluded.auftrags_notiz,
+         automatische_auftragsnotizen = excluded.automatische_auftragsnotizen,
          rohtext = excluded.rohtext,
          collapse_done = excluded.collapse_done,
          auftrags_typ = excluded.auftrags_typ,
@@ -102,6 +105,7 @@ export function upsertOrder(order) {
       order.euroPallets,
       order.storageSpaces,
       order.orderNote,
+      JSON.stringify(normalizedAutoOrderNotes),
       order.rawText,
       order.collapseDone ? 1 : 0,
       order.orderType,
@@ -122,7 +126,7 @@ export function upsertOrder(order) {
       order.originalArchivedAt,
       order.originalArchivePath,
       order.originalArchiveError,
-      JSON.stringify(Array.isArray(order.lines) ? order.lines : []),
+      JSON.stringify(normalizedLines),
       order.createdAt,
       order.updatedAt
     );
@@ -223,6 +227,7 @@ export function normalizeOrder(order) {
     euroPallets: String(order.euroPallets || ""),
     storageSpaces: String(order.storageSpaces || ""),
     orderNote: String(order.orderNote || ""),
+    autoOrderNotes: normalizeAutoOrderNotes(order.autoOrderNotes, lines, orderType),
     rawText,
     collapseDone: Boolean(order.collapseDone),
     lines,
@@ -283,10 +288,17 @@ export function orderSummary(order) {
 function orderFromRow(row) {
   let lines = [];
   try {
-    lines = JSON.parse(row.positionen || "[]");
+    lines = normalizeOrderLines(JSON.parse(row.positionen || "[]"));
   } catch {
     lines = [];
   }
+  let storedAutoOrderNotes = {};
+  try {
+    storedAutoOrderNotes = JSON.parse(row.automatische_auftragsnotizen || "{}");
+  } catch {
+    storedAutoOrderNotes = {};
+  }
+  const orderType = String(row.auftrags_typ || "picking");
   return {
     id: String(row.id || ""),
     orderNumber: String(row.auftragsnummer || ""),
@@ -297,9 +309,10 @@ function orderFromRow(row) {
     euroPallets: String(row.euro_paletten || ""),
     storageSpaces: String(row.stellplaetze || ""),
     orderNote: String(row.auftrags_notiz || ""),
+    autoOrderNotes: normalizeAutoOrderNotes(storedAutoOrderNotes, lines, orderType),
     rawText: String(row.rohtext || ""),
     collapseDone: Boolean(row.collapse_done),
-    orderType: String(row.auftrags_typ || "picking"),
+    orderType,
     orderWarehouse: normalizeOrderWarehouse(row.auftrags_lager),
     createdBy: String(row.erstellt_von || ""),
     lastEditedBy: String(row.zuletzt_bearbeitet_von || ""),
@@ -330,9 +343,79 @@ function normalizeOrderWarehouse(value) {
 function normalizeOrderLines(lines) {
   return lines.map((line) => {
     const normalizedToBin = normalizeDestinationName(line?.toBin);
-    if (!normalizedToBin || normalizedToBin === line?.toBin) return line;
-    return { ...line, toBin: normalizedToBin };
+    const normalizedNotes = normalizeOrderLineNotes(line);
+    if (!normalizedToBin || normalizedToBin === normalizedNotes?.toBin) return normalizedNotes;
+    return { ...normalizedNotes, toBin: normalizedToBin };
   });
+}
+
+function normalizeOrderLineNotes(line) {
+  if (!line || typeof line !== "object") return line;
+  const sourceAutoNotes = line.autoPositionNotes && typeof line.autoPositionNotes === "object"
+    ? line.autoPositionNotes
+    : null;
+  const sourceBinSystem = String(sourceAutoNotes?.sourceBinSystem || "").trim();
+  const normalizedSourceBinSystem = isLegacySiSystemBinSuccessNote(sourceBinSystem) ? "" : sourceBinSystem;
+  const positionNote = stripLegacySiSystemBinSuccessNote(line.positionNote);
+  const legacyReason = isLegacySiSystemBinSuccessNote(line.fromBinSystemLookupReason);
+  const normalizedReason = legacyReason
+    ? `Eindeutiger LE/HU-Systemtreffer ${String(line.fromBinSystemLookupValue || "").trim()} als Von-Lagerplatz angewendet.`.replace(/\s+/g, " ").trim()
+    : line.fromBinSystemLookupReason;
+  const actualQty = String(line.actualQty ?? "").trim();
+  const targetQty = line.manual === true && !String(line.targetQty ?? "").trim() && actualQty
+    ? actualQty
+    : line.targetQty;
+  const quantityBaselineChanged = targetQty !== line.targetQty;
+  const notesChanged = Boolean(sourceAutoNotes && normalizedSourceBinSystem !== sourceBinSystem);
+  if (!notesChanged && !quantityBaselineChanged && positionNote === String(line.positionNote || "") && normalizedReason === line.fromBinSystemLookupReason) {
+    return line;
+  }
+  return {
+    ...line,
+    ...(quantityBaselineChanged ? { targetQty } : {}),
+    positionNote,
+    ...(sourceAutoNotes
+      ? { autoPositionNotes: { ...sourceAutoNotes, sourceBinSystem: normalizedSourceBinSystem } }
+      : {}),
+    ...(normalizedReason !== line.fromBinSystemLookupReason
+      ? { fromBinSystemLookupReason: normalizedReason }
+      : {})
+  };
+}
+
+function normalizeAutoOrderNotes(value, lines, orderType) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const notes = { ...source };
+  delete notes.packageA1;
+  if (String(orderType || "picking") !== "picking") return notes;
+  const total = packageA1Total(lines);
+  if (total > 0) notes.packageA1 = `${total} A1`;
+  return notes;
+}
+
+function packageA1Total(lines) {
+  return (Array.isArray(lines) ? lines : []).reduce((total, line) => {
+    if (!line || line.lineType === "loading-slip") return total;
+    const match = String(line.autoPositionNotes?.package || "").trim().match(/^([1-9]\d*)A1$/);
+    if (!match) return total;
+    const count = Number(match[1]);
+    const nextTotal = total + count;
+    return Number.isSafeInteger(count) && Number.isSafeInteger(nextTotal) ? nextTotal : total;
+  }, 0);
+}
+
+function isLegacySiSystemBinSuccessNote(value) {
+  return /^Von-Lagerplatz aus LE\/HU-System eindeutig erg(?:ae|ä)nzt(?:\s*\([^)]*\)|\s*:\s*[^.]+)?\.?$/i
+    .test(String(value || "").trim());
+}
+
+function stripLegacySiSystemBinSuccessNote(value) {
+  const original = String(value || "");
+  const text = original.trim();
+  if (!text) return "";
+  const parts = text.split(" - ");
+  if (!parts.some(isLegacySiSystemBinSuccessNote)) return original;
+  return parts.filter((part) => !isLegacySiSystemBinSuccessNote(part)).join(" - ").trim();
 }
 
 function userLookupKey(value) {

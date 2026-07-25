@@ -1,10 +1,11 @@
 import { getDb } from "./db.mjs";
+import { createHash } from "node:crypto";
 import { createStorageId, createStorageMovementId, readInteger, normalizeSearch, normalizeWarehouse, normalizeSsiStorageBin, httpError, withLineContext } from "./helpers.mjs";
 import { readArticlesSync, findArticleByCode } from "./articles.mjs";
 
 // ── Locations ─────────────────────────────────────────────────────────────────
 
-export function readStorageLocations({ query = "", materialnummer = "", warehouse = "SSI" } = {}) {
+export function readStorageLocations({ query = "", materialnummer = "", locationId = "", offset = 0, limit = 0, warehouse = "SSI" } = {}) {
   const normalizedWarehouse = normalizeWarehouse(warehouse);
   const articles = readArticlesSync(normalizedWarehouse);
   const articleInfo = new Map(articles.map((article) => [article.materialnummer, article]));
@@ -21,14 +22,50 @@ export function readStorageLocations({ query = "", materialnummer = "", warehous
     .map((row) => storageLocationFromRow(row, articleInfo));
 
   const materialFilter = String(materialnummer || "").trim().toLowerCase();
+  const locationFilter = String(locationId || "").trim();
   const terms = normalizeSearch(query).split(" ").filter(Boolean);
 
-  return rows.filter((row) => {
+  const filtered = rows.filter((row) => {
+    if (locationFilter && row.id !== locationFilter) return false;
     if (materialFilter && row.materialnummer.toLowerCase() !== materialFilter) return false;
     if (!terms.length) return true;
-    const haystack = normalizeSearch([row.materialnummer, row.materialbezeichnung, row.lagerplatz, row.leNummer].join(" "));
+    const haystack = normalizeSearch([row.id, row.artikelId, row.materialnummer, row.barcode, row.materialbezeichnung, row.lagerplatz, row.leNummer].join(" "));
     return terms.every((term) => haystack.includes(term));
   });
+  const safeOffset = Number.isInteger(offset) && offset > 0 ? offset : 0;
+  const safeLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 0;
+  return safeLimit ? filtered.slice(safeOffset, safeOffset + safeLimit) : filtered.slice(safeOffset);
+}
+
+export function readStorageLocationSnapshot({ warehouse = "SSI", offset = 0, limit = 0 } = {}) {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const capturedAt = new Date().toISOString();
+  const allRows = readStorageLocations({ warehouse: normalizedWarehouse }).map((row) => ({
+    id: row.id,
+    lager: row.lager,
+    artikelId: row.artikelId,
+    materialnummer: row.materialnummer,
+    barcode: row.barcode,
+    lagerplatz: row.lagerplatz,
+    leNummer: row.leNummer,
+    mengeStueck: row.mengeStueck,
+    paletten: row.paletten,
+    aktualisiertAm: row.aktualisiertAm,
+  }));
+  const snapshotKey = createHash("sha256").update(JSON.stringify(allRows)).digest("hex");
+  const safeOffset = Math.max(0, Number.isInteger(offset) ? offset : 0);
+  const safeLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 0;
+  const rows = safeLimit ? allRows.slice(safeOffset, safeOffset + safeLimit) : allRows;
+  return {
+    warehouse: normalizedWarehouse,
+    capturedAt,
+    rowCount: allRows.length,
+    snapshotKey,
+    offset: safeOffset,
+    limit: safeLimit,
+    hasMore: safeLimit ? safeOffset + rows.length < allRows.length : false,
+    rows,
+  };
 }
 
 // ── Movements ─────────────────────────────────────────────────────────────────
@@ -41,8 +78,8 @@ export function readStorageMovements({ query = "", limit = 100, warehouse = "SSI
   const rows = getDb()
     .prepare(
       `SELECT lagerbewegung.id, lagerbewegung.lager, lagerbewegung.materialnummer,
-              lagerbewegung.bewegungsart, lagerbewegung.menge_stueck, lagerbewegung.paletten, lagerbewegung.lagerplatz,
-              lagerbewegung.le_nummer, lagerbewegung.referenz, lagerbewegung.erstellt_am
+               lagerbewegung.bewegungsart, lagerbewegung.menge_stueck, lagerbewegung.paletten, lagerbewegung.lagerplatz,
+              lagerbewegung.le_nummer, lagerbewegung.referenz, lagerbewegung.umlagerung_id, lagerbewegung.erstellt_am
        FROM lagerbewegung
        WHERE lagerbewegung.lager = ?
        ORDER BY lagerbewegung.erstellt_am DESC
@@ -55,10 +92,183 @@ export function readStorageMovements({ query = "", limit = 100, warehouse = "SSI
   if (!terms.length) return rows;
   return rows.filter((row) => {
     const haystack = normalizeSearch(
-      [row.materialnummer, row.materialbezeichnung, row.bewegungsart, row.lagerplatz, row.leNummer, row.referenz].join(" ")
+      [row.materialnummer, row.materialbezeichnung, row.bewegungsart, row.lagerplatz, row.leNummer, row.referenz, row.umlagerungId].join(" ")
     );
     return terms.every((term) => haystack.includes(term));
   });
+}
+
+// ── Transfers ────────────────────────────────────────────────────────────────
+
+export function readStorageTransfers({ query = "", limit = 100, warehouse = "SSI" } = {}) {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const articles = readArticlesSync(normalizedWarehouse);
+  const articleInfo = new Map(articles.map((article) => [article.materialnummer, article]));
+  const safeLimit = Math.min(Math.max(Number.isInteger(limit) && limit > 0 ? limit : 100, 1), 500);
+  const rows = getDb()
+    .prepare(
+      `SELECT id, lager, artikel_id, materialnummer, quell_bestand_id, quell_lagerplatz, quell_le_nummer,
+              ziel_bestand_id, ziel_lagerplatz, ziel_le_nummer, menge_stueck, paletten, referenz,
+              gebucht_von, quell_aktualisiert_am, erstellt_am
+       FROM umlagerung
+       WHERE lager = ?
+       ORDER BY erstellt_am DESC, id DESC
+       LIMIT ?`
+    )
+    .all(normalizedWarehouse, safeLimit)
+    .map((row) => storageTransferFromRow(row, articleInfo));
+
+  const terms = normalizeSearch(query).split(" ").filter(Boolean);
+  if (!terms.length) return rows;
+  return rows.filter((row) => {
+    const haystack = normalizeSearch([
+      row.id,
+      row.materialnummer,
+      row.materialbezeichnung,
+      row.quellLagerplatz,
+      row.zielLagerplatz,
+      row.leNummer,
+      row.referenz,
+      row.gebuchtVon,
+    ].join(" "));
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+export function bookStorageTransfer(transfer, warehouse = "SSI") {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const normalized = normalizeStorageTransfer(transfer, normalizedWarehouse);
+  const articles = readArticlesSync(normalizedWarehouse);
+  const articleInfo = new Map(articles.map((article) => [article.materialnummer, article]));
+  const db = getDb();
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const existingTransfer = readStorageTransferRow(normalized.id);
+    if (existingTransfer) {
+      ensureMatchingTransferReplay(existingTransfer, normalized);
+      const result = storageTransferResult(existingTransfer, articleInfo, true);
+      db.exec("COMMIT");
+      return result;
+    }
+
+    const source = db
+      .prepare(
+        `SELECT id, lager, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, paletten, aktualisiert_am
+         FROM lagerbestand WHERE id = ? AND lager = ?`
+      )
+      .get(normalized.sourceLocationId, normalizedWarehouse);
+    if (!source || Number(source.menge_stueck || 0) <= 0) {
+      throw httpError(409, "Der Quellbestand ist nicht mehr vorhanden oder bereits leer");
+    }
+    if (
+      Number(source.menge_stueck) !== normalized.expectedQuantity ||
+      String(source.aktualisiert_am || "") !== normalized.expectedUpdatedAt
+    ) {
+      throw httpError(409, "Der Quellbestand wurde zwischenzeitlich geaendert. Bitte Bestand neu laden");
+    }
+
+    const article = articleInfo.get(String(source.materialnummer || ""));
+    if (!article) throw httpError(400, "Artikelnummer ist nicht im Artikelstamm vorhanden");
+    const targetBin = normalizeTransferTargetBin(normalized.targetBin, normalizedWarehouse);
+    const sourceBin = String(source.lagerplatz || "");
+    const handlingUnit = String(source.le_nummer || "");
+    if (sourceBin === targetBin) {
+      throw httpError(400, "Quell- und Zielstellplatz muessen unterschiedlich sein");
+    }
+
+    const totalsBefore = readMaterialStorageTotals(normalizedWarehouse, article.materialnummer);
+    const target = db
+      .prepare(
+        `SELECT id, lager, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, paletten, aktualisiert_am
+         FROM lagerbestand
+         WHERE lager = ? AND materialnummer = ? AND lagerplatz = ? AND le_nummer = ?`
+      )
+      .get(normalizedWarehouse, article.materialnummer, targetBin, handlingUnit);
+    const now = new Date().toISOString();
+    const targetId = String(target?.id || createStorageId());
+    const quantity = Number(source.menge_stueck || 0);
+    const pallets = Math.max(0, Number(source.paletten || 0));
+
+    db.prepare("UPDATE lagerbestand SET menge_stueck = 0, paletten = 0, aktualisiert_am = ? WHERE id = ?")
+      .run(now, source.id);
+    if (target) {
+      db.prepare(
+        "UPDATE lagerbestand SET menge_stueck = menge_stueck + ?, paletten = paletten + ?, aktualisiert_am = ? WHERE id = ?"
+      ).run(quantity, pallets, now, target.id);
+    } else {
+      db.prepare(
+        `INSERT INTO lagerbestand
+           (id, lager, artikel_id, materialnummer, lagerplatz, le_nummer, menge_stueck, paletten, aktualisiert_am)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(targetId, normalizedWarehouse, article.id, article.materialnummer, targetBin, handlingUnit, quantity, pallets, now);
+    }
+
+    db.prepare(
+      `INSERT INTO umlagerung
+         (id, lager, artikel_id, materialnummer, quell_bestand_id, quell_lagerplatz, quell_le_nummer,
+          ziel_bestand_id, ziel_lagerplatz, ziel_le_nummer, menge_stueck, paletten, referenz,
+          gebucht_von, quell_aktualisiert_am, erstellt_am)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      normalized.id,
+      normalizedWarehouse,
+      article.id,
+      article.materialnummer,
+      source.id,
+      sourceBin,
+      handlingUnit,
+      targetId,
+      targetBin,
+      handlingUnit,
+      quantity,
+      pallets,
+      normalized.reference,
+      normalized.userName,
+      normalized.expectedUpdatedAt,
+      now
+    );
+
+    const movements = [
+      insertTransferMovement({
+        warehouse: normalizedWarehouse,
+        article,
+        type: "Umlagerung-Ausgang",
+        quantity,
+        pallets,
+        bin: sourceBin,
+        handlingUnit,
+        reference: normalized.reference,
+        transferId: normalized.id,
+        createdAt: now,
+      }),
+      insertTransferMovement({
+        warehouse: normalizedWarehouse,
+        article,
+        type: "Umlagerung-Eingang",
+        quantity,
+        pallets,
+        bin: targetBin,
+        handlingUnit,
+        reference: normalized.reference,
+        transferId: normalized.id,
+        createdAt: now,
+      }),
+    ];
+
+    const totalsAfter = readMaterialStorageTotals(normalizedWarehouse, article.materialnummer);
+    if (totalsAfter.quantity !== totalsBefore.quantity || totalsAfter.pallets !== totalsBefore.pallets) {
+      throw httpError(500, "Umlagerung verletzt die Bestandsinvariante");
+    }
+
+    const created = readStorageTransferRow(normalized.id);
+    const result = storageTransferResult(created, articleInfo, false, movements);
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 // ── Receipts ──────────────────────────────────────────────────────────────────
@@ -433,7 +643,7 @@ export function bookStorageIssues(issues, warehouse = "SSI") {
 export function deleteStorageForMaterial(materialnummer, warehouse = "SSI") {
   const normalizedWarehouse = normalizeWarehouse(warehouse);
   const material = String(materialnummer || "").trim();
-  if (!material) return { stockDeleted: 0, movementsDeleted: 0 };
+  if (!material) return { stockDeleted: 0, movementsDeleted: 0, transfersDeleted: 0 };
 
   const db = getDb();
   db.exec("BEGIN");
@@ -444,8 +654,11 @@ export function deleteStorageForMaterial(materialnummer, warehouse = "SSI") {
     const movementsDeleted = db
       .prepare("DELETE FROM lagerbewegung WHERE lager = ? AND materialnummer = ?")
       .run(normalizedWarehouse, material).changes;
+    const transfersDeleted = db
+      .prepare("DELETE FROM umlagerung WHERE lager = ? AND materialnummer = ?")
+      .run(normalizedWarehouse, material).changes;
     db.exec("COMMIT");
-    return { stockDeleted, movementsDeleted };
+    return { stockDeleted, movementsDeleted, transfersDeleted };
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
@@ -591,12 +804,130 @@ function normalizeStorageIssue(issue, warehouse = "SSI") {
 
 // ── Row mapping ───────────────────────────────────────────────────────────────
 
+function normalizeStorageTransfer(transfer, warehouse = "SSI") {
+  const source = transfer && typeof transfer === "object" && !Array.isArray(transfer) ? transfer : {};
+  const id = String(source.id || source.transferId || "").trim();
+  const sourceLocationId = String(source.sourceLocationId || source.quellBestandId || "").trim();
+  const expectedQuantity = readInteger(source.expectedQuantity ?? source.erwarteteMenge);
+  const expectedUpdatedAt = String(source.expectedUpdatedAt || source.quellAktualisiertAm || "").trim();
+  const targetBin = normalizeTransferTargetBin(source.targetBin ?? source.zielLagerplatz, warehouse);
+  const reference = String(source.reference ?? source.referenz ?? "").trim();
+  const userName = String(source.userName ?? source.mitarbeiter ?? "").trim();
+
+  if (!/^[A-Za-z0-9._:-]{8,128}$/.test(id)) throw httpError(400, "Umlagerungs-ID ist ungueltig");
+  if (!sourceLocationId) throw httpError(400, "Quellbestand fehlt");
+  if (!Number.isInteger(expectedQuantity) || expectedQuantity <= 0) throw httpError(400, "Erwartete Stueckzahl ist ungueltig");
+  if (!expectedUpdatedAt) throw httpError(400, "Quell-Zeitstempel fehlt");
+  if (!userName) throw httpError(400, "Mitarbeiter fehlt");
+  if (reference.length > 500) throw httpError(400, "Referenz darf maximal 500 Zeichen enthalten");
+
+  return { id, warehouse: normalizeWarehouse(warehouse), sourceLocationId, expectedQuantity, expectedUpdatedAt, targetBin, reference, userName };
+}
+
+function normalizeTransferTargetBin(value, warehouse) {
+  const raw = String(value || "").trim();
+  const normalized = normalizeWarehouse(warehouse) === "SSI" ? normalizeSsiStorageBin(raw) : raw.toUpperCase();
+  if (raw && !normalized) throw httpError(400, `Zielstellplatz "${raw}" ist fuer SSI nicht bekannt`);
+  if (!normalized) throw httpError(400, "Zielstellplatz fehlt");
+  return normalized;
+}
+
+function readStorageTransferRow(id) {
+  return getDb()
+    .prepare(
+      `SELECT id, lager, artikel_id, materialnummer, quell_bestand_id, quell_lagerplatz, quell_le_nummer,
+              ziel_bestand_id, ziel_lagerplatz, ziel_le_nummer, menge_stueck, paletten, referenz,
+              gebucht_von, quell_aktualisiert_am, erstellt_am
+       FROM umlagerung WHERE id = ?`
+    )
+    .get(id);
+}
+
+function ensureMatchingTransferReplay(existing, normalized) {
+  const matches =
+    String(existing.lager || "") === normalized.warehouse &&
+    String(existing.quell_bestand_id || "") === normalized.sourceLocationId &&
+    Number(existing.menge_stueck || 0) === normalized.expectedQuantity &&
+    String(existing.quell_aktualisiert_am || "") === normalized.expectedUpdatedAt &&
+    String(existing.ziel_lagerplatz || "") === normalized.targetBin &&
+    String(existing.referenz || "") === normalized.reference &&
+    String(existing.gebucht_von || "") === normalized.userName;
+  if (!matches) throw httpError(409, "Umlagerungs-ID wurde bereits mit anderen Daten verwendet");
+}
+
+function readMaterialStorageTotals(warehouse, materialnummer) {
+  const row = getDb()
+    .prepare(
+      `SELECT COALESCE(SUM(menge_stueck), 0) AS menge, COALESCE(SUM(paletten), 0) AS paletten
+       FROM lagerbestand WHERE lager = ? AND materialnummer = ?`
+    )
+    .get(warehouse, materialnummer);
+  return { quantity: Number(row?.menge || 0), pallets: Number(row?.paletten || 0) };
+}
+
+function insertTransferMovement({ warehouse, article, type, quantity, pallets, bin, handlingUnit, reference, transferId, createdAt }) {
+  const id = createStorageMovementId();
+  getDb().prepare(
+    `INSERT INTO lagerbewegung
+       (id, lager, artikel_id, materialnummer, bewegungsart, menge_stueck, paletten, lagerplatz,
+        le_nummer, referenz, umlagerung_id, erstellt_am)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, warehouse, article.id, article.materialnummer, type, quantity, pallets, bin, handlingUnit, reference, transferId, createdAt);
+  return {
+    id,
+    lager: warehouse,
+    materialnummer: article.materialnummer,
+    materialbezeichnung: article.materialbezeichnung || "",
+    bewegungsart: type,
+    mengeStueck: quantity,
+    paletten: pallets,
+    lagerplatz: bin,
+    leNummer: handlingUnit,
+    referenz: reference,
+    umlagerungId: transferId,
+    erstelltAm: createdAt,
+  };
+}
+
+function storageTransferResult(row, articleInfo, replayed, movements = null) {
+  const db = getDb();
+  const source = db
+    .prepare(
+      `SELECT id, lager, materialnummer, lagerplatz, le_nummer, menge_stueck, paletten, aktualisiert_am
+       FROM lagerbestand WHERE id = ?`
+    )
+    .get(row.quell_bestand_id);
+  const target = db
+    .prepare(
+      `SELECT id, lager, materialnummer, lagerplatz, le_nummer, menge_stueck, paletten, aktualisiert_am
+       FROM lagerbestand WHERE id = ?`
+    )
+    .get(row.ziel_bestand_id);
+  const storedMovements = movements || db
+    .prepare(
+      `SELECT id, lager, materialnummer, bewegungsart, menge_stueck, paletten, lagerplatz,
+              le_nummer, referenz, umlagerung_id, erstellt_am
+       FROM lagerbewegung WHERE umlagerung_id = ? ORDER BY erstellt_am, id`
+    )
+    .all(row.id)
+    .map((movement) => storageMovementFromRow(movement, articleInfo));
+  return {
+    transfer: storageTransferFromRow(row, articleInfo),
+    sourceLocation: source ? storageLocationFromRow(source, articleInfo) : null,
+    targetLocation: target ? storageLocationFromRow(target, articleInfo) : null,
+    movements: storedMovements,
+    replayed,
+  };
+}
+
 function storageLocationFromRow(row, articleInfo = new Map()) {
   const article = articleInfo.get(String(row.materialnummer || "")) || {};
   return {
     id: String(row.id || ""),
     lager: normalizeWarehouse(row.lager),
+    artikelId: String(article.id || ""),
     materialnummer: String(row.materialnummer || ""),
+    barcode: String(article.barcode || ""),
     materialbezeichnung: String(row.materialbezeichnung || article.materialbezeichnung || ""),
     mengeProPalette: Number(article.mengeProPalette || 0),
     lagerplatz: String(row.lagerplatz || ""),
@@ -620,6 +951,28 @@ function storageMovementFromRow(row, articleInfo = new Map()) {
     lagerplatz: String(row.lagerplatz || ""),
     leNummer: String(row.le_nummer || ""),
     referenz: String(row.referenz || ""),
+    umlagerungId: String(row.umlagerung_id || ""),
+    erstelltAm: String(row.erstellt_am || ""),
+  };
+}
+
+function storageTransferFromRow(row, articleInfo = new Map()) {
+  const article = articleInfo.get(String(row.materialnummer || "")) || {};
+  return {
+    id: String(row.id || ""),
+    lager: normalizeWarehouse(row.lager),
+    materialnummer: String(row.materialnummer || ""),
+    materialbezeichnung: String(article.materialbezeichnung || ""),
+    quellBestandId: String(row.quell_bestand_id || ""),
+    quellLagerplatz: String(row.quell_lagerplatz || ""),
+    zielBestandId: String(row.ziel_bestand_id || ""),
+    zielLagerplatz: String(row.ziel_lagerplatz || ""),
+    leNummer: String(row.quell_le_nummer || row.ziel_le_nummer || ""),
+    mengeStueck: Number(row.menge_stueck || 0),
+    paletten: Math.max(0, Number(row.paletten || 0)),
+    referenz: String(row.referenz || ""),
+    gebuchtVon: String(row.gebucht_von || ""),
+    quellAktualisiertAm: String(row.quell_aktualisiert_am || ""),
     erstelltAm: String(row.erstellt_am || ""),
   };
 }

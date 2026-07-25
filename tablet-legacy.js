@@ -39,6 +39,7 @@ registerTabletServiceWorker();
 
 document.addEventListener("DOMContentLoaded", function () {
   bindElements();
+  initializeTransferController();
   bindEvents();
   loadUser();
   renderCompletionFields();
@@ -82,10 +83,17 @@ function bindElements() {
     "tabletTitle",
     "pickingModeButton",
     "storageModeButton",
+    "transferModeButton",
     "userNameInput",
+    "orderSelectRow",
     "orderSelect",
     "acceptedGroupInfo",
+    "sortModeRow",
     "sortModeSelect",
+    "orderActionRow",
+    "orderDangerRow",
+    "orderStatusPanel",
+    "orderWorkspace",
     "refreshButton",
     "manualStorageCustomerRow",
     "manualStorageCustomerInput",
@@ -101,6 +109,7 @@ function bindElements() {
     "euroPalletsInput",
     "storageSpacesInput",
     "orderNoteInput",
+    "orderPackageA1Total",
     "doneCount",
     "openCount",
     "changedCount",
@@ -123,12 +132,15 @@ function bindElements() {
 function bindEvents() {
   elements.pickingModeButton.onclick = function () { setMode("picking"); };
   elements.storageModeButton.onclick = function () { setMode("storage"); };
+  elements.transferModeButton.onclick = function () { setMode("transfer"); };
   elements.userNameInput.onchange = function () {
     saveUser();
+    updateTransferContext();
     renderManualStorageStartButton();
     renderTakeOverButton();
   };
   elements.userNameInput.onkeyup = function () {
+    updateTransferContext();
     renderManualStorageStartButton();
     renderTakeOverButton();
   };
@@ -195,13 +207,19 @@ function initialize(options) {
     serverOnline = true;
     setConnectionStatus(true);
     flushSyncQueue(function () {
-      loadOrderList();
+      if (currentMode !== "transfer") loadOrderList();
       finishConnectionCheck();
     });
-    if (!orderListTimer) orderListTimer = window.setInterval(function () { loadOrderList({ silent: true }); }, ORDER_LIST_REFRESH_MS);
+    if (!orderListTimer) orderListTimer = window.setInterval(function () {
+      if (currentMode !== "transfer") loadOrderList({ silent: true });
+    }, ORDER_LIST_REFRESH_MS);
   }, function (message) {
     serverOnline = false;
     setConnectionStatus(false);
+    if (currentMode === "transfer") {
+      finishConnectionCheck();
+      return;
+    }
     loadOrderListFromCache(function (cached) {
       setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden: " + message, !cached);
       finishConnectionCheck();
@@ -557,7 +575,10 @@ function renderAcceptedGroupInfo(group) {
 
 function cacheOrderSummaries(orders) {
   if (!window.OfflineStore) return;
-  OfflineStore.saveOrderSummaries(orders || []).catch(function () {});
+  var cacheUpdate = OfflineStore.reconcileOpenOrders
+    ? OfflineStore.reconcileOpenOrders(orders || [])
+    : OfflineStore.saveOrderSummaries(orders || []);
+  cacheUpdate.catch(function () {});
 }
 
 function cacheAcceptedOpenOrders(orders) {
@@ -661,21 +682,73 @@ function isAcceptedByCurrentUser(order) {
   return sameUserName(order && order.acceptedBy, currentUserName());
 }
 
+function isLegacySiSystemBinSuccessNote(value) {
+  return /^Von-Lagerplatz aus LE\/HU-System eindeutig erg(?:ae|\u00e4)nzt(?:\s*\([^)]*\)|\s*:\s*[^.]+)?\.?$/i
+    .test(String(value || "").trim());
+}
+
+function stripLegacySiSystemBinSuccessNote(value) {
+  var text = String(value || "").trim();
+  if (!text) return "";
+  var parts = text.split(" - ");
+  if (!parts.some(isLegacySiSystemBinSuccessNote)) return text;
+  return parts.filter(function (part) {
+    return !isLegacySiSystemBinSuccessNote(part);
+  }).join(" - ").trim();
+}
+
 function normalizeAutoPositionNotes(notes) {
   var source = notes && typeof notes === "object" ? notes : {};
+  var sourceBinSystem = String(source.sourceBinSystem || "").trim();
   return {
     destination: String(source.destination || "").trim(),
     quantity: String(source.quantity || "").trim(),
     quantityCorrection: String(source.quantityCorrection || "").trim(),
     storagePallet: String(source.storagePallet || "").trim(),
     loadingSlip: String(source.loadingSlip || "").trim(),
-    sourceBinSystem: String(source.sourceBinSystem || "").trim(),
+    sourceBinSystem: isLegacySiSystemBinSuccessNote(sourceBinSystem) ? "" : sourceBinSystem,
     package: String(source.package || "").trim()
   };
 }
 
 function combinedPositionNote(line) {
-  return combineUniqueNoteParts([line && line.positionNote].concat(autoPositionNoteValues(line)));
+  return combineUniqueNoteParts([manualPositionNoteFromInput(line && line.positionNote, line)].concat(autoPositionNoteValues(line)));
+}
+
+function manualPositionNoteFromInput(value, line) {
+  var manual = stripLegacySiSystemBinSuccessNote(value);
+  var automaticParts = uniqueNoteParts(autoPositionNoteValues(line));
+  var automaticSequence = automaticParts.join(" - ");
+  if (!manual || !automaticSequence) return manual;
+
+  var previous = null;
+  while (manual && manual !== previous) {
+    previous = manual;
+    if (manual === automaticSequence) {
+      manual = "";
+      continue;
+    }
+    if (manual.slice(-(automaticSequence.length + 3)) === " - " + automaticSequence) {
+      manual = manual.slice(0, -(automaticSequence.length + 3)).trim();
+      continue;
+    }
+    if (manual.slice(0, automaticSequence.length + 3) === automaticSequence + " - ") {
+      manual = manual.slice(automaticSequence.length + 3).trim();
+      continue;
+    }
+    for (var index = automaticParts.length - 1; index >= 0; index -= 1) {
+      var automaticPart = automaticParts[index];
+      if (manual === automaticPart) {
+        manual = "";
+        break;
+      }
+      if (manual.slice(-(automaticPart.length + 3)) === " - " + automaticPart) {
+        manual = manual.slice(0, -(automaticPart.length + 3)).trim();
+        break;
+      }
+    }
+  }
+  return manual;
 }
 
 function autoPositionNoteValues(line) {
@@ -684,6 +757,10 @@ function autoPositionNoteValues(line) {
 }
 
 function combineUniqueNoteParts(parts) {
+  return uniqueNoteParts(parts).join(" - ");
+}
+
+function uniqueNoteParts(parts) {
   var seen = {};
   var result = [];
   (parts || []).forEach(function (part) {
@@ -693,15 +770,33 @@ function combineUniqueNoteParts(parts) {
     seen[key] = true;
     result.push(text);
   });
-  return result.join(" - ");
+  return result;
+}
+
+function normalizePositionNotesForSave(order) {
+  var lines = order && Array.isArray(order.lines) ? order.lines : [];
+  lines.forEach(function (line) {
+    if (!line) return;
+    line.autoPositionNotes = normalizeAutoPositionNotes(line.autoPositionNotes);
+    line.positionNote = manualPositionNoteFromInput(line.positionNote, line);
+  });
+  return order;
 }
 
 function loadUser() {
   try {
     elements.userNameInput.value = localStorage.getItem(USER_KEY) || localStorage.getItem(MAIN_USER_KEY) || "";
-    currentMode = localStorage.getItem(MODE_KEY) === "storage" ? "storage" : "picking";
+    var storedMode = localStorage.getItem(MODE_KEY);
+    var storedGroup = String(localStorage.getItem(USER_GROUP_KEY) || "").toLowerCase();
+    var requestedTransfer = transferModeRequested();
+    if (!storedGroup || (!canAccessTransfers(storedGroup) && !requestedTransfer)) {
+      storedGroup = "tablet";
+      localStorage.setItem(USER_GROUP_KEY, storedGroup);
+    }
+    currentMode = (requestedTransfer || storedMode === "transfer") && canAccessTransfers(storedGroup)
+      ? "transfer"
+      : storedMode === "storage" ? "storage" : "picking";
     elements.sortModeSelect.value = localStorage.getItem(SORT_MODE_KEY) || "fromBin";
-    localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch (error) {
     void error;
     elements.userNameInput.value = "";
@@ -716,7 +811,8 @@ function saveUser() {
     var name = elements.userNameInput.value || "";
     localStorage.setItem(USER_KEY, name);
     localStorage.setItem(MAIN_USER_KEY, name);
-    localStorage.setItem(USER_GROUP_KEY, "tablet");
+    var group = String(localStorage.getItem(USER_GROUP_KEY) || "").trim().toLowerCase();
+    if (!group || (!canAccessTransfers(group) && !transferModeRequested())) localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch (error) {
     void error;
     // Lokaler Speicher ist auf alten Browsern manchmal eingeschraenkt.
@@ -731,27 +827,110 @@ function saveSortMode() {
   }
 }
 
+function initializeTransferController() {
+  if (!window.HLogistikTransfer) return;
+  window.HLogistikTransfer.initialize({
+    getUserName: currentUserName,
+    getUserGroup: transferUserGroup,
+    getWarehouse: transferWarehouse,
+    onWarehouseChange: saveTransferWarehouse
+  });
+}
+
+function updateTransferContext() {
+  if (!window.HLogistikTransfer || currentMode !== "transfer") return;
+  window.HLogistikTransfer.updateContext({
+    userName: currentUserName(),
+    userGroup: transferUserGroup(),
+    warehouse: transferWarehouse(),
+    online: serverOnline
+  });
+}
+
+function transferWarehouse() {
+  try {
+    var stored = String(localStorage.getItem("hlogistik-warehouse-v1") || "").toUpperCase();
+    if (stored === "SI" || stored === "SSI") return stored;
+  } catch (error) {
+    void error;
+  }
+  return elements.manualStorageWarehouseSelect && elements.manualStorageWarehouseSelect.value || "SSI";
+}
+
+function saveTransferWarehouse(warehouse) {
+  var value = String(warehouse || "").toUpperCase() === "SI" ? "SI" : "SSI";
+  if (elements.manualStorageWarehouseSelect) elements.manualStorageWarehouseSelect.value = value;
+  try {
+    localStorage.setItem("hlogistik-warehouse-v1", value);
+  } catch (error) {
+    void error;
+  }
+}
+
+function transferModeRequested() {
+  return /(?:^|[?&])bereich=umlagerungen(?:&|$)/i.test(String(window.location.search || ""));
+}
+
+function canAccessTransfers(group) {
+  return ["buero", "tablet", "verwaltung"].indexOf(String(group || "").trim().toLowerCase()) >= 0;
+}
+
+function transferUserGroup() {
+  try {
+    var group = String(localStorage.getItem(USER_GROUP_KEY) || "").trim().toLowerCase();
+    return group || "tablet";
+  } catch (error) {
+    void error;
+    return "tablet";
+  }
+}
+
+function tabletApiGroup() {
+  return currentMode === "transfer" && !currentOrderAcceptedByCurrentUser()
+    ? transferUserGroup()
+    : "tablet";
+}
+
 function setMode(mode) {
-  var nextMode = mode === "storage" ? "storage" : "picking";
+  var nextMode = mode === "transfer" ? "transfer" : mode === "storage" ? "storage" : "picking";
   if (nextMode === currentMode) return;
+  var preserveCurrentOrder = modeSwitchPreservesCurrentOrder(nextMode);
+  if (nextMode === "transfer" && !canAccessTransfers(transferUserGroup())) {
+    setMessage("Keine Berechtigung für Umlagerungen.", true);
+    return;
+  }
   if (currentOrderLocksModeSwitch(nextMode)) {
     keepCurrentOrderSelected();
     return;
   }
-  if (dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
+  if (currentMode === "transfer" && window.HLogistikTransfer && window.HLogistikTransfer.hasUnsavedChanges() &&
+      !window.confirm("Es gibt einen noch nicht gespeicherten Umlagerungsentwurf. Bereich trotzdem wechseln?")) return;
+  if (!preserveCurrentOrder && dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
   currentMode = nextMode;
   try {
     localStorage.setItem(MODE_KEY, currentMode);
   } catch (error) {
     void error;
   }
+  if (preserveCurrentOrder) {
+    persistCurrentOrderCache();
+    if (currentMode === "transfer") {
+      updateModeUi();
+    } else {
+      ensureCurrentOrderInSelect();
+      renderCompletionFields();
+      renderOrder();
+      setMessage("Auftrag " + lockedOrderLabel() + " unveraendert fortgesetzt.", false);
+    }
+    return;
+  }
   resetToStart("Bitte " + modeLabel() + " waehlen.");
   updateModeUi();
-  loadOrderList();
+  if (currentMode !== "transfer") loadOrderList();
 }
 
 function modeLabel() {
-  return currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
+  return currentMode === "transfer" ? "Umlagerung" : currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
 }
 
 function isStorageOrder() {
@@ -772,10 +951,19 @@ function isLocalStorageOrderId(id) {
 }
 
 function updateModeUi() {
+  var isTransfer = currentMode === "transfer";
   var isStorage = isStorageOrder();
-  if (elements.tabletTitle) elements.tabletTitle.textContent = isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
+  if (elements.tabletTitle) elements.tabletTitle.textContent = isTransfer ? "Tablet Umlagerungen" : isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
   if (elements.pickingModeButton) elements.pickingModeButton.className = currentMode === "picking" ? "is-active" : "";
   if (elements.storageModeButton) elements.storageModeButton.className = currentMode === "storage" ? "is-active" : "";
+  if (elements.transferModeButton) elements.transferModeButton.className = isTransfer ? "is-active" : "";
+  setHidden(elements.orderSelectRow, isTransfer);
+  setHidden(elements.sortModeRow, isTransfer);
+  if (isTransfer) setHidden(elements.acceptedGroupInfo, true);
+  setHidden(elements.orderActionRow, isTransfer);
+  setHidden(elements.orderDangerRow, isTransfer);
+  setHidden(elements.orderStatusPanel, isTransfer);
+  setHidden(elements.orderWorkspace, isTransfer);
   if (elements.orderSelect && !elements.orderSelect.value && elements.orderSelect.options[0]) {
     elements.orderSelect.options[0].text = isStorage ? "Einlagerung waehlen" : "Auftrag waehlen";
   }
@@ -795,6 +983,18 @@ function updateModeUi() {
   }
   if (elements.exportPdfButton) elements.exportPdfButton.textContent = exportingPdf ? "PDF wird erstellt..." : exportButtonLabel();
   renderManualStorageStartButton();
+  if (window.HLogistikTransfer) {
+    if (isTransfer) {
+      window.HLogistikTransfer.activate({
+        userName: currentUserName(),
+        userGroup: transferUserGroup(),
+        warehouse: transferWarehouse(),
+        online: serverOnline
+      });
+    } else {
+      window.HLogistikTransfer.deactivate();
+    }
+  }
 }
 
 function exportButtonLabel() {
@@ -812,6 +1012,7 @@ function isManualStorageHeader() {
 }
 
 function loadOrderList(options) {
+  if (currentMode === "transfer") return;
   var silent = options && options.silent === true;
   if (!serverOnline) {
     loadOrderListFromCache(function (cached) {
@@ -932,9 +1133,16 @@ function currentOrderLocksSwitch(nextOrderId) {
 
 function currentOrderLocksModeSwitch(nextMode) {
   if (!currentOrder || !currentOrder.id || currentOrder.exportedAt) return false;
+  if (nextMode === "transfer") return false;
   if ((currentOrder.orderType || "picking") === nextMode) return false;
   var acceptedBy = String(currentOrder.acceptedBy || "").trim();
   return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+}
+
+function modeSwitchPreservesCurrentOrder(nextMode) {
+  if (!currentOrderAcceptedByCurrentUser()) return false;
+  var orderMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
+  return nextMode === "transfer" || (currentMode === "transfer" && nextMode === orderMode);
 }
 
 function keepCurrentOrderSelected() {
@@ -1175,6 +1383,7 @@ function addManualStorageLine() {
 function createManualStorageLine(lines, preset, options) {
   preset = preset || {};
   options = options || {};
+  var quantity = options.actualQty || "";
   return {
     id: createLineId(),
     orderType: "storage",
@@ -1187,8 +1396,8 @@ function createManualStorageLine(lines, preset, options) {
     fromBin: options.fromBin || "",
     product: preset.product || "",
     description: preset.description || "",
-    targetQty: "",
-    actualQty: options.actualQty || "",
+    targetQty: quantity,
+    actualQty: quantity,
     unit: preset.unit || "Stk",
     picked: false
   };
@@ -1572,7 +1781,7 @@ function renderLine(line) {
     markDirty();
   }, !canEditOrder || missing || !canEditHu, "", useSsiStorageHuPrefix ? ssiStorageHuInputOptions() : null));
   var noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), function (value) {
-    line.positionNote = value;
+    line.positionNote = manualPositionNoteFromInput(value, line);
     markDirty();
   }, !canEditOrder || missing || (isStorage && !isManualStorageLine), "");
   locationRow.appendChild(noteInput);
@@ -1625,7 +1834,7 @@ function renderLoadingSlipLine(line) {
   var noteRow = document.createElement("div");
   noteRow.className = "location-row loading-slip-note-row";
   var noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), function (value) {
-    line.positionNote = value;
+    line.positionNote = manualPositionNoteFromInput(value, line);
     markDirty();
   }, !canEditOrder, "");
   noteRow.appendChild(noteInput);
@@ -2137,6 +2346,7 @@ function removeOrderFromOfflineStore(orderId) {
 
 function removeOrderCacheEntry(orderId) {
   if (!window.OfflineStore || !orderId) return Promise.resolve();
+  if (OfflineStore.removeOrderCache) return OfflineStore.removeOrderCache(orderId);
   return (OfflineStore.deleteOrder ? OfflineStore.deleteOrder(orderId) : Promise.resolve())
     .then(function () {
       return OfflineStore.deleteOrderSummary ? OfflineStore.deleteOrderSummary(orderId) : OfflineStore.loadOrderSummaries().then(function (orders) {
@@ -2258,6 +2468,38 @@ function renderCompletionFields() {
   elements.euroPalletsInput.value = currentOrder ? currentOrder.euroPallets || "" : "";
   elements.storageSpacesInput.value = currentOrder ? currentOrder.storageSpaces || "" : "";
   elements.orderNoteInput.value = currentOrder ? currentOrder.orderNote || "" : "";
+  renderAutomaticOrderNotes();
+}
+
+function packageA1Total(lines) {
+  return (Array.isArray(lines) ? lines : []).reduce(function (total, line) {
+    if (!line || line.lineType === "loading-slip") return total;
+    var match = String(line.autoPositionNotes && line.autoPositionNotes.package || "").trim().match(/^([1-9]\d*)A1$/);
+    if (!match) return total;
+    var count = Number(match[1]);
+    var nextTotal = total + count;
+    return isWholeNumber(count) && count <= 9007199254740991 && isWholeNumber(nextTotal) && nextTotal <= 9007199254740991
+      ? nextTotal
+      : total;
+  }, 0);
+}
+
+function recalculatePickingA1OrderNote(order) {
+  order = order || currentOrder;
+  if (!order || String(order.orderType || "picking") !== "picking") {
+    if (order) order.autoOrderNotes = {};
+    return;
+  }
+  var total = packageA1Total(order.lines);
+  order.autoOrderNotes = total > 0 ? { packageA1: total + " A1" } : {};
+}
+
+function renderAutomaticOrderNotes() {
+  if (!elements.orderPackageA1Total) return;
+  recalculatePickingA1OrderNote(currentOrder);
+  var packageA1 = String(currentOrder && currentOrder.autoOrderNotes && currentOrder.autoOrderNotes.packageA1 || "");
+  elements.orderPackageA1Total.innerHTML = packageA1 ? "Automatische Auftragsnotiz: " + packageA1 : "";
+  elements.orderPackageA1Total.hidden = !packageA1;
 }
 
 function updateCompletionFieldsFromInputs() {
@@ -2291,6 +2533,7 @@ function touchOrder() {
   currentOrder.activeUser = user;
   currentOrder.activeUserAt = now;
   applyCompletionFieldsToOrder();
+  recalculatePickingA1OrderNote(currentOrder);
   if (currentOrder.lines.length && allPicked()) {
     currentOrder.completedBy = currentOrder.completedBy || user;
     currentOrder.completedAt = currentOrder.completedAt || now;
@@ -2470,10 +2713,7 @@ function continuePdfExportAfterConnection() {
         return exportCurrentOrderPdfOnServer();
       })
       .then(function (result) {
-        if (!result || result.ok !== true) {
-          throw new Error("PDF-Export wurde vom Server nicht bestaetigt.");
-        }
-        return removeQueuedOrderMutations(exportOrderId);
+        return finalizeSuccessfulPdfExport(exportOrderId, result);
       })
       .then(function () {
         dirty = false;
@@ -2487,6 +2727,25 @@ function continuePdfExportAfterConnection() {
         setMessage("PDF-Export fehlgeschlagen: " + (error && error.message ? error.message : error), true);
       });
   });
+}
+
+function finalizeSuccessfulPdfExport(orderId, exportResult) {
+  if (!exportResult || exportResult.ok !== true) {
+    return Promise.reject(new Error("PDF-Export wurde vom Server nicht bestaetigt."));
+  }
+  if (currentOrder && String(currentOrder.id || "") === String(orderId || "")) {
+    currentOrder.exportedAt = exportResult.exportedAt || new Date().toISOString();
+  }
+  var cleanup = window.OfflineStore && OfflineStore.removeOrderCache
+    ? OfflineStore.removeOrderCache(orderId)
+    : removeQueuedOrderMutations(orderId).then(function () {
+      return removeOrderCacheEntry(orderId);
+    });
+  return cleanup
+    .catch(function () {
+      // Der Serverabschluss bleibt erfolgreich; der naechste Online-Abgleich bereinigt den Cache.
+    })
+    .then(function () { return true; });
 }
 
 function reloadCurrentOrderFromServer() {
@@ -2674,6 +2933,7 @@ function updateCounts() {
   elements.doneCount.innerHTML = done;
   elements.openCount.innerHTML = Math.max(lines.length - done, 0);
   elements.changedCount.innerHTML = changed;
+  renderAutomaticOrderNotes();
 }
 
 function allPicked() {
@@ -2794,6 +3054,7 @@ function formatLineQuantityForDisplay(line, value) {
 }
 
 function normalizeOrderQuantitiesForSave(order) {
+  normalizePositionNotesForSave(order);
   var lines = order && Array.isArray(order.lines) ? order.lines : [];
   lines.forEach(function (line) {
     if (!line || line.lineType === "loading-slip") return;
@@ -2803,12 +3064,16 @@ function normalizeOrderQuantitiesForSave(order) {
       var parsed = window.HLogistikQuantityFormat ? window.HLogistikQuantityFormat.parse(text) : Number(text);
       if (isFiniteNumber(parsed)) line[key] = String(parsed);
     });
+    if (line.manual === true && !String(line.targetQty == null ? "" : line.targetQty).trim() && String(line.actualQty == null ? "" : line.actualQty).trim()) {
+      line.targetQty = String(line.actualQty).trim();
+    }
     var source = String(line.quantitySourceText || "").trim();
     var effectiveQuantity = String(line.actualQty == null ? "" : line.actualQty).trim() || line.targetQty;
     if (source && window.HLogistikQuantityFormat && window.HLogistikQuantityFormat.parse(source) !== window.HLogistikQuantityFormat.parse(effectiveQuantity)) {
       line.quantitySourceText = "";
     }
   });
+  recalculatePickingA1OrderNote(order);
   return order;
 }
 
@@ -2847,7 +3112,7 @@ function apiJson(url, options, success, failure) {
   xhr.setRequestHeader("Content-Type", "application/json");
   xhr.setRequestHeader("Cache-Control", "no-cache");
   xhr.setRequestHeader("Pragma", "no-cache");
-  xhr.setRequestHeader("X-User-Group", "tablet");
+  xhr.setRequestHeader("X-User-Group", tabletApiGroup());
   xhr.onreadystatechange = function () {
     if (xhr.readyState !== 4) return;
     var data = null;
@@ -2877,6 +3142,9 @@ function setConnectionStatus(isOnline) {
   serverOnline = isOnline === true;
   elements.connectionStatus.className = "connection-status" + (isOnline === true ? " is-online" : isOnline === false ? " is-offline" : "");
   elements.connectionStatus.innerHTML = isOnline === true ? "Online" : isOnline === false ? "Offline" : "Pruefe Verbindung";
+  if (window.HLogistikTransfer && (isOnline === true || isOnline === false)) {
+    window.HLogistikTransfer.setOnline(isOnline);
+  }
 }
 
 function setMessage(message, isError) {

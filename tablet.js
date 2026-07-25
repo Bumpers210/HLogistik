@@ -38,8 +38,10 @@ registerTabletServiceWorker();
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
+  initializeTransferController();
   bindEvents();
   loadUser();
+  renderCompletionFields();
   initialize();
   startConnectionMonitor();
 });
@@ -72,16 +74,86 @@ function registerTabletServiceWorker() {
   });
 }
 
+function initializeTransferController() {
+  if (!window.HLogistikTransfer) return;
+  window.HLogistikTransfer.initialize({
+    getUserName: currentUserName,
+    getUserGroup: transferUserGroup,
+    getWarehouse: transferWarehouse,
+    onWarehouseChange: saveTransferWarehouse,
+  });
+}
+
+function updateTransferContext() {
+  if (!window.HLogistikTransfer || currentMode !== "transfer") return;
+  window.HLogistikTransfer.updateContext({
+    userName: currentUserName(),
+    userGroup: transferUserGroup(),
+    warehouse: transferWarehouse(),
+    online: serverOnline,
+  });
+}
+
+function transferWarehouse() {
+  try {
+    const stored = String(localStorage.getItem("hlogistik-warehouse-v1") || "").toUpperCase();
+    if (["SI", "SSI"].includes(stored)) return stored;
+  } catch {
+    // Local storage may be restricted.
+  }
+  return elements.manualStorageWarehouseSelect?.value || "SSI";
+}
+
+function saveTransferWarehouse(warehouse) {
+  const value = String(warehouse || "").toUpperCase() === "SI" ? "SI" : "SSI";
+  if (elements.manualStorageWarehouseSelect) elements.manualStorageWarehouseSelect.value = value;
+  try {
+    localStorage.setItem("hlogistik-warehouse-v1", value);
+  } catch {
+    // Local storage may be restricted.
+  }
+}
+
+function transferModeRequested() {
+  return /(?:^|[?&])bereich=umlagerungen(?:&|$)/i.test(String(window.location.search || ""));
+}
+
+function canAccessTransfers(group) {
+  return ["buero", "tablet", "verwaltung"].includes(String(group || "").trim().toLowerCase());
+}
+
+function transferUserGroup() {
+  try {
+    const group = String(localStorage.getItem(USER_GROUP_KEY) || "").trim().toLowerCase();
+    return group || "tablet";
+  } catch {
+    return "tablet";
+  }
+}
+
+function tabletApiGroup() {
+  return currentMode === "transfer" && !currentOrderAcceptedByCurrentUser()
+    ? transferUserGroup()
+    : "tablet";
+}
+
 function bindElements() {
   [
     "connectionStatus",
     "tabletTitle",
     "pickingModeButton",
     "storageModeButton",
+    "transferModeButton",
     "userNameInput",
+    "orderSelectRow",
     "orderSelect",
     "acceptedGroupInfo",
+    "sortModeRow",
     "sortModeSelect",
+    "orderActionRow",
+    "orderDangerRow",
+    "orderStatusPanel",
+    "orderWorkspace",
     "refreshButton",
     "manualStorageCustomerRow",
     "manualStorageCustomerInput",
@@ -94,6 +166,10 @@ function bindElements() {
     "deleteStorageOrderButton",
     "saveButton",
     "exportPdfButton",
+    "euroPalletsInput",
+    "storageSpacesInput",
+    "orderNoteInput",
+    "orderPackageA1Total",
     "doneCount",
     "openCount",
     "changedCount",
@@ -115,15 +191,21 @@ function bindElements() {
 function bindEvents() {
   elements.pickingModeButton.addEventListener("click", () => setMode("picking"));
   elements.storageModeButton.addEventListener("click", () => setMode("storage"));
+  elements.transferModeButton.addEventListener("click", () => setMode("transfer"));
   elements.userNameInput.addEventListener("change", () => {
     saveUser();
+    updateTransferContext();
     renderManualStorageStartButton();
     renderTakeOverButton();
   });
   elements.userNameInput.addEventListener("keyup", () => {
+    updateTransferContext();
     renderManualStorageStartButton();
     renderTakeOverButton();
   });
+  elements.euroPalletsInput?.addEventListener("input", updateCompletionFieldsFromInputs);
+  elements.storageSpacesInput?.addEventListener("input", updateCompletionFieldsFromInputs);
+  elements.orderNoteInput?.addEventListener("input", updateCompletionFieldsFromInputs);
   elements.orderSelect.addEventListener("change", () => {
     const nextOrderId = elements.orderSelect.value;
     if (currentOrderLocksSwitch(nextOrderId)) {
@@ -180,8 +262,10 @@ async function initialize(options = {}) {
     serverOnline = true;
     setConnectionStatus(true);
     await flushSyncQueue();
-    loadOrderList();
-    if (!orderListTimer) orderListTimer = window.setInterval(() => loadOrderList({ silent: true }), ORDER_LIST_REFRESH_MS);
+    if (currentMode !== "transfer") loadOrderList();
+    if (!orderListTimer) orderListTimer = window.setInterval(() => {
+      if (currentMode !== "transfer") loadOrderList({ silent: true });
+    }, ORDER_LIST_REFRESH_MS);
     if (!saveTimer) {
       saveTimer = window.setInterval(async () => {
         if (dirty) await saveOrder(true);
@@ -194,6 +278,7 @@ async function initialize(options = {}) {
   } catch {
     serverOnline = false;
     setConnectionStatus(false);
+    if (currentMode === "transfer") return;
     const cached = await loadOrderListFromCache();
     setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden.", !cached);
   } finally {
@@ -597,21 +682,71 @@ function isAcceptedByCurrentUser(order) {
   return sameUserName(order?.acceptedBy, currentUserName());
 }
 
+function isLegacySiSystemBinSuccessNote(value) {
+  return /^Von-Lagerplatz aus LE\/HU-System eindeutig erg(?:ae|ä)nzt(?:\s*\([^)]*\)|\s*:\s*[^.]+)?\.?$/i
+    .test(String(value || "").trim());
+}
+
+function stripLegacySiSystemBinSuccessNote(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const parts = text.split(" - ");
+  if (!parts.some(isLegacySiSystemBinSuccessNote)) return text;
+  return parts.filter((part) => !isLegacySiSystemBinSuccessNote(part)).join(" - ").trim();
+}
+
 function normalizeAutoPositionNotes(notes) {
   const source = notes && typeof notes === "object" ? notes : {};
+  const sourceBinSystem = String(source.sourceBinSystem || "").trim();
   return {
     destination: String(source.destination || "").trim(),
     quantity: String(source.quantity || "").trim(),
     quantityCorrection: String(source.quantityCorrection || "").trim(),
     storagePallet: String(source.storagePallet || "").trim(),
     loadingSlip: String(source.loadingSlip || "").trim(),
-    sourceBinSystem: String(source.sourceBinSystem || "").trim(),
+    sourceBinSystem: isLegacySiSystemBinSuccessNote(sourceBinSystem) ? "" : sourceBinSystem,
     package: String(source.package || "").trim(),
   };
 }
 
 function combinedPositionNote(line) {
-  return combineUniqueNoteParts([line?.positionNote, ...autoPositionNoteValues(line)]);
+  return combineUniqueNoteParts([manualPositionNoteFromInput(line?.positionNote, line), ...autoPositionNoteValues(line)]);
+}
+
+function manualPositionNoteFromInput(value, line) {
+  let manual = stripLegacySiSystemBinSuccessNote(value);
+  const automaticParts = uniqueNoteParts(autoPositionNoteValues(line));
+  const automaticSequence = automaticParts.join(" - ");
+  if (!manual || !automaticSequence) return manual;
+
+  let previous = null;
+  while (manual && manual !== previous) {
+    previous = manual;
+    if (manual === automaticSequence) {
+      manual = "";
+      continue;
+    }
+    if (manual.endsWith(` - ${automaticSequence}`)) {
+      manual = manual.slice(0, -(automaticSequence.length + 3)).trim();
+      continue;
+    }
+    if (manual.startsWith(`${automaticSequence} - `)) {
+      manual = manual.slice(automaticSequence.length + 3).trim();
+      continue;
+    }
+    for (let index = automaticParts.length - 1; index >= 0; index -= 1) {
+      const automaticPart = automaticParts[index];
+      if (manual === automaticPart) {
+        manual = "";
+        break;
+      }
+      if (manual.endsWith(` - ${automaticPart}`)) {
+        manual = manual.slice(0, -(automaticPart.length + 3)).trim();
+        break;
+      }
+    }
+  }
+  return manual;
 }
 
 function autoPositionNoteValues(line) {
@@ -620,6 +755,10 @@ function autoPositionNoteValues(line) {
 }
 
 function combineUniqueNoteParts(parts) {
+  return uniqueNoteParts(parts).join(" - ");
+}
+
+function uniqueNoteParts(parts) {
   const seen = new Set();
   return (parts || [])
     .map((part) => String(part || "").trim())
@@ -629,16 +768,32 @@ function combineUniqueNoteParts(parts) {
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    })
-    .join(" - ");
+    });
+}
+
+function normalizePositionNotesForSave(order) {
+  (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
+    if (!line) return;
+    line.autoPositionNotes = normalizeAutoPositionNotes(line.autoPositionNotes);
+    line.positionNote = manualPositionNoteFromInput(line.positionNote, line);
+  });
+  return order;
 }
 
 function loadUser() {
   try {
     elements.userNameInput.value = localStorage.getItem(USER_KEY) || localStorage.getItem(MAIN_USER_KEY) || "";
-    currentMode = localStorage.getItem(MODE_KEY) === "storage" ? "storage" : "picking";
+    const storedMode = localStorage.getItem(MODE_KEY);
+    let storedGroup = String(localStorage.getItem(USER_GROUP_KEY) || "").toLowerCase();
+    const requestedTransfer = transferModeRequested();
+    if (!storedGroup || (!canAccessTransfers(storedGroup) && !requestedTransfer)) {
+      storedGroup = "tablet";
+      localStorage.setItem(USER_GROUP_KEY, storedGroup);
+    }
+    currentMode = (requestedTransfer || storedMode === "transfer") && canAccessTransfers(storedGroup)
+      ? "transfer"
+      : storedMode === "storage" ? "storage" : "picking";
     elements.sortModeSelect.value = localStorage.getItem(SORT_MODE_KEY) || "fromBin";
-    localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch {
     elements.userNameInput.value = "";
     currentMode = "picking";
@@ -652,7 +807,8 @@ function saveUser() {
     const name = elements.userNameInput.value || "";
     localStorage.setItem(USER_KEY, name);
     localStorage.setItem(MAIN_USER_KEY, name);
-    localStorage.setItem(USER_GROUP_KEY, "tablet");
+    const group = String(localStorage.getItem(USER_GROUP_KEY) || "").trim().toLowerCase();
+    if (!group || (!canAccessTransfers(group) && !transferModeRequested())) localStorage.setItem(USER_GROUP_KEY, "tablet");
   } catch {
     // Alte Browser können lokalen Speicher blockieren; die Pickliste bleibt trotzdem nutzbar.
   }
@@ -667,26 +823,44 @@ function saveSortMode() {
 }
 
 function setMode(mode) {
-  const nextMode = mode === "storage" ? "storage" : "picking";
+  const nextMode = mode === "transfer" ? "transfer" : mode === "storage" ? "storage" : "picking";
   if (nextMode === currentMode) return;
+  const preserveCurrentOrder = modeSwitchPreservesCurrentOrder(nextMode);
+  if (nextMode === "transfer" && !canAccessTransfers(transferUserGroup())) {
+    setMessage("Keine Berechtigung für Umlagerungen.", true);
+    return;
+  }
   if (currentOrderLocksModeSwitch(nextMode)) {
     keepCurrentOrderSelected();
     return;
   }
-  if (dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
+  if (currentMode === "transfer" && window.HLogistikTransfer?.hasUnsavedChanges() &&
+      !window.confirm("Es gibt einen noch nicht gespeicherten Umlagerungsentwurf. Bereich trotzdem wechseln?")) return;
+  if (!preserveCurrentOrder && dirty && !window.confirm("Es gibt ungespeicherte Aenderungen. Bereich trotzdem wechseln?")) return;
   currentMode = nextMode;
   try {
     localStorage.setItem(MODE_KEY, currentMode);
   } catch {
     // Modus bleibt fuer diese Sitzung aktiv.
   }
+  if (preserveCurrentOrder) {
+    persistCurrentOrderCache();
+    if (currentMode === "transfer") {
+      updateModeUi();
+    } else {
+      ensureCurrentOrderInSelect();
+      renderOrder();
+      setMessage(`Auftrag ${lockedOrderLabel()} unveraendert fortgesetzt.`, false);
+    }
+    return;
+  }
   resetToStart(`Bitte ${modeLabel()} waehlen.`);
   updateModeUi();
-  loadOrderList();
+  if (currentMode !== "transfer") loadOrderList();
 }
 
 function modeLabel() {
-  return currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
+  return currentMode === "transfer" ? "Umlagerung" : currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
 }
 
 function isStorageOrder() {
@@ -706,10 +880,19 @@ function isLocalStorageOrderId(id) {
 }
 
 function updateModeUi() {
+  const isTransfer = currentMode === "transfer";
   const isStorage = isStorageOrder();
-  if (elements.tabletTitle) elements.tabletTitle.textContent = isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
+  if (elements.tabletTitle) elements.tabletTitle.textContent = isTransfer ? "Tablet Umlagerungen" : isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
   if (elements.pickingModeButton) elements.pickingModeButton.classList.toggle("is-active", currentMode === "picking");
   if (elements.storageModeButton) elements.storageModeButton.classList.toggle("is-active", currentMode === "storage");
+  if (elements.transferModeButton) elements.transferModeButton.classList.toggle("is-active", isTransfer);
+  setHidden(elements.orderSelectRow, isTransfer);
+  setHidden(elements.sortModeRow, isTransfer);
+  if (isTransfer) setHidden(elements.acceptedGroupInfo, true);
+  setHidden(elements.orderActionRow, isTransfer);
+  setHidden(elements.orderDangerRow, isTransfer);
+  setHidden(elements.orderStatusPanel, isTransfer);
+  setHidden(elements.orderWorkspace, isTransfer);
   if (elements.orderSelect && !elements.orderSelect.value && elements.orderSelect.options[0]) {
     elements.orderSelect.options[0].text = isStorage ? "Einlagerung waehlen" : "Auftrag waehlen";
   }
@@ -728,6 +911,18 @@ function updateModeUi() {
   }
   if (elements.exportPdfButton) elements.exportPdfButton.textContent = exportingPdf ? "PDF wird erstellt..." : exportButtonLabel();
   renderManualStorageStartButton();
+  if (window.HLogistikTransfer) {
+    if (isTransfer) {
+      window.HLogistikTransfer.activate({
+        userName: currentUserName(),
+        userGroup: transferUserGroup(),
+        warehouse: transferWarehouse(),
+        online: serverOnline,
+      });
+    } else {
+      window.HLogistikTransfer.deactivate();
+    }
+  }
 }
 
 function exportButtonLabel() {
@@ -743,6 +938,7 @@ function isManualStorageHeader() {
 }
 
 async function loadOrderList(options = {}) {
+  if (currentMode === "transfer") return;
   const silent = options?.silent === true;
   if (!serverOnline) {
     await loadOrderListFromCache();
@@ -778,7 +974,10 @@ async function loadOrderList(options = {}) {
     renderAcceptedGroupInfo();
     if (statusMessage) setMessage(statusMessage, currentMissingOnServer && dirty);
     else if (!silent) setMessage(currentOrder ? "Auftragsliste aktualisiert." : `Bitte ${modeLabel()} waehlen.`, false);
-    try { if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders); } catch { /* non-critical */ }
+    try {
+      if (window.OfflineStore?.reconcileOpenOrders) await OfflineStore.reconcileOpenOrders(orders);
+      else if (window.OfflineStore) await OfflineStore.saveOrderSummaries(orders);
+    } catch { /* non-critical */ }
     cacheAcceptedOpenOrders(orders);
   } catch (error) {
     markServerOffline();
@@ -1016,6 +1215,7 @@ async function addManualStorageLine() {
 }
 
 function createManualStorageLine(lines, preset = {}, options = {}) {
+  const quantity = options.actualQty || "";
   return {
     id: createLineId(),
     orderType: "storage",
@@ -1028,8 +1228,8 @@ function createManualStorageLine(lines, preset = {}, options = {}) {
     fromBin: options.fromBin || "",
     product: preset.product || "",
     description: preset.description || "",
-    targetQty: "",
-    actualQty: options.actualQty || "",
+    targetQty: quantity,
+    actualQty: quantity,
     unit: preset.unit || "Stk",
     picked: false
   };
@@ -1336,9 +1536,16 @@ function currentOrderLocksSwitch(nextOrderId = "") {
 
 function currentOrderLocksModeSwitch(nextMode) {
   if (!currentOrder?.id || currentOrder.exportedAt) return false;
+  if (nextMode === "transfer") return false;
   if ((currentOrder.orderType || "picking") === nextMode) return false;
   const acceptedBy = String(currentOrder.acceptedBy || "").trim();
   return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
+}
+
+function modeSwitchPreservesCurrentOrder(nextMode) {
+  if (!currentOrderAcceptedByCurrentUser()) return false;
+  const orderMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
+  return nextMode === "transfer" || (currentMode === "transfer" && nextMode === orderMode);
 }
 
 function keepCurrentOrderSelected() {
@@ -1481,7 +1688,7 @@ function renderLine(line) {
     )
   );
   const noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), (value) => {
-    line.positionNote = value;
+    line.positionNote = manualPositionNoteFromInput(value, line);
     markDirty();
   }, { readOnly: !canEditOrder || missing || (isStorage && !isManualStorageLine) });
   locationRow.appendChild(noteInput);
@@ -1536,7 +1743,7 @@ function renderLoadingSlipLine(line) {
   const noteRow = document.createElement("div");
   noteRow.className = "location-row loading-slip-note-row";
   const noteInput = makeInput("Zusatzbemerkung", combinedPositionNote(line), (value) => {
-    line.positionNote = value;
+    line.positionNote = manualPositionNoteFromInput(value, line);
     markDirty();
   }, { readOnly: !canEditOrder });
   noteRow.appendChild(noteInput);
@@ -2029,6 +2236,10 @@ async function removeOrderFromOfflineStore(orderId) {
 
 async function removeOrderCacheEntry(orderId) {
   if (!window.OfflineStore || !orderId) return;
+  if (OfflineStore.removeOrderCache) {
+    await OfflineStore.removeOrderCache(orderId);
+    return;
+  }
   if (OfflineStore.deleteOrder) await OfflineStore.deleteOrder(orderId);
   if (OfflineStore.deleteOrderSummary) {
     await OfflineStore.deleteOrderSummary(orderId);
@@ -2122,6 +2333,60 @@ function acceptedOrderMessage(result) {
   return "Bearbeitung uebernommen. Bitte diesen Auftrag abschliessen.";
 }
 
+function renderCompletionFields() {
+  if (!elements.euroPalletsInput || !elements.storageSpacesInput || !elements.orderNoteInput) return;
+  const hasOrder = Boolean(currentOrder);
+  const canEditOrder = hasOrder && canEditCurrentOrder();
+  elements.euroPalletsInput.disabled = !canEditOrder;
+  elements.storageSpacesInput.disabled = !canEditOrder;
+  elements.orderNoteInput.disabled = !canEditOrder;
+  elements.euroPalletsInput.value = currentOrder?.euroPallets || "";
+  elements.storageSpacesInput.value = currentOrder?.storageSpaces || "";
+  elements.orderNoteInput.value = currentOrder?.orderNote || "";
+  renderAutomaticOrderNotes();
+}
+
+function updateCompletionFieldsFromInputs() {
+  if (!currentOrder || !canEditCurrentOrder()) return;
+  applyCompletionFieldsToOrder();
+  markDirty();
+}
+
+function applyCompletionFieldsToOrder() {
+  if (!currentOrder || !elements.euroPalletsInput || !elements.storageSpacesInput || !elements.orderNoteInput) return;
+  currentOrder.euroPallets = elements.euroPalletsInput.value || "";
+  currentOrder.storageSpaces = elements.storageSpacesInput.value || "";
+  currentOrder.orderNote = elements.orderNoteInput.value || "";
+}
+
+function packageA1Total(lines) {
+  return (Array.isArray(lines) ? lines : []).reduce((total, line) => {
+    if (!line || line.lineType === "loading-slip") return total;
+    const match = String(line.autoPositionNotes?.package || "").trim().match(/^([1-9]\d*)A1$/);
+    if (!match) return total;
+    const count = Number(match[1]);
+    const nextTotal = total + count;
+    return Number.isSafeInteger(count) && Number.isSafeInteger(nextTotal) ? nextTotal : total;
+  }, 0);
+}
+
+function recalculatePickingA1OrderNote(order = currentOrder) {
+  if (!order || String(order.orderType || "picking") !== "picking") {
+    if (order) order.autoOrderNotes = {};
+    return;
+  }
+  const total = packageA1Total(order.lines);
+  order.autoOrderNotes = total > 0 ? { packageA1: `${total} A1` } : {};
+}
+
+function renderAutomaticOrderNotes() {
+  if (!elements.orderPackageA1Total) return;
+  recalculatePickingA1OrderNote(currentOrder);
+  const packageA1 = String(currentOrder?.autoOrderNotes?.packageA1 || "");
+  elements.orderPackageA1Total.textContent = packageA1 ? `Automatische Auftragsnotiz: ${packageA1}` : "";
+  elements.orderPackageA1Total.hidden = !packageA1;
+}
+
 function markDirty() {
   dirty = true;
   changeRevision += 1;
@@ -2138,6 +2403,8 @@ function touchOrder() {
   currentOrder.lastEditedBy = user;
   currentOrder.activeUser = user;
   currentOrder.activeUserAt = now;
+  applyCompletionFieldsToOrder();
+  recalculatePickingA1OrderNote(currentOrder);
 
   if (currentOrder.lines.length && allPicked()) {
     currentOrder.completedBy = currentOrder.completedBy || user;
@@ -2282,10 +2549,7 @@ async function exportPdf() {
       method: "POST",
       body: JSON.stringify({ order: currentOrder, userName: currentUserName() }),
     });
-    if (!exportResult || exportResult.ok !== true) {
-      throw new Error("PDF-Export wurde vom Server nicht bestaetigt.");
-    }
-    await removeQueuedOrderMutations(exportOrderId);
+    await finalizeSuccessfulPdfExport(exportOrderId, exportResult);
     dirty = false;
     clearCurrentOrderCache();
     exportingPdf = false;
@@ -2297,6 +2561,26 @@ async function exportPdf() {
     exportingPdf = false;
     renderTakeOverButton();
   }
+}
+
+async function finalizeSuccessfulPdfExport(orderId, exportResult) {
+  if (!exportResult || exportResult.ok !== true) {
+    throw new Error("PDF-Export wurde vom Server nicht bestaetigt.");
+  }
+  if (currentOrder && String(currentOrder.id || "") === String(orderId || "")) {
+    currentOrder.exportedAt = exportResult.exportedAt || new Date().toISOString();
+  }
+  try {
+    if (window.OfflineStore?.removeOrderCache) {
+      await OfflineStore.removeOrderCache(orderId);
+    } else {
+      await removeQueuedOrderMutations(orderId);
+      await removeOrderCacheEntry(orderId);
+    }
+  } catch {
+    // Der Serverabschluss bleibt erfolgreich; der naechste Online-Abgleich bereinigt den Cache.
+  }
+  return true;
 }
 
 async function reloadCurrentOrderFromServer() {
@@ -2441,6 +2725,7 @@ function updateCounts() {
   elements.doneCount.innerHTML = done;
   elements.openCount.innerHTML = Math.max(lines.length - done, 0);
   elements.changedCount.innerHTML = changed;
+  renderAutomaticOrderNotes();
 }
 
 function allPicked() {
@@ -2550,6 +2835,7 @@ function formatLineQuantityForDisplay(line, value) {
 }
 
 function normalizeOrderQuantitiesForSave(order) {
+  normalizePositionNotesForSave(order);
   (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
     if (!line || line.lineType === "loading-slip") return;
     ["targetQty", "actualQty"].forEach((key) => {
@@ -2558,12 +2844,16 @@ function normalizeOrderQuantitiesForSave(order) {
       const parsed = window.HLogistikQuantityFormat?.parse(text);
       if (Number.isFinite(parsed)) line[key] = String(parsed);
     });
+    if (line.manual === true && !String(line.targetQty ?? "").trim() && String(line.actualQty ?? "").trim()) {
+      line.targetQty = String(line.actualQty).trim();
+    }
     const source = String(line.quantitySourceText || "").trim();
     const effectiveQuantity = String(line.actualQty ?? "").trim() || line.targetQty;
     if (source && window.HLogistikQuantityFormat?.parse(source) !== window.HLogistikQuantityFormat?.parse(effectiveQuantity)) {
       line.quantitySourceText = "";
     }
   });
+  recalculatePickingA1OrderNote(order);
   return order;
 }
 
@@ -2596,6 +2886,7 @@ function setConnectionStatus(value) {
   } else {
     elements.connectionStatus.innerHTML = "Prüfe Verbindung";
   }
+  if (window.HLogistikTransfer && (value === true || value === false)) window.HLogistikTransfer.setOnline(value);
 }
 
 function setMessage(text, isError) {
@@ -2603,8 +2894,15 @@ function setMessage(text, isError) {
   elements.message.innerHTML = escapeHtml(text);
 }
 
+function setHidden(element, hidden) {
+  if (!element) return;
+  element.hidden = hidden;
+  if (hidden) element.setAttribute("hidden", "");
+  else element.removeAttribute("hidden");
+}
+
 async function apiJson(url, options = {}) {
-  const userGroup = localStorage.getItem(USER_GROUP_KEY) || "";
+  const userGroup = tabletApiGroup();
   const { headers: extraHeaders, ...rest } = options;
   if (!rest.cache && String(rest.method || "GET").toUpperCase() === "GET") {
     rest.cache = "no-store";

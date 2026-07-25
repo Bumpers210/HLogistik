@@ -66,7 +66,7 @@ function articleNameMap(warehouse) {
 export function readBookingExport({ warehouse = "", from = "", to = "" } = {}) {
   const warehouseFilter = normalizeOptionalWarehouse(warehouse);
   const { fromDate, toDate, toExclusiveDate } = bookingExportDateBounds(from, to);
-  const movementBaseSql = `SELECT bewegungsart, erstellt_am, lager, lagerplatz, le_nummer, menge_stueck, referenz, materialnummer, id
+  const movementBaseSql = `SELECT bewegungsart, erstellt_am, lager, lagerplatz, le_nummer, menge_stueck, referenz, materialnummer, umlagerung_id, id
        FROM lagerbewegung
        WHERE erstellt_am >= ? AND erstellt_am < ?`;
   const orderSql = ` ORDER BY erstellt_am ASC, lager ASC, lagerplatz COLLATE NOCASE ASC,
@@ -117,8 +117,15 @@ function bookingExportRow(row) {
     stellplatz: String(row.lagerplatz || ""),
     huLeNummer: String(row.le_nummer || ""),
     menge: Number(row.menge_stueck || 0),
-    referenz: String(row.referenz || row.materialnummer || ""),
+    referenz: bookingMovementReference(row),
   };
+}
+
+function bookingMovementReference(row) {
+  const transferId = String(row.umlagerung_id || "").trim();
+  const reference = String(row.referenz || "").trim();
+  if (transferId) return `Umlagerung ${transferId}${reference ? ` - ${reference}` : ""}`;
+  return reference || String(row.materialnummer || "");
 }
 
 function bookingExportErrorRow(row) {
@@ -171,6 +178,8 @@ function bookingDirection(value) {
   const text = String(value || "").trim();
   if (text === "Wareneingang") return "EIN";
   if (text === "Warenausgang") return "AUS";
+  if (text === "Umlagerung-Ausgang") return "UML-AUS";
+  if (text === "Umlagerung-Eingang") return "UML-EIN";
   return "";
 }
 

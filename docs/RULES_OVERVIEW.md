@@ -1,6 +1,6 @@
 # HLogistik Rules Overview
 
-Stand: 2026-07-07 10:35:00 +02:00
+Stand: 2026-07-24 10:16:32 +02:00
 
 ## Regelorte
 
@@ -19,6 +19,8 @@ Weitere regelnahe Listen:
 - `shared/app-pages.mjs`: bekannte App- und Navigationsseiten fuer Node-seitige Nutzung.
 - `server/config/static-files.mjs`: erlaubte statische Serverdateien und Cache-Header-Regeln.
 - `server/reports.mjs`: Buchungsexport-Spalten, Zeitraumvalidierung, read-only Mapping aus `lagerbewegung` sowie Zuordnung von `bestandsbuchung_fehler` zur Auftragsreferenz fuer den Artikelstamm-Excel-Export.
+- `server/storage.mjs`: atomare Umlagerung vollstaendiger Bestandszeilen innerhalb eines Lagers mit Idempotenz, Quellsnapshot-Pruefung und unveraenderten Material-Gesamtsummen.
+- `tablet-transfer.js`: einziger Browser-Controller fuer den in `tablet.html` integrierten Umlagerungsbereich mit Online-/IndexedDB-Suche, Scanner/Kamera, expliziter Buchungsbestaetigung, konkreten Offline-Speicherdiagnosen und lokalen Offline-Entwuerfen ohne Offlinebuchung.
 - `server/original-archive.mjs`: sichere Originaldatei-Archivierung nach erfolgreichem PDF-Export, inklusive Importordner-Schutz, Archivkollisionen und Rename-/Copy-Fallback.
 - `service-worker.js`: klassische Browser-App-Shell-Liste fuer Offline-Cache. Diese Liste bleibt wegen alter Tablet-/Service-Worker-Kompatibilitaet manuell synchronisiert.
 - `order-hint-rules.js`: klassisches Browser-/Test-Helferskript fuer Bestellhinweis-Erkennung und Anhaengen an die importierte Auftragsnummer.
@@ -44,10 +46,15 @@ Weitere regelnahe Listen:
 - Browser-/Tablet-Storage-Keys bleiben bewusst in den jeweiligen Laufzeitdateien, weil sie Offline-Datenkompatibilitaet und bestehende LocalStorage-Namen sichern.
 - Tablet-Ausstiegsregeln fuer manuelle Einlagerung nutzen bestehende Felder (`manualStorageDraft`, `localDraft`, `acceptedBy`, `exportedAt`) und fuehren keine neuen Statuswerte ein.
 - Bestellhinweis-Erkennung bleibt klassisches JavaScript statt JSON, weil Labelsuche, Normalisierung, Kandidaten-Ablehnung und Doppelanhang-Logik Reihenfolge und Regex benoetigen.
-- Manuelle Einlagerungs-Stueckzahl wird weiterhin in den bestehenden Positionsfeldern gespeichert: `actualQty` ist die Stueckzahl, `targetQty` bleibt fuer manuelle Positionen leer. Neue manuelle Stellplaetze starten leer und werden nicht aus dem Artikelstamm vorbelegt.
+- Manuelle Einlagerungs-Stueckzahl bleibt in den bestehenden Positionsfeldern: `targetQty` speichert die Anfangsmenge als unveraenderliche Soll-Basis, `actualQty` die aktuelle Ist-Menge. Nur eine spaetere Ist-Abweichung gilt als Aenderung; neue manuelle Stellplaetze starten weiterhin leer und werden nicht aus dem Artikelstamm vorbelegt.
+- Die automatische A1-Auftragsnotiz wird aus strukturierten `autoPositionNotes.package`-Werten normaler Kommissionierpositionen berechnet, als `autoOrderNotes.packageA1` getrennt von der manuellen `orderNote` gespeichert und in UI sowie PDF separat ausgegeben. Ladelistenpositionen zaehlen nicht.
 - Originaldatei-Archivierung ist bewusst serverseitige Pfadlogik und keine Browserregel: Der Browser liefert nur Dateinamen, der Server loest diese ausschliesslich im konfigurierten Importordner auf.
 - Kommissionier-PDF-Import nutzt die Stellplatz-Regelbasis nur fuer Review-/Diagnoseentscheidungen. Der Von-Lagerplatz kommt aus dem gewaehlten OCR-Tabellenkandidaten; erlaubt sind nur trimmen, Whitespace entfernen und Bindestriche vereinheitlichen. Im eng begrenzten SI-/Bestellschein-Kontext darf ein fehlender oder formal auffaelliger Von-Lagerplatz anhand Artikel und LE/HU aus genau einem eindeutigen Systemtreffer ergaenzt werden; SSI-Lageraufgaben erhalten weiterhin keine allgemeine Bestands-Stellplatzkorrektur.
 - Ladelisten duerfen aus OCR-Nebenkandidaten angehaengt werden. Dabei werden nur Ladelistenpositionen uebernommen; normale Auftragspositionen, Mengen, HU und Stellplaetze bleiben aus dem gewaehlten Hauptkandidaten.
+- Umlagerungen verschieben immer eine vollstaendige Bestandszeile innerhalb desselben Lagers. Menge, Paletten und HU/LE kommen ausschliesslich aus dem erneut geprueften Quellbestand; Teilmengen, Lagerwechsel und HU-/LE-Aenderungen sind nicht erlaubt.
+- Eine Umlagerung erzeugt genau zwei korrelierte Bewegungen `Umlagerung-Ausgang` und `Umlagerung-Eingang`. Sie erscheinen im Buchungsexport als `UML-AUS` und `UML-EIN`, zaehlen aber nicht als normaler Zu- oder Abgang.
+- Umlagerungsentwuerfe bleiben als kleine, ungepruefte Quellsnapshots lokal im Store `transfer-drafts`. Sie werden nie in die bestehende Offline-Sync-Queue gestellt. Daneben wird je Lager ausschliesslich die minimale Projektion aller positiven Bestandszeilen in den Stores `transfer-stock-rows` und `transfer-stock-snapshots` persistiert. Bewegungen und Verlaeufe bleiben online. Eine neue Snapshot-Generation wird in einer gemeinsamen Transaktion mit ihren Metadaten aktiviert; unterbrochene Aktualisierungen lassen die vorherige Generation aktiv. Die Offline-Suche liest den aktiven Store direkt und stellt alle Treffer ohne Gesamtlimit in 20er-Seiten bereit; nur die aktuelle Seite liegt im Arbeitsspeicher und im DOM. Der aktive Entwurf wird beim Wiederverbinden beziehungsweise Oeffnen anhand der Bestands-ID online validiert; bis dahin und bei Konflikten bleibt die Buchung gesperrt.
+- Der Offline-Store bleibt fuer das Legacy-Tablet ES5-parsebar. IndexedDB darf ueber den Standardnamen oder den alten WebKit-Namen bereitgestellt werden; `getAll()` und `DOMStringList.contains()` sind keine Voraussetzung. Fehlende Snapshot-Stores oder -Indizes werden ausschliesslich per Versionsupgrade angelegt, ohne andere Stores zu loeschen oder zu leeren. Ein fehlgeschlagener `readwrite`-Start darf nach Neuvalidierung genau einmal wiederholt werden. Danach entscheidet eine echte Schreib-/Leseprobe ueber das Transfer-Backend. Nur bei deren Fehlschlag darf die isolierte WebSQL-Datenbank fuer Snapshot und ungepruefte Umlagerungsentwuerfe verwendet werden; Auftraege und Sync-Queue bleiben IndexedDB. IndexedDB und WebSQL schreiben seitenweise, aktivieren ausschliesslich vollstaendige Generationen und suchen ohne Gesamtlimit mit `LIMIT`/`OFFSET` beziehungsweise Cursor-Seiten. Diagnosen enthalten Backend und nativen Fehler. Der Bestands-Snapshot hat keinen LocalStorage-Fallback.
 
 ## Regeln aendern
 
@@ -81,6 +88,8 @@ Bei Aenderungen an Originaldatei-Archivierung `server/original-archive.mjs`, `se
 - `HLOGISTIK_EXPORT_DIR`, `EXPORT_DIR` oder `export-path.txt`; Fallback: `./Exporte`.
 
 Bei Aenderungen am Artikelstamm-Buchungsexport `server/reports.mjs`, `server.mjs`, `artikel.html`, `artikel.js` und `scripts/qa-api-matrix.mjs` gemeinsam pruefen. Die Server-Regelquelle fuer Zeitraum, Spalten und Fehlerlog-Auftragszuordnung ist `server/reports.mjs`; die echte XLSX-Erzeugung bleibt im Browser ueber die vorhandene `xlsx.full.min.js`.
+
+Bei Aenderungen an Umlagerungen `server/db.mjs`, `server/storage.mjs`, `server.mjs`, `server/reports.mjs`, `server/rules/permission-rules.mjs`, `tablet.html`, `tablet-transfer.js`, `tablet.js`, `tablet-legacy.js`, `offline-store.js`, Navigation, statische Allowlist, Service Worker, Manifest und die Transfer-Fixtures in `scripts/qa-api-matrix.mjs` gemeinsam pruefen. Es gibt bewusst keine eigenstaendige `umlagerungen.html` und keine zweite Browser-Fachlogik.
 
 Bei Aenderungen am Kommissionier-PDF-Import `app.js`, `app-import-diagnostics.js`, `shared/storage-bin-rules.js`, `index.html`, `service-worker.js`, `manifest.webmanifest`, `server/config/static-files.mjs` und die Parser-Fixtures in `scripts/qa-api-matrix.mjs` gemeinsam pruefen. Wichtig: Von-Lagerplaetze im PDF-Import duerfen nicht pauschal ueber OCR-Zeichenersatz, SSI-Normalisierung oder Bestandsdaten korrigiert werden. Die OCR-Kandidatenbewertung darf nur entscheiden, welcher komplette Kandidat importiert wird; der SI-LE/HU-Systemfill bleibt auf eindeutige SI-/Bestellschein-Treffer beschraenkt.
 

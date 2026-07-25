@@ -136,17 +136,20 @@
 
     var parsedBlocks = blocks.map(function (block, index) {
       var parsedBlockLines = parseLoadingSlipBlockLines(block, dependencies);
+      var rawPositions = loadingSlipRawPositionSignals(block);
       return {
         index: index + 1,
         barcode: String((parsedBlockLines[0] && parsedBlockLines[0].barcode) || extractLoadingSlipHeaderBarcode(block) || "").trim(),
         lines: parsedBlockLines,
+        rawPositions: rawPositions,
+        expected: Math.max(1, parsedBlockLines.length, rawPositions.length),
         parsed: parsedBlockLines.length > 0
       };
     });
 
     var attached = countLoadingSlipLines(normalizedParsedLines);
     var expected = parsedBlocks.reduce(function (total, entry) {
-      return total + Math.max(1, entry.lines.length);
+      return total + entry.expected;
     }, 0);
     var issues = [];
     var missing = parsedBlocks.filter(function (entry) {
@@ -157,6 +160,14 @@
       issues.push(missing.length + " Ladeliste(n) erkannt, aber Barcode/Position konnte nicht eindeutig gelesen werden (" + formatLoadingSlipIndexes(missing) + ").");
     }
 
+    parsedBlocks.forEach(function (entry) {
+      if (entry.rawPositions.length <= entry.lines.length) return;
+      issues.push(
+        "Ladeliste " + entry.index + ": " + entry.rawPositions.length +
+        " Rohposition(en) erkannt, aber nur " + entry.lines.length + " vollstaendig gelesen."
+      );
+    });
+
     if (attached !== expected) {
       issues.push(expected + " Ladeschein-Position(en) erkannt, aber " + attached + " erzeugt.");
     }
@@ -166,6 +177,27 @@
       attached: attached,
       issues: issues
     };
+  }
+
+  function loadingSlipRawPositionSignals(lines) {
+    var quantityWithUnit = /(\d{1,3}(?:[.\s]\d{3})*(?:,\d+)?|\d+(?:[,.]\d+)?)\s*(?:St(?:\u00fc|ue|u|ii|i)ck|STK?|PC|PCS|KG|G|KAR|PCK|PAK|VE|PAL)\b/i;
+    var signals = [];
+
+    (Array.isArray(lines) ? lines : []).forEach(function (line, lineIndex) {
+      var normalized = normalizeLoadingSlipText(line);
+      if (!normalized || isLoadingSlipStartLine(normalized) || isLoadingSlipHeaderBarcodeLine(normalized)) return;
+
+      var quantity = normalized.match(quantityWithUnit);
+      var productArea = quantity ? normalized.slice(0, quantity.index) : normalized;
+      var matches = Array.from(productArea.matchAll(/\b\d{6,8}\b/g));
+      if (!quantity && !/^\d{6,8}\b/.test(productArea)) matches = [];
+
+      matches.forEach(function (match) {
+        signals.push({ line: lineIndex + 1, product: match[0] });
+      });
+    });
+
+    return signals;
   }
 
   function duplicateLoadingSlipBarcodes(entries) {

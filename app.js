@@ -68,6 +68,7 @@ const state = {
   euroPallets: "",
   storageSpaces: "",
   orderNote: "",
+  autoOrderNotes: {},
   rawText: "",
   collapseDone: true,
   createdBy: "",
@@ -146,6 +147,7 @@ function bindElements() {
     "storageModeButton",
     "storageAppLink",
     "articleOverviewNavLink",
+    "transferNavLink",
     "articleNavLink",
     "orderNumber",
     "customerName",
@@ -154,6 +156,7 @@ function bindElements() {
     "euroPallets",
     "storageSpaces",
     "orderNote",
+    "orderPackageA1Total",
     "importProgressWrap",
     "importProgressBar",
     "importStatus",
@@ -268,6 +271,7 @@ function bindEvents() {
       updateCounts();
     });
   });
+  elements.orderNote.addEventListener("change", syncFields);
 }
 
 function configurePdfJs() {
@@ -424,6 +428,7 @@ function applyUserAccess() {
   }
   if (elements.articleNavLink) elements.articleNavLink.hidden = isWarehouse;
   if (elements.articleOverviewNavLink) elements.articleOverviewNavLink.hidden = isWarehouse;
+  if (elements.transferNavLink) elements.transferNavLink.hidden = !HLogistikUi.canAccessTransfers(currentUser.group);
   return true;
 }
 
@@ -1303,6 +1308,9 @@ function normalizeOrderQuantitiesForSave(order) {
       const parsed = window.HLogistikQuantityFormat?.parse(text);
       if (Number.isFinite(parsed)) line[key] = String(parsed);
     });
+    if (line.manual === true && !String(line.targetQty ?? "").trim() && String(line.actualQty ?? "").trim()) {
+      line.targetQty = String(line.actualQty).trim();
+    }
     const source = String(line.quantitySourceText || "").trim();
     const effectiveQuantity = String(line.actualQty ?? "").trim() || line.targetQty;
     if (source && window.HLogistikQuantityFormat?.parse(source) !== window.HLogistikQuantityFormat?.parse(effectiveQuantity)) {
@@ -3877,6 +3885,7 @@ async function importText(text, fileName = "", parsed = parseOrderText(text), im
     ? binResult.lines
     : applyFromBinReviewWarnings(binResult.lines);
   state.lines = await applyPackageNotesForImportedLines(reviewedLines);
+  recalculatePickingA1OrderNote(state);
   const lineDiagnostics = buildPickingImportLineDiagnostics(nextLines, state.lines, { text, diagnostics: importDiagnostics });
   logPickingImportLineDiagnostics(lineDiagnostics, importDiagnostics);
   applyDefaultDestinationCustomer(state.lines);
@@ -4180,13 +4189,11 @@ function siSystemFromBinPatchForLine(line, locations) {
   });
   const reason = ocrRawValue
     ? `OCR-Rohwert ${ocrRawValue} durch eindeutigen LE/HU-Systemtreffer ${systemBin} ersetzt.`
-    : `Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt: ${systemBin}.`;
+    : `Eindeutiger LE/HU-Systemtreffer ${systemBin} als Von-Lagerplatz angewendet.`;
   return {
     changed: true,
     applied: true,
-    note: ocrRawValue
-      ? `Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt (OCR-Rohwert: ${ocrRawValue}; Systemtreffer: ${systemBin}).`
-      : "Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt.",
+    note: "",
     patch: {
       ...reviewPatch,
       fromBin: systemBin,
@@ -4351,7 +4358,7 @@ async function nextStorageOrderNumber() {
 async function findDuplicateOrderForImport(orderNumber, orderType, text = "") {
   const normalizedOrderNumber = String(orderNumber || "").trim().toLowerCase();
   const checkOrderNumber = normalizedOrderNumber && !isReusableOrderNumber(normalizedOrderNumber);
-  const fingerprint = orderFingerprint(text);
+  const fingerprint = checkOrderNumber ? "" : orderFingerprint(text);
   if (!serverOnline || (!checkOrderNumber && !fingerprint)) return null;
   try {
     const params = new URLSearchParams();
@@ -4360,14 +4367,7 @@ async function findDuplicateOrderForImport(orderNumber, orderType, text = "") {
     if (fingerprint) params.set("fingerprint", fingerprint);
     const duplicate = await apiJson(`/api/orders/duplicate-check?${params}`);
     if (duplicate?.duplicate) return duplicate.order;
-
-    const orders = await apiJson("/api/orders?includeExported=1");
-    if (!checkOrderNumber) return null;
-    return orders.find((order) => {
-      if (state.id && order.id === state.id) return false;
-      return String(order.orderNumber || "").trim().toLowerCase() === normalizedOrderNumber &&
-        String(order.orderType || "picking").trim().toLowerCase() === String(orderType || "picking").toLowerCase();
-    }) || null;
+    return null;
   } catch {
     return null;
   }
@@ -4549,6 +4549,37 @@ function parseOrderText(text) {
   };
 }
 
+function pickingXlsxImportText(preview) {
+  const sheetName = String(preview?.sheetName || "Tabelle").trim() || "Tabelle";
+  const rows = (Array.isArray(preview?.lines) ? preview.lines : [])
+    .filter((line) => line?.lineType !== "loading-slip")
+    .map((line) => [
+    line?.sourceRow,
+    line?.warehouseOrder,
+    line?.fromHandlingUnit,
+    line?.fromBin,
+    line?.product,
+    line?.description,
+    line?.targetQty,
+    line?.unit,
+    line?.toBin
+    ].map((value) => String(value ?? "").trim()).join(" | "));
+  const source = rows.join("\n");
+  return [`XLSX-Blatt ${sheetName}`, `XLSX-Fingerprint: ${pickingXlsxFingerprint(source)}`, source]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function pickingXlsxFingerprint(source) {
+  let hash = 2166136261;
+  const text = String(source || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (`00000000${(hash >>> 0).toString(16)}`).slice(-8);
+}
+
 async function handlePickingXlsxUpload(file) {
   if (currentMode === "storage") {
     setImportStatus("XLSX-Kommissionierimporte sind nur im Modus Kommissionierung zulässig.", "error", 100);
@@ -4573,7 +4604,7 @@ async function handlePickingXlsxUpload(file) {
     orderNumber: "",
     customerName: "",
     customerGroupKey: "",
-    lines: preview.lines.map((line) => createLine(line))
+    lines: annotateDestinationExceptions(preview.lines).map((line) => createLine(line))
   };
   const diagnostics = {
     source: "xlsx",
@@ -4585,7 +4616,7 @@ async function handlePickingXlsxUpload(file) {
     ignoredRowCount: preview.ignoredRows.length,
     hardErrorCount: preview.hardErrors.length
   };
-  const result = await importText(`XLSX-Blatt ${preview.sheetName}`, file.name, parsed, diagnostics);
+  const result = await importText(pickingXlsxImportText(preview), file.name, parsed, diagnostics);
   if (result.cancelled) {
     setImportStatus(result.message || "XLSX-Import abgebrochen.", result.type || "warning", 100);
     return;
@@ -5876,6 +5907,19 @@ function combinedPositionNote(line) {
   return window.HLogistikImportLineHelpers.combinedPositionNote(line);
 }
 
+function manualPositionNoteFromInput(value, line) {
+  return window.HLogistikImportLineHelpers.manualPositionNoteFromInput(value, line);
+}
+
+function normalizePositionNotesForSave(order) {
+  (Array.isArray(order?.lines) ? order.lines : []).forEach((line) => {
+    if (!line) return;
+    line.autoPositionNotes = normalizeAutoPositionNotes(line.autoPositionNotes);
+    line.positionNote = manualPositionNoteFromInput(line.positionNote, line);
+  });
+  return order;
+}
+
 // eslint-disable-next-line no-unused-vars
 function combineUniqueNoteParts(parts) {
   return window.HLogistikImportLineHelpers.combineUniqueNoteParts(parts);
@@ -5896,9 +5940,10 @@ async function refreshPackageNoteForLine(line) {
   if (!line || line.lineType === "loading-slip") return false;
   const article = await articleForPackageNote(line.product);
   const next = setAutoPositionNote(line.autoPositionNotes, "package", packageNoteForLine(line, article));
-  if (JSON.stringify(next) === JSON.stringify(normalizeAutoPositionNotes(line.autoPositionNotes))) return false;
+  const packageChanged = JSON.stringify(next) !== JSON.stringify(normalizeAutoPositionNotes(line.autoPositionNotes));
   line.autoPositionNotes = next;
-  return true;
+  const orderNoteChanged = recalculatePickingA1OrderNote(state);
+  return packageChanged || orderNoteChanged;
 }
 
 async function articleForPackageNote(material) {
@@ -5921,6 +5966,32 @@ function packageNoteForLine(line, article) {
   const packageType = String(article?.gebindeArt || "").trim().toUpperCase();
   if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(quantityPerPackage) || quantityPerPackage <= 0 || !packageType) return "";
   return `${Math.ceil(quantity / quantityPerPackage)}${packageType}`;
+}
+
+function packageA1Total(lines) {
+  return (Array.isArray(lines) ? lines : []).reduce((total, line) => {
+    if (!line || line.lineType === "loading-slip") return total;
+    const match = String(line.autoPositionNotes?.package || "").trim().match(/^([1-9]\d*)A1$/);
+    if (!match) return total;
+    const count = Number(match[1]);
+    const nextTotal = total + count;
+    return Number.isSafeInteger(count) && Number.isSafeInteger(nextTotal) ? nextTotal : total;
+  }, 0);
+}
+
+function normalizeAutoOrderNotes(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const packageA1 = String(value.packageA1 || "").trim();
+  return packageA1 ? { packageA1 } : {};
+}
+
+function recalculatePickingA1OrderNote(order = state) {
+  if ((order?.orderType || currentMode) !== "picking") return false;
+  const previous = normalizeAutoOrderNotes(order.autoOrderNotes);
+  const total = packageA1Total(order.lines);
+  const next = total > 0 ? { packageA1: `${total} A1` } : {};
+  order.autoOrderNotes = next;
+  return JSON.stringify(next) !== JSON.stringify(previous);
 }
 
 function findFirst(text, patterns) {
@@ -6133,7 +6204,7 @@ function render() {
       map.actualQty.placeholder = "Stückzahl";
       map.actualQty.setAttribute("aria-label", "Stückzahl");
     } else {
-      map.targetQty.readOnly = true;
+      map.targetQty.readOnly = isStorageLine;
       map.actualQty.placeholder = "Ist";
       map.actualQty.setAttribute("aria-label", "Ist");
     }
@@ -6161,7 +6232,7 @@ function render() {
       if (useSsiStorageHuPrefix) map.fromHandlingUnit.value = normalizeSsiStorageHandlingUnit(map.fromHandlingUnit.value);
       updateLine(line.id, { fromHandlingUnit: map.fromHandlingUnit.value, fromHandlingUnitEditable: canEditHandlingUnit }, false);
     });
-    map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
+    map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: manualPositionNoteFromInput(map.positionNote.value, line) }, false));
     map.fromBin.addEventListener("input", () => {
       const skipFromBinReview = isPickingXlsxOrder();
       if (canEditBin && !skipFromBinReview) map.fromBin.value = map.fromBin.value.toUpperCase();
@@ -6331,6 +6402,7 @@ async function addManualStorageLine() {
 }
 
 function createManualStorageLine(preset = {}, options = {}) {
+  const quantity = options.actualQty || "";
   return createLine({
     orderType: "storage",
     manual: true,
@@ -6340,8 +6412,8 @@ function createManualStorageLine(preset = {}, options = {}) {
     product: preset.product || "",
     description: preset.description || "",
     fromBin: options.fromBin || "",
-    targetQty: "",
-    actualQty: options.actualQty || "",
+    targetQty: quantity,
+    actualQty: quantity,
     unit: preset.unit || "Stk"
   });
 }
@@ -7044,6 +7116,14 @@ function syncFields() {
   ["orderNumber", "customerName", "orderDate", "orderTime", "euroPallets", "storageSpaces", "orderNote"].forEach((id) => {
     if (elements[id].value !== state[id]) elements[id].value = state[id] || "";
   });
+  renderAutomaticOrderNotes();
+}
+
+function renderAutomaticOrderNotes() {
+  if (!elements.orderPackageA1Total) return;
+  const packageA1 = String(normalizeAutoOrderNotes(state.autoOrderNotes).packageA1 || "");
+  elements.orderPackageA1Total.textContent = packageA1 ? `Automatisch: ${packageA1} gesamt` : "";
+  elements.orderPackageA1Total.hidden = !packageA1;
 }
 
 function renderLoadingSlipLine(item, map, line) {
@@ -7063,7 +7143,7 @@ function renderLoadingSlipLine(item, map, line) {
   removeClosestLabelOrElement(map.unit);
   removeClosestLabelOrElement(map.fromHandlingUnit);
   map.positionNote.value = combinedPositionNote(line);
-  map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: map.positionNote.value }, false));
+  map.positionNote.addEventListener("input", () => updateLine(line.id, { positionNote: manualPositionNoteFromInput(map.positionNote.value, line) }, false));
 
   map.picked.setAttribute("aria-pressed", line.picked ? "true" : "false");
   map.picked.addEventListener("click", (event) => {
@@ -7106,7 +7186,7 @@ function syncLineFieldsFromDom() {
     if (pickedButton) line.picked = pickedButton.getAttribute("aria-pressed") === "true";
 
     const noteInput = item.querySelector(".position-note-input");
-    if (noteInput) line.positionNote = noteInput.value;
+    if (noteInput) line.positionNote = manualPositionNoteFromInput(noteInput.value, line);
 
     if (line.lineType === "loading-slip") return;
 
@@ -7868,9 +7948,10 @@ async function releaseCurrentOrderActivity() {
 
 function currentOrderPayload({ touch = true } = {}) {
   if (touch) markOrderTouched();
+  recalculatePickingA1OrderNote(state);
   const orderType = state.orderType || currentMode;
   const orderWarehouse = normalizeOptionalWarehouse(state.orderWarehouse) || currentWarehouse();
-  const lines = normalizeStorageHandlingUnits(state.lines, isSsiStorageOrderContext(orderType, state.customerName));
+  const lines = normalizePositionNotesForSave(normalizeStorageHandlingUnits(state.lines, isSsiStorageOrderContext(orderType, state.customerName)));
   const destinationCustomerName = orderType === "picking" ? defaultDestinationCustomerName(lines) : "";
   const customerName = destinationCustomerName || state.customerName;
   const customerGroupKey = destinationCustomerName
@@ -7887,6 +7968,7 @@ function currentOrderPayload({ touch = true } = {}) {
     euroPallets: state.euroPallets,
     storageSpaces: state.storageSpaces,
     orderNote: state.orderNote,
+    autoOrderNotes: normalizeAutoOrderNotes(state.autoOrderNotes),
     rawText: state.rawText,
     collapseDone: true,
     createdBy: state.createdBy,
@@ -7912,6 +7994,8 @@ function currentOrderPayload({ touch = true } = {}) {
 }
 
 function saveStateWithoutServer() {
+  recalculatePickingA1OrderNote(state);
+  normalizePositionNotesForSave(state);
   writeLocalState(STORAGE_KEY, state);
   persistCurrentOrderCache();
 }
@@ -7933,6 +8017,8 @@ function saveAndRender() {
 }
 
 function saveState() {
+  recalculatePickingA1OrderNote(state);
+  normalizePositionNotesForSave(state);
   writeLocalState(STORAGE_KEY, state);
   persistCurrentOrderCache();
   scheduleServerSave();
@@ -8032,6 +8118,7 @@ function clearCurrentOrder() {
     euroPallets: "",
     storageSpaces: "",
     orderNote: "",
+    autoOrderNotes: {},
     rawText: "",
     collapseDone: true,
     createdBy: "",

@@ -38,7 +38,10 @@ import {
 } from "./server/articles.mjs";
 import {
   readStorageLocations,
+  readStorageLocationSnapshot,
   readStorageMovements,
+  readStorageTransfers,
+  bookStorageTransfer,
   bookStorageReceipt,
   bookStorageReceipts,
   bookStorageIssue,
@@ -66,7 +69,7 @@ import {
   normalizeOrder,
   orderSummary,
 } from "./server/orders.mjs";
-import { exportPdf } from "./server/export.mjs";
+import { exportPdf, exportStorageTransferPdf } from "./server/export.mjs";
 import { archiveOriginalImportFile, resolveOriginalImportFile } from "./server/original-archive.mjs";
 import { isPublicStaticFile, staticCacheHeaders } from "./server/config/static-files.mjs";
 import { ROLE_PERMISSIONS, hasGroupPermission } from "./server/rules/permission-rules.mjs";
@@ -210,11 +213,22 @@ async function route(request, response) {
     return;
   }
 
+  // Storage location snapshot (minimal offline transfer projection)
+  if (pathname === "/api/storage/locations/snapshot" && request.method === "GET") {
+    const offset = url.searchParams.has("offset") ? readInteger(url.searchParams.get("offset")) : 0;
+    const limit = url.searchParams.has("limit") ? readInteger(url.searchParams.get("limit")) : 0;
+    sendJson(response, 200, readStorageLocationSnapshot({ warehouse, offset, limit }));
+    return;
+  }
+
   // Storage locations
   if (pathname === "/api/storage/locations" && request.method === "GET") {
     const query = url.searchParams.get("q") || "";
     const materialnummer = url.searchParams.get("materialnummer") || "";
-    sendJson(response, 200, readStorageLocations({ query, materialnummer, warehouse }));
+    const locationId = url.searchParams.get("id") || "";
+    const offset = url.searchParams.has("offset") ? readInteger(url.searchParams.get("offset")) : 0;
+    const limit = url.searchParams.has("limit") ? readInteger(url.searchParams.get("limit")) : 0;
+    sendJson(response, 200, readStorageLocations({ query, materialnummer, locationId, offset, limit, warehouse }));
     return;
   }
 
@@ -331,6 +345,34 @@ async function route(request, response) {
     requireSiWarehouse(warehouse);
     const body = await readBody(request, siStockImportMaxBodyBytes);
     sendJson(response, 200, { ok: true, preview: previewSiStockImportRows(body) });
+    return;
+  }
+
+  // Atomic storage transfers
+  if (pathname === "/api/storage/transfers" && request.method === "GET") {
+    requireGroup(request, ROLE_PERMISSIONS.storageTransfer);
+    const query = url.searchParams.get("q") || "";
+    const limit = readInteger(url.searchParams.get("limit") || 100);
+    sendJson(response, 200, readStorageTransfers({ query, limit, warehouse }));
+    return;
+  }
+  if (pathname === "/api/storage/transfers" && request.method === "POST") {
+    requireGroup(request, ROLE_PERMISSIONS.storageTransfer);
+    const body = await readBody(request, maxBodyBytes);
+    const result = bookStorageTransfer(body.transfer || body, warehouse);
+    const transferPdf = await exportStorageTransferPdf(
+      result.transfer,
+      exportDir,
+      tempDir,
+      requestOrigin(request),
+      defaultExportDir,
+      {
+        discard: isQaDiscardExportRequest(request, result.transfer),
+        preserveTempArtifacts: isQaPreserveArtifactsRequest(request, result.transfer),
+        exportedAt: new Date().toISOString()
+      }
+    );
+    sendJson(response, 200, { ok: true, ...result, pdf: transferPdf });
     return;
   }
 
@@ -1039,18 +1081,22 @@ function findDuplicateOrder(order, excludeId = "") {
   const checkOrderNumber = orderNumber && !isReusableOrderNumber(orderNumber);
   const orderType = String(order.orderType || "picking").trim().toLowerCase();
   if (orderType === "storage") return null;
+
+  const sameTypeOrders = readOrders().filter((entry) =>
+    (!excludeId || entry.id !== excludeId) &&
+      String(entry.orderType || "picking").trim().toLowerCase() === orderType
+  );
+  if (checkOrderNumber) {
+    return sameTypeOrders.find((entry) =>
+      String(entry.orderNumber || "").trim().toLowerCase() === orderNumber
+    ) || null;
+  }
+
   const fingerprint = orderFingerprint(order.rawText);
-  if (!checkOrderNumber && !fingerprint) return null;
-
-  return readOrders().find((entry) => {
-    if (excludeId && entry.id === excludeId) return false;
-    if (String(entry.orderType || "picking").trim().toLowerCase() !== orderType) return false;
-
-    const entryOrderNumber = String(entry.orderNumber || "").trim().toLowerCase();
-    if (checkOrderNumber && entryOrderNumber && entryOrderNumber === orderNumber) return true;
-
+  if (!fingerprint) return null;
+  return sameTypeOrders.find((entry) => {
     const entryFingerprint = orderFingerprint(entry.rawText);
-    return Boolean(fingerprint && entryFingerprint && entryFingerprint === fingerprint);
+    return Boolean(entryFingerprint && entryFingerprint === fingerprint);
   }) || null;
 }
 
@@ -1361,6 +1407,7 @@ function resetArticleMasterData() {
   try {
     db.prepare("DELETE FROM lagerbestand").run();
     db.prepare("DELETE FROM lagerbewegung").run();
+    db.prepare("DELETE FROM umlagerung").run();
     db.prepare("DELETE FROM bestandsbuchung_fehler").run();
     db.exec("COMMIT");
     db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
@@ -1408,6 +1455,7 @@ function articleMasterCounts() {
     artikelSi: countRows(getArticleDb("SI"), "artikel"),
     lagerbestand: countRows(getDb(), "lagerbestand"),
     lagerbewegung: countRows(getDb(), "lagerbewegung"),
+    umlagerungen: countRows(getDb(), "umlagerung"),
     bestandsbuchungFehler: countRows(getDb(), "bestandsbuchung_fehler"),
     auftraege: countRows(getDb(), "auftraege")
   };
@@ -1427,12 +1475,12 @@ function requestOrigin(request) {
   return `${protocol}://${host}`;
 }
 
-function isQaDiscardExportRequest(request, order) {
-  return isTruthyHeader(request.headers["x-qa-discard-export"]) && isLoopbackRequest(request) && isQaOrder(order);
+function isQaDiscardExportRequest(request, subject) {
+  return isTruthyHeader(request.headers["x-qa-discard-export"]) && isLoopbackRequest(request) && isQaExportSubject(subject);
 }
 
-function isQaPreserveArtifactsRequest(request, order) {
-  return isTruthyHeader(request.headers["x-qa-preserve-artifacts"]) && isLoopbackRequest(request) && isQaOrder(order);
+function isQaPreserveArtifactsRequest(request, subject) {
+  return isTruthyHeader(request.headers["x-qa-preserve-artifacts"]) && isLoopbackRequest(request) && isQaExportSubject(subject);
 }
 
 function isTruthyHeader(value) {
@@ -1455,6 +1503,21 @@ function isQaOrder(order) {
       : [])
   ];
   return values.some((value) => /^QA[-_]/i.test(String(value || "").trim()));
+}
+
+function isQaTransfer(transfer) {
+  const values = [
+    transfer?.id,
+    transfer?.materialnummer,
+    transfer?.leNummer,
+    transfer?.referenz,
+    transfer?.gebuchtVon,
+  ];
+  return values.some((value) => /^QA[-_]/i.test(String(value || "").trim()));
+}
+
+function isQaExportSubject(subject) {
+  return isQaOrder(subject) || isQaTransfer(subject);
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

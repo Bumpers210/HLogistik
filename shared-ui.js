@@ -39,6 +39,10 @@
     return group === "buero" || group === "verwaltung" ? "Buchung" : "Einlagern";
   }
 
+  function canAccessTransfers(group) {
+    return group === "buero" || group === "tablet" || group === "verwaltung";
+  }
+
   function currentUser() {
     return {
       name: localStorage.getItem(USER_KEY) || "",
@@ -167,6 +171,7 @@
     setConnectionStatus: setConnectionStatus,
     setStatus: setStatus,
     storageNavLabel: storageNavLabel,
+    canAccessTransfers: canAccessTransfers,
     userGroupLabel: userGroupLabel
   };
 })();

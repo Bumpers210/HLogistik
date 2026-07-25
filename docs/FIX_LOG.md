@@ -1,6 +1,217 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-08 08:05:00 +02:00
+Stand: 2026-07-24 10:16:32 +02:00
+
+## 2026-07-24 - Regressionsfix fuer manuelle Einlagerungszeilen und A1-Auftragsnotiz
+
+Umgesetzt:
+
+- Manuell angelegte Einlagerungszeilen speichern ihre Anfangsmenge als Soll-Basis. Dadurch bleiben sie nach Aktualisierung, Speichern und Wiederoeffnen unveraendert; erst eine spaetere Abweichung der Ist-Menge wird markiert.
+- Vorhandene manuelle Altzeilen ohne Soll-Basis erhalten beim naechsten Speichern serverseitig kontrolliert ihre aktuelle Ist-Menge als Basis, ohne andere Positionsdaten zu veraendern.
+- Die berechnete A1-Gesamtsumme wird als `autoOrderNotes.packageA1` getrennt von `orderNote` in SQLite gespeichert, auf Desktop sowie Modern-/Legacy-Tablet separat angezeigt und im Kommissionier-PDF als eigene Auftragsnotiz ausgegeben. Ladelisten bleiben ausgeschlossen.
+- Asset-/Cachestand: `app.js?v=20260724-3`, `tablet-legacy.js?v=20260724-4`, `tablet.css?v=20260724-3`, Service Worker/Manifest `1.5.209`.
+
+Validierung:
+
+- Die Regressionstests pruefen Anfangszustand, Aktualisierung, Speichern, Wiederoeffnen und echte spaetere Mengenabweichungen fuer manuelle Einlagerungszeilen.
+- A1-QA prueft die strukturelle Trennung, unveraenderte manuelle Notizen, Modern-/Legacy-Anzeige, Serverpersistenz, Ladelistenausschluss und getrennte PDF-Ausgabe.
+- Vollstaendige QA-Matrix auf frischer isolierter QA-Datenbank und Port `4175`: 252/252 erfolgreich.
+- Browser-Smoke auf Port `4175`: manuelle Einlagerungszeile blieb nach Aktualisierung, Speichern und Reload bei `0 korrigiert` und wechselte erst nach einer echten Mengenabweichung auf `1 korrigiert`; die A1-Notiz blieb nach Reload getrennt sichtbar. Der reale einseitige PDF-Export enthielt manuelle und automatische Auftragsnotiz getrennt und keine Ladelistenposition.
+
+## 2026-07-24 - Automatischer PDF-Beleg nach Umlagerung
+
+Umgesetzt:
+
+- `POST /api/storage/transfers` erzeugt erst nach erfolgreicher beziehungsweise idempotent wiederholter Buchung automatisch einen PDF-Beleg.
+- Der Beleg verwendet dieselbe Headless-Browser-, Artefaktpruefungs-, Bereinigungs- und Kopierlogik wie die Einlagerungs-PDF. Er enthaelt genau eine gebuchte Umlagerung mit `Artikelnummer`, `HU`, `Menge`, `Von-Stellplatz` und `Nach-Stellplatz`.
+- Der gemeinsame Umlagerungscontroller fuer modernes und Legacy-Tablet zeigt danach getrennte Aktionen fuer Download und `PDF oeffnen / drucken`.
+- Asset-/Cachestand: `tablet-transfer.js?v=20260724-4`, `tablet.css?v=20260724-2`, Service Worker/Manifest `1.5.208`.
+
+Validierung:
+
+- Die API-QA prueft Layout und Spalten, ein echtes `%PDF`-Artefakt, idempotenten Dateinamen sowie das Fehlen eines PDF-Ergebnisses bei abgelehnter Buchung.
+- Vollstaendige QA-Matrix auf frischer isolierter QA-Datenbank und Port `4175`: 250/250 erfolgreich.
+- Browser-Smoke auf Port `4175`: erfolgreiche Umlagerung, sichtbare Download-/Druckaktionen, ausgeloester Download und im PDF-Viewer geoeffneter einseitiger Umlagerungsbeleg mit den gebuchten Werten.
+
+## 2026-07-24 - Vollstaendige Umlagerungssuche ohne 25er-Gesamtlimit
+
+Umgesetzt:
+
+- Der Snapshot enthaelt weiterhin alle positiven Bestandszeilen des gewaehlten Lagers. IndexedDB und WebSQL schreiben ihn jetzt fuer Modern und Legacy seitenweise, ohne die vollstaendige Datenmenge im JavaScript-Arbeitsspeicher zu halten.
+- Online- und Offline-Suche sind ohne Gesamtlimit ueber `Weitere Treffer` und `Vorherige Treffer` vollstaendig navigierbar. Pro sichtbarer Seite werden ressourcenschonend nur 20 Zeilen geladen und gerendert.
+- `2. Ziel` steht in voller Breite direkt unter `1. Quelle`.
+- Asset-/Cachestand: `offline-store.js?v=20260724-2`, `tablet-transfer.js?v=20260724-3`, `tablet.css?v=20260724-1`, Service Worker/Manifest `1.5.207`, Snapshot-API 6.
+
+Validierung:
+
+- iOS-9-nahe IndexedDB-QA und WebSQL-QA pruefen seitenweises Schreiben, Reload und die vollstaendige Navigation ueber mehrere Trefferseiten.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 247/247 erfolgreich.
+- Browser-Smoke auf Port `4175`: 40-Zeilen-Snapshot, 20 Treffer auf Seite 1, weitere 15 Treffer auf Seite 2 sowie Zielbereich direkt unter der Quelle.
+
+## 2026-07-24 - Snapshot-Erfolgsanzeige auf Bestandszeilen reduzieren
+
+Umgesetzt:
+
+- Modernes und Legacy-Tablet verwenden im gemeinsamen Umlagerungsbereich nach erfolgreichem Snapshot-Abschluss nur noch die Anzeige `[Anzahl] positive Bestandszeilen`.
+- Lager, Zeitpunkt, Generation, Speicher-Backend und technische Details werden im normalen Erfolgszustand nicht mehr angezeigt.
+- Ladeanzeige und konkrete Fehlerdiagnosen behalten die bisherigen Status-, Backend- und Fehlerdetails.
+- Asset-/Cachestand: `tablet-transfer.js?v=20260724-2`, Service Worker/Manifest `1.5.206`.
+
+Validierung:
+
+- QA prueft den exakten Erfolgstext, das Fehlen technischer Erfolgsdetails sowie die unveraenderten Lade- und Fehlerdiagnosen fuer den von Modern und Legacy gemeinsam verwendeten Controller.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 247/247 erfolgreich.
+
+## 2026-07-24 - Aktiven Tablet-Auftrag beim Wechsel zur Umlagerung erhalten
+
+Ursache:
+
+- Der gemeinsame Moduswechsel blockierte einen angenommenen Kommissionierungs- oder Einlagerungsauftrag vor dem Wechsel zur Umlagerung.
+- Nach einem erlaubten Moduswechsel wurde immer `resetToStart()` ausgefuehrt. Damit gingen der geoeffnete Auftrag, sein Dirty-Status und der lokale Absturz-Cache verloren.
+
+Umgesetzt:
+
+- Modernes und Legacy-Tablet behandeln nur den Wechsel `aktiver Auftrag -> Umlagerung -> zugehoeriger Auftragsbereich` zustandserhaltend.
+- Auftrag, Positionen, Mengen, Notizen, Dirty-Status und lokaler Auftragscache bleiben unveraendert; es wird weder beendet, verworfen noch zurueckgesetzt.
+- Direkte Wechsel zwischen Kommissionierung und Einlagerung bleiben bei aktivem Auftrag gesperrt. Der bestehende Schutz fuer einen ungespeicherten Umlagerungsentwurf bleibt ebenfalls aktiv.
+- Asset-/Cachestand: `tablet-legacy.js?v=20260724-3`, Service Worker/Manifest `1.5.205`.
+
+Validierung:
+
+- QA prueft Kommissionierung und Einlagerung jeweils im modernen und Legacy-Tablet inklusive vollstaendigem Zustandsvergleich, Dirty-Status, Cacheinhalt und unveraendertem Schutz des anderen Auftragsbereichs.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 246/246 erfolgreich.
+- Browser-Smoke auf Port `4175`: angenommenen Kommissionierungsauftrag geaendert, Umlagerung geoeffnet, zurueckgewechselt und Menge/Notiz unveraendert wiedergefunden; Einlagerungswechsel blieb gesperrt.
+
+## 2026-07-24 - SI-LE/HU-Erfolgshinweis aus Zusatzbemerkung entfernt
+
+Ursache:
+
+- Beim eindeutigen Ergaenzen eines SI-Von-Lagerplatzes aus dem LE/HU-System wurde der technische Erfolgshinweis `Von-Lagerplatz aus LE/HU-System eindeutig ergaenzt.` als automatische Zusatzbemerkung erzeugt und mit dem Auftrag gespeichert.
+
+Umgesetzt:
+
+- Der eindeutige Systemtreffer ergaenzt weiterhin den Von-Lagerplatz und behaelt seine strukturierten Diagnosedaten, erzeugt aber keine Zusatzbemerkung mehr.
+- Desktop, modernes Tablet und Legacy-Tablet entfernen den alten Erfolgshinweis beim Anzeigen und vor dem Speichern. Andere manuelle und automatische Bemerkungsteile bleiben unveraendert.
+- Der Server bereinigt denselben Alttext vor jedem Speichern und beim Laden vorhandener Auftraege. Der technische Lookup-Grund wird ohne den entfernten Zusatzbemerkungstext formuliert.
+- Asset-/Cachestand: `app-import-line-helpers.js?v=20260724-2`, `app.js?v=20260724-2`, `tablet-legacy.js?v=20260724-2`, Service Worker/Manifest `1.5.204`.
+
+Validierung:
+
+- QA prueft Erzeugung, Desktop, modernes Tablet, Legacy-Tablet sowie serverseitiges Speichern und Wiederladen. Zwei umgebende manuelle Bemerkungen und ein anderer automatischer Hinweis bleiben wortgleich erhalten.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 244/244 erfolgreich.
+
+## 2026-07-24 - IndexedDB-Fehlpositiv auf iPad 2
+
+Ursache:
+
+- Die bisherige IndexedDB-Bereitschaftspruefung testete nur den Hilfs-Store `transfer-storage-probe`.
+- Der echte Snapshot startet dagegen eine gemeinsame `readwrite`-Transaktion ueber `transfer-stock-rows` und `transfer-stock-snapshots`. Safari 9 konnte deshalb die Einzel-Store-Probe bestehen und anschliessend den Snapshot-Start trotz DB-Version 7 und gemeldeter Stores mit `NotFoundError` ablehnen.
+
+Umgesetzt:
+
+- Die Probe verwendet jetzt exakt dieselbe Zwei-Store-Transaktion wie der Snapshot und weist Schreiben sowie anschliessendes Lesen in beiden Stores nach.
+- Ein `NotFoundError` bei Transaktionsstart, Schreiben oder Lesen markiert IndexedDB fuer die laufende Sitzung als unbrauchbar. Weitere IndexedDB-Versuche werden unterbunden.
+- Schlaegt erst die anschliessende Snapshot-Transaktion mit `NotFoundError` fehl, wird derselbe vollstaendige Snapshot automatisch und atomar in WebSQL neu geschrieben. Das aktive Backend wird danach sofort sichtbar als `WebSQL (Legacy-Fallback)` ausgegeben.
+- Der Fehlerpfad loescht oder migriert keine IndexedDB. Auftraege, Sync-Queue und vorhandene Entwuerfe bleiben erhalten; Umlagerungsentwuerfe werden lediglich nicht-destruktiv in den isolierten WebSQL-Fallback kopiert.
+- Asset-/Cachestand: `offline-store.js?v=20260724-1`, `tablet-transfer.js?v=20260724-1`, Service Worker/Manifest `1.5.203`, Snapshot-API 5.
+
+Validierung:
+
+- DB-Version 7 mit den gemeldeten acht Stores wurde ohne Versionsupgrade reproduziert. Die QA weist den Fehlpositiv-Fall, den automatischen WebSQL-Neustart, unterbundene Wiederholungsversuche, Reload und Offline-Suche nach.
+- `NotFoundError` bei Start, Schreiben und Lesen der Zwei-Store-Probe wird jeweils einmalig auf WebSQL umgeschaltet.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 242/242 erfolgreich.
+
+## 2026-07-22 - Isolierter WebSQL-Fallback fuer iPad 2
+
+Ursache:
+
+- Auf iOS 9 kann IndexedDB formal vorhanden und schemafaehig sein, waehrend echte Schreib-/Lesezugriffe auf den Backing Store mit `UnknownError` oder vergleichbaren nativen Fehlern scheitern.
+- Die bisherige Bereitschaftspruefung validierte Schema und Transaktionsstart, aber keinen geschriebenen und wieder gelesenen Probewert.
+
+Umgesetzt:
+
+- IndexedDB bleibt Standard und erhaelt eine isolierte Probetabelle. Erst wenn Schreiben, Lesen, Wertvergleich und Loeschen des Probewerts nicht erfolgreich abgeschlossen werden, wird WebSQL gewaehlt.
+- Die eigene WebSQL-Datenbank `hlogistik-transfer-legacy` enthaelt ausschliesslich Snapshot-Metadaten, Snapshot-Zeilen, ungepruefte Umlagerungsentwuerfe und eine Probetabelle. Auftraege, Kommissionierung, Einlagerung und Sync-Queue bleiben auf ihrem unveraenderten IndexedDB-Pfad.
+- WebSQL-Snapshots werden seitenweise mit hoechstens 100 Zeilen in eine inaktive Generation geschrieben. Der Server liefert dazu einen stabilen Inhalts-Hash. Nur bei unveraendertem Hash und exakt vollstaendiger Zeilenzahl wird die Metadatenzeile atomar umgeschaltet; alte oder unvollstaendige Generationen werden nie als aktuell angezeigt.
+- Offline-Suchen laufen als SQL-Abfrage nach Artikel, Barcode, Stellplatz und HU/LE mit `LIMIT 25`; der Gesamtbestand wird nicht als Sucharray in den iPad-Arbeitsspeicher geladen.
+- Der Tablet-Status zeigt `IndexedDB` oder `WebSQL (Legacy-Fallback)` und im Fallback den konkreten IndexedDB-Probefehler. Kein LocalStorage-Fallback.
+- Asset-/Cachestand: `offline-store.js?v=20260722-5`, `tablet-transfer.js?v=20260722-8`, Service Worker/Manifest `1.5.202`, IndexedDB-Schema 7.
+
+Validierung:
+
+- QA ohne funktionsfaehiges IndexedDB-Backend: WebSQL-Initialisierung, 60-Zeilen-Snapshot in drei Seiten, Reload, Suche nach Artikel/Barcode/Stellplatz/HU, ungepruefter Entwurf, Wiederverbindung und Konfliktsperre erfolgreich.
+- Eine absichtlich unvollstaendige WebSQL-Generation wurde mit `WEBSQL_SNAPSHOT_INCOMPLETE` abgelehnt; der vorherige vollstaendige Snapshot blieb aktiv.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 240/240 erfolgreich.
+
+## 2026-07-22 - iOS-9-Snapshot-Schema kontrolliert reparieren
+
+Ursache:
+
+- `IDB_SNAPSHOT_WRITE_START_FAILED` entstand synchron beim Start der gemeinsamen `readwrite`-Transaktion, wenn Safari einen der Stores `transfer-stock-rows` oder `transfer-stock-snapshots` nicht in der geoeffneten Verbindung fand. Ein bereits auf die konfigurierte Versionsnummer angehobenes, aber unvollstaendiges Schema loeste kein weiteres `onupgradeneeded` mehr aus.
+- Die bisherige Diagnose zeigte nicht durchgaengig den nativen Fehlernamen und -text, die tatsaechliche DB-Version und die vorhandenen Object-Stores.
+
+Umgesetzt:
+
+- Der Offline-Store oeffnet zuerst die vorhandene Ist-Version, prueft Snapshot-Stores und -Indizes und erhoeht nur bei Bedarf kontrolliert auf mindestens Version 6 beziehungsweise bei bereits gleicher unvollstaendiger Version um genau eine Version.
+- Das Upgrade legt ausschliesslich fehlende Stores und Indizes an. Auftraege, Zusammenfassungen, Gruppen, Umlagerungsentwuerfe und Sync-Queue werden weder geloescht noch geleert.
+- Ein synchron fehlgeschlagener Snapshot-Transaktionsstart schliesst die Verbindung, validiert beziehungsweise repariert das Schema und wiederholt den Safari-kompatiblen `readwrite`-Start genau einmal.
+- Fehler zeigen Diagnosecode, originalen Fehlernamen, originale Meldung, DB-Version und vorhandene Object-Stores. Ein blockiertes Upgrade wird als `IDB_UPGRADE_BLOCKED` mit konkreter Schliessanweisung gemeldet.
+- Kein LocalStorage-Fallback fuer den Bestandssnapshot. Asset-/Cachestand: `offline-store.js?v=20260722-4`, `tablet-transfer.js?v=20260722-7`, Service Worker/Manifest `1.5.201`.
+
+Validierung:
+
+- iOS-9-nahe QA repariert ein absichtlich unvollstaendiges Schema von Version 6 auf 7, erhaelt Entwurf, Queue-Eintrag und Auftrag und weist anschliessend Schreiben, Skript-Reload und Offline-Suche nach.
+- Blockiertes Upgrade sowie zweimaliger nativer `NotFoundError` beim `readwrite`-Start liefern die vollstaendigen Diagnosedaten.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 237/237 erfolgreich.
+- Reeller Browser-Smoke: Snapshot geschrieben, Seite neu geladen, Server gestoppt und Bestandszeile anschliessend offline aus IndexedDB gefunden.
+
+## 2026-07-22 - iPad-2-Kompatibilitaet des Offline-Snapshots
+
+Ursache:
+
+- Die Sammelmeldung `Offline-Snapshot-Speicher ist nicht verfuegbar` entstand vor jedem IndexedDB-Aufruf, wenn `window.OfflineStore` oder eine Snapshot-Methode fehlte. Sie verdeckte damit insbesondere ein nicht ausgefuehrtes beziehungsweise veraltetes `offline-store.js`.
+- `offline-store.js` verwendete trotz Legacy-Tablet weiterhin `const`/`let` und setzte unpraefixiertes `indexedDB`/`IDBKeyRange`, `DOMStringList.contains()` und `IDBObjectStore.getAll()` voraus. Diese Kombination ist auf iOS 9/Safari nicht durchgaengig belastbar.
+
+Umgesetzt:
+
+- `offline-store.js` ist nun ES5-parsebar und verwendet kompatible Fallbacks fuer `webkitIndexedDB`, `webkitIDBKeyRange`, DOMStringList-Abfragen und Cursor-Lesen ohne `getAll()`.
+- Das Snapshot-Schema wurde auf Version 5 angehoben und wird nach dem Oeffnen auf Stores und Indizes geprueft.
+- Fehlendes Skript, veraltete Snapshot-API, blockiertes Upgrade, unvollstaendiges Schema sowie Lese-, Schreib- und Cursorfehler erhalten eigene Diagnosecodes statt der Sammelmeldung.
+- Kein LocalStorage-Fallback: Der vollstaendige Snapshot bleibt ausschliesslich in IndexedDB.
+- Asset- und Cacheversionen auf `offline-store.js?v=20260722-3`, `tablet-transfer.js?v=20260722-6` und Service Worker/Manifest `1.5.200` angehoben.
+
+Validierung:
+
+- iOS-9-nahe QA ohne `indexedDB`, `IDBKeyRange`, `DOMStringList.contains()` und `IDBObjectStore.getAll()`: Schemaerstellung, 30-Zeilen-Snapshot, Reload, 25er-Limit sowie Suche nach Artikel, Barcode und Stellplatz erfolgreich.
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 234/234 erfolgreich.
+- Reeller Browser-Smoke: Upgrade des bestehenden IndexedDB-Schemas, Snapshot-Speicherung, Offline-Reload und Suche aus dem persistierten Snapshot erfolgreich; Verlauf blieb offline leer.
+- Kommissionierung, Einlagerung und bestehende Sync-Queue wurden fachlich nicht geaendert.
+
+## 2026-07-22 - Testsystem: atomare Umlagerungen
+
+Ausgangsproblem:
+
+Bestandszeilen konnten nicht als eigenstaendiger, nachvollziehbarer Vorgang innerhalb eines Lagers auf einen anderen Stellplatz verschoben werden.
+
+Umgesetzt:
+
+- Neue transaktionale Umlagerung mit Idempotenzschluessel, Quellsnapshot-Pruefung und Invarianten fuer Stueck- und Palettensumme.
+- Rollenbegrenzte API fuer Buchung und Verlauf sowie gekoppelte Bewegungen `Umlagerung-Ausgang`/`Umlagerung-Eingang`; Exportcodes `UML-AUS`/`UML-EIN`.
+- Direkt in `tablet.html` integrierter dritter Arbeitsbereich mit Suche, Scanner-/Kameraeingabe, expliziter Bestaetigung und Verlauf; keine eigenstaendige Umlagerungsseite.
+- Ein gemeinsamer klassischer Controller `tablet-transfer.js` enthaelt die Browser-Fachlogik; Modern- und Legacy-Tablet verwenden nur den bestehenden Moduswechsel und Auftragsschutz.
+- Mehrere lokale, stets ungepruefte Offline-Entwuerfe in eigenem IndexedDB-Store; keine Offlinebuchung und keine Aufnahme in die bestehende Sync-Queue.
+- iPad-2-schonender Transferbetrieb mit maximal 25 angezeigten Suchtreffern und 30 Online-Verlaufszeilen. Pro Lager wird ausschliesslich die minimale Projektion aller positiven Bestandszeilen als versionierter IndexedDB-Snapshot gespeichert; keine Bewegungen, Verlaeufe oder vollstaendige Datenbankkopie.
+- Snapshot-Aktualisierungen aktivieren Daten und Metadaten atomar als neue Generation. Ein Abbruch laesst den letzten vollstaendigen Snapshot unveraendert; Lager, Zeitpunkt und Zeilenzahl werden im Tablet sichtbar angezeigt.
+- Offline-Suchen laufen direkt gegen den aktiven IndexedDB-Snapshot nach Artikel, Barcode, Stellplatz und HU/LE. Offline bleiben Umlagerungen stets ungepruefte Entwuerfe und werden nie automatisch gebucht.
+- Wiederverbindung sperrt die Buchung bis zur Onlinepruefung des aktiven Quellsnapshots; Abweichungen erzwingen eine erneute Quellauswahl.
+- Navigation fuer Buero, Tablet und Verwaltung, statische Freigaben und App-Shell sind auf dem aktuellen Service-Worker-/Manifest-Stand konsistent.
+- QA-Matrix um Atomizitaet, vollstaendigen Minimal-Snapshot, Offline-Suche, 25er-Anzeigelimit, unterbrochene Snapshot-Aktualisierung, Offline-Entwurf, Wiederverbindung, Konfliktsperre, Rollen, Idempotenz, Parallelkonflikte, SI/SSI-Normalisierung und Verlauf/Export erweitert.
+
+Validierung:
+
+- Vollstaendige QA-Matrix auf isolierter QA-Datenbank und Port `4175`: 234/234 erfolgreich.
+- Reeller Browser-Smoke auf Port `4175`: vollstaendiger Snapshot mit sichtbarem Lager/Zeitpunkt, persistente Offline-Suche nach Reload, ungepruefter Entwurf, erfolgreiche Wiederverbindungspruefung und Konfliktsperre mit erzwungener Quellneuauswahl. Rollenabwehr, Scanner-Enter, Buchung sowie Desktop-/Tablet-Layout bleiben ebenfalls abgedeckt.
+- Bestehende Ein-/Ausgangslogik und CR-002 wurden nicht geaendert.
 
 ## 2026-07-08 - Live-Hotfix: gepruefte Von-Lagerplaetze bestaetigen
 
