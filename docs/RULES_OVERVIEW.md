@@ -10,6 +10,7 @@ Die fachlichen Serverregeln liegen in `server/rules/`:
 - `article-rules.mjs`: erlaubte Gebindearten, Standard-Gebinde und Gebindemengen-Regeln.
 - `warehouse-rules.mjs`: bekannte Lager `SSI`/`SI`, Default-Lager und Artikel-Datenbankdateien.
 - `storage-bin-rules.mjs`: SSI-Stellplatznormalisierung, inklusive H/R-Regeln, H3-O-Y-Direktplaetzen und Regalbereichslogik.
+- `hall-plan-rules.mjs`: lesende Hallenplanstruktur fuer SSI-Blockplaetze sowie die H1-Regalreihen `AA` bis `AT` mit Ebenen `A` bis `D` und drei Positionen je Bucht.
 - `storage-hu-rules.mjs`: SSI-HU-Prefix `34006381000`, Suffixlaenge `7`, Gesamtlange und serverseitige HU-Helfer fuer Einlagerungsauftraege.
 - `order-rules.mjs`: Nach-Lagerplatz-/Kunden-Normalisierung, `9021-0OUT` gewinnt als Kunde sobald irgendeine Position diesen Nach-Lagerplatz enthaelt, `9021-0OUT -> SSI`-Auftragsnummer, Kundengruppen-Key, Bestellhinweis-Regeln, Auftrags-Fingerprint, Grenzwerte fuer manuelle Einlagerungs-Mehrfachanlage und manueller Positionspraefix `M`.
 - `export-rules.mjs`: reine Export-Vollstaendigkeitsregel, ob relevante Positionen abgehakt sind.
@@ -19,7 +20,7 @@ Weitere regelnahe Listen:
 - `shared/app-pages.mjs`: bekannte App- und Navigationsseiten fuer Node-seitige Nutzung.
 - `server/config/static-files.mjs`: erlaubte statische Serverdateien und Cache-Header-Regeln.
 - `server/reports.mjs`: Buchungsexport-Spalten, Zeitraumvalidierung, read-only Mapping aus `lagerbewegung` sowie Zuordnung von `bestandsbuchung_fehler` zur Auftragsreferenz fuer den Artikelstamm-Excel-Export.
-- `server/storage.mjs`: atomare Umlagerung vollstaendiger Bestandszeilen innerhalb eines Lagers mit Idempotenz, Quellsnapshot-Pruefung und unveraenderten Material-Gesamtsummen.
+- `server/storage.mjs`: atomare Umlagerung vollstaendiger Bestandszeilen innerhalb eines Lagers mit Idempotenz, Quellsnapshot-Pruefung und unveraenderten Material-Gesamtsummen sowie rein lesende Blockplatz- und Regalplatzuebersichten aus positiven Bestandszeilen; die Regalansicht liefert 546 Plaetze je H1-Ebene.
 - `tablet-transfer.js`: einziger Browser-Controller fuer den in `tablet.html` integrierten Umlagerungsbereich mit Online-/IndexedDB-Suche, Scanner/Kamera, expliziter Buchungsbestaetigung, konkreten Offline-Speicherdiagnosen und lokalen Offline-Entwuerfen ohne Offlinebuchung.
 - `server/original-archive.mjs`: sichere Originaldatei-Archivierung nach erfolgreichem PDF-Export, inklusive Importordner-Schutz, Archivkollisionen und Rename-/Copy-Fallback.
 - `service-worker.js`: klassische Browser-App-Shell-Liste fuer Offline-Cache. Diese Liste bleibt wegen alter Tablet-/Service-Worker-Kompatibilitaet manuell synchronisiert.

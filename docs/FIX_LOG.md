@@ -1,6 +1,24 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-24 10:16:32 +02:00
+Stand: 2026-07-29
+
+## 2026-07-29 - H1-Regalplatzuebersicht fuer Desktop und Tablet
+
+Umgesetzt:
+
+- Neuer rein lesender Endpunkt `GET /api/storage/shelf-places` fuer H1-Regalplaetze im Lager `SSI`.
+- Regelbasis fuer die Reihen `AA` bis `AT`, Ebenen `A` bis `D` und Positionen `1` bis `3`; jede Ebene enthaelt 546 Plaetze.
+- Alle Regalbuchten nutzen eine feste Zehnerbreite; Reihen mit neun Buchten behalten den freien Rasterplatz am Ende, damit die Stellplatzfelder gleich gross bleiben.
+- Neue Desktop- und Tablet-Reiter `Regalplaetze` mit Ebenenwahl, Freiplatzsumme, Belegungsanzeige und Detailanzeige fuer Artikelnummer, Paletten und Stueckzahl.
+- Modernes und Legacy-Tablet aktualisieren alle vier Ebenen online und speichern ihren letzten erfolgreichen Stand getrennt im lokalen Cache.
+- Service Worker/Manifest auf `1.5.219` angehoben.
+
+Validierung:
+
+- Unit-Tests fuer Regalstruktur, kanonische IDs, positive Bestandszeilen, Ebenentrennung und Offline-Cache erfolgreich.
+- `npm.cmd run check:precommit` und `git diff --check` erfolgreich.
+- Browser-Smoke auf der isolierten QA-Kopie: Tablet bei 1024x768 sowie Desktop zeigen 546 Plaetze und der Ebenenwechsel funktioniert.
+- Die vollstaendige QA-Matrix auf Port `4175` stoppt derzeit in der bestehenden, fachfremden Pruefung `server never persists the removed SI system-bin success note` mit HTTP 400. Die Ursache liegt ausserhalb dieser Regalplatz-Aenderung.
 
 ## 2026-07-24 - Regressionsfix fuer manuelle Einlagerungszeilen und A1-Auftragsnotiz
 

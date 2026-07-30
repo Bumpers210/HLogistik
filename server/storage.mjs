@@ -2,6 +2,7 @@ import { getDb } from "./db.mjs";
 import { createHash } from "node:crypto";
 import { createStorageId, createStorageMovementId, readInteger, normalizeSearch, normalizeWarehouse, normalizeSsiStorageBin, httpError, withLineContext } from "./helpers.mjs";
 import { readArticlesSync, findArticleByCode } from "./articles.mjs";
+import { blockPlacePlanForWarehouse, shelfPlacePlanForWarehouse } from "./rules/hall-plan-rules.mjs";
 
 // ── Locations ─────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,141 @@ export function readStorageLocations({ query = "", materialnummer = "", location
   const safeOffset = Number.isInteger(offset) && offset > 0 ? offset : 0;
   const safeLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 0;
   return safeLimit ? filtered.slice(safeOffset, safeOffset + safeLimit) : filtered.slice(safeOffset);
+}
+
+export function readBlockPlaceOverview({ warehouse = "SSI" } = {}) {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const halls = blockPlacePlanForWarehouse(normalizedWarehouse);
+  const occupancyByPlace = new Map();
+
+  halls.forEach((hall) => {
+    hall.groups.forEach((group) => {
+      group.places.forEach((place) => {
+        occupancyByPlace.set(place.id, {
+          stockRows: 0,
+          materialNumbers: new Set(),
+          pieces: 0,
+          pallets: 0,
+        });
+      });
+    });
+  });
+
+  if (occupancyByPlace.size) {
+    readStorageLocations({ warehouse: normalizedWarehouse }).forEach((location) => {
+      const occupancy = occupancyByPlace.get(location.lagerplatz);
+      if (!occupancy) return;
+      occupancy.stockRows += 1;
+      occupancy.materialNumbers.add(location.materialnummer);
+      occupancy.pieces += Number(location.mengeStueck || 0);
+      occupancy.pallets += Number(location.paletten || 0);
+    });
+  }
+
+  let total = 0;
+  let occupied = 0;
+  const overviewHalls = halls.map((hall) => ({
+    ...hall,
+    groups: hall.groups.map((group) => ({
+      ...group,
+      places: group.places.map((place) => {
+        const occupancy = occupancyByPlace.get(place.id);
+        const isOccupied = occupancy.stockRows > 0;
+        total += 1;
+        if (isOccupied) occupied += 1;
+        return {
+          ...place,
+          state: isOccupied ? "occupied" : "free",
+          stockRows: occupancy.stockRows,
+          articleCount: occupancy.materialNumbers.size,
+          materialNumbers: [...occupancy.materialNumbers].sort(),
+          pieces: occupancy.pieces,
+          pallets: occupancy.pallets,
+        };
+      }),
+    })),
+  }));
+
+  return {
+    warehouse: normalizedWarehouse,
+    checkedAt: new Date().toISOString(),
+    summary: {
+      total,
+      occupied,
+      free: total - occupied,
+    },
+    halls: overviewHalls,
+  };
+}
+
+export function readShelfPlaceOverview({ warehouse = "SSI", hall = "H1", level = "A" } = {}) {
+  const normalizedWarehouse = normalizeWarehouse(warehouse);
+  const plan = shelfPlacePlanForWarehouse(normalizedWarehouse, hall, level);
+  if (!plan) {
+    return {
+      warehouse: normalizedWarehouse,
+      checkedAt: new Date().toISOString(),
+      hall: null,
+      level: String(level || "").trim().toUpperCase(),
+      summary: { total: 0, occupied: 0, free: 0 },
+      rows: [],
+    };
+  }
+
+  const occupancyByPlace = new Map();
+  plan.rows.forEach((row) => {
+    row.places.forEach((place) => {
+      occupancyByPlace.set(place.id, {
+        stockRows: 0,
+        materialNumbers: new Set(),
+        pieces: 0,
+        pallets: 0,
+      });
+    });
+  });
+
+  readStorageLocations({ warehouse: normalizedWarehouse }).forEach((location) => {
+    const occupancy = occupancyByPlace.get(location.lagerplatz);
+    if (!occupancy) return;
+    occupancy.stockRows += 1;
+    occupancy.materialNumbers.add(location.materialnummer);
+    occupancy.pieces += Number(location.mengeStueck || 0);
+    occupancy.pallets += Number(location.paletten || 0);
+  });
+
+  let total = 0;
+  let occupied = 0;
+  const rows = plan.rows.map((row) => ({
+    ...row,
+    places: row.places.map((place) => {
+      const occupancy = occupancyByPlace.get(place.id);
+      const isOccupied = occupancy.stockRows > 0;
+      total += 1;
+      if (isOccupied) occupied += 1;
+      return {
+        ...place,
+        state: isOccupied ? "occupied" : "free",
+        stockRows: occupancy.stockRows,
+        articleCount: occupancy.materialNumbers.size,
+        materialNumbers: [...occupancy.materialNumbers].sort(),
+        pieces: occupancy.pieces,
+        pallets: occupancy.pallets,
+      };
+    }),
+  }));
+
+  return {
+    warehouse: normalizedWarehouse,
+    checkedAt: new Date().toISOString(),
+    hall: { id: plan.id, label: plan.label },
+    level: plan.level,
+    summary: {
+      total,
+      occupied,
+      free: total - occupied,
+    },
+    rows,
+  };
 }
 
 export function readStorageLocationSnapshot({ warehouse = "SSI", offset = 0, limit = 0 } = {}) {

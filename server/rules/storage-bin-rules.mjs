@@ -15,6 +15,9 @@ export function normalizeSsiStorageBin(value) {
   match = text.match(/^H([1-7])-?R(\d+)$/i);
   if (match) return normalizeSsiBlockBin(match[1], match[2]);
 
+  match = text.match(/^H1-?(A[G-M]1)$/i);
+  if (match) return normalizeSsiShelfBin(match[1]);
+
   match = text.match(/^H3-?([O-Y][1-3])$/i);
   if (match) return normalizeSsiH3DirectBin(match[1]);
 

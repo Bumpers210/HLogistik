@@ -1,6 +1,6 @@
 # Aktuelle Stellplatzregeln
 
-Stand: 2026-06-22
+Stand: 2026-07-27
 
 Diese Datei beschreibt die aktuell im Code wirksamen Regeln fuer Lagerplatz, Stellplatz und Nach-Lagerplatz.
 
@@ -86,6 +86,30 @@ Fuer SSI wird der Stellplatz serverseitig normalisiert. Bekannte Regeln:
   - Stueckzahl muss groesser 0 sein.
 - Bestand ist eindeutig pro Kombination aus Lager, Materialnummer, Lagerplatz und LE/HU.
 - Bei Warenausgang ohne konkrete LE/HU wird aus vorhandenen Bestaenden am Lagerplatz entnommen.
+
+## Hallenplan / Blockplatzübersicht
+
+- Die Hallenplanansicht gilt nur für Lager `SSI`.
+- Als Blockplätze gelten ausschließlich:
+  - Halle `H1`: `022-H1-R1` bis `022-H1-R15`, gegliedert in `R1 bis R5` und `R6 bis R15`, sowie `002-H1-SAG1` bis `002-H1-SAM1` (`AG1` bis `AM1`).
+  - Halle `H2`: `022-H2-R1` bis `022-H2-R56`.
+  - Halle `H5`: `022-H5-R1` bis `022-H5-R48`.
+- Ein Blockplatz ist belegt, sobald mindestens eine positive Bestandszeile auf genau diesem normalisierten Stellplatz vorliegt. Ohne positive Bestandszeile ist er frei.
+- Bei belegten Blockplätzen zeigt die Übersicht die Materialnummer und die Palettenanzahl an.
+- Die Eingaben `H1-AG1` bis `H1-AM1` werden bei SSI-Buchungen auf die entsprechenden Stellplätze `002-H1-SAG1` bis `002-H1-SAM1` normalisiert.
+- Die Übersicht ist rein lesend und berechnet ihren Stand bei jedem Abruf neu. Sie ändert weder Bestandsdaten noch Stellplatznormalisierungen.
+- In der Tablet-Ansicht steht die Übersicht als eigener Reiter bereit. Der letzte erfolgreich geladene Hallenplan wird getrennt im lokalen Tablet-Cache gespeichert und offline angezeigt.
+- Bei jeder erfolgreichen Online-Prüfung, nach dem Wiederverbinden und beim Öffnen des Reiters wird der Hallenplan erneut vom Server geladen und der Offline-Cache ersetzt.
+
+## H1-Regalplatzuebersicht
+
+- Die Regalplatzuebersicht gilt nur fuer Lager `SSI` und Halle `H1`.
+- Erfasst werden die Reihen `AA` bis `AT`: `AA1` bis `AA10`, `AB1` bis `AS9` und `AT1` bis `AT10`.
+- Jede Bucht besitzt die Ebenen `A` bis `D` und je Ebene die Positionen `1` bis `3`, zum Beispiel `AA1A1` bis `AA1A3`.
+- Die kanonische Stellplatz-ID lautet `002-H1-S<Reihe><Bucht><Ebene><Position>`, zum Beispiel `002-H1-SAA1A1`.
+- Eine Regalposition ist belegt, sobald mindestens eine positive Bestandszeile auf genau dieser kanonischen ID liegt. Materialnummer, Stueck und Paletten werden ueber alle positiven Bestandszeilen summiert.
+- Die Uebersicht ist rein lesend, aendert keine Bestandsdaten und nutzt dieselbe SSI-Stellplatznormalisierung wie die Buchungs-API.
+- Tablet und Desktop zeigen den schematischen Plan je Ebene getrennt. Das Tablet speichert den letzten erfolgreichen Stand fuer jede Ebene getrennt und aktualisiert alle Ebenen nach Wiederverbindung.
 
 ## Artikelstamm und Lageruebersicht
 

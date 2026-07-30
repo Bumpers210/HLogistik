@@ -2,6 +2,8 @@
   var DB_NAME = "hlogistik-offline";
   var DB_VERSION = 7;
   var TRANSFER_SNAPSHOT_API_VERSION = 6;
+  var HALL_PLAN_CACHE_PREFIX = "hlogistik-hall-plan-v1-";
+  var SHELF_PLAN_CACHE_PREFIX = "hlogistik-shelf-plan-v1-";
   var _db = null;
   var _opening = null;
   var _lastStorageDiagnostic = null;
@@ -1613,8 +1615,106 @@
     });
   }
 
+  function normalizeHallPlanWarehouse(warehouse) {
+    return String(warehouse || "SSI").trim().toUpperCase() === "SI" ? "SI" : "SSI";
+  }
+
+  function hallPlanCacheKey(warehouse) {
+    return HALL_PLAN_CACHE_PREFIX + normalizeHallPlanWarehouse(warehouse);
+  }
+
+  function saveHallPlanCache(warehouse, overview) {
+    var normalizedWarehouse = normalizeHallPlanWarehouse(warehouse);
+    if (!overview || !Array.isArray(overview.halls) || !overview.summary) return null;
+    var record = {
+      warehouse: normalizedWarehouse,
+      cachedAt: new Date().toISOString(),
+      overview: overview
+    };
+    try {
+      window.localStorage.setItem(hallPlanCacheKey(normalizedWarehouse), JSON.stringify(record));
+      return record;
+    } catch (error) {
+      void error;
+      return null;
+    }
+  }
+
+  function loadHallPlanCache(warehouse) {
+    var normalizedWarehouse = normalizeHallPlanWarehouse(warehouse);
+    try {
+      var raw = window.localStorage.getItem(hallPlanCacheKey(normalizedWarehouse));
+      if (!raw) return null;
+      var record = JSON.parse(raw);
+      if (!record || !record.overview || !Array.isArray(record.overview.halls) || !record.overview.summary) return null;
+      if (normalizeHallPlanWarehouse(record.warehouse) !== normalizedWarehouse) return null;
+      return record;
+    } catch (error) {
+      void error;
+      return null;
+    }
+  }
+
+  function normalizeShelfPlanHall(hall) {
+    return String(hall || "").trim().toUpperCase() === "H1" ? "H1" : "";
+  }
+
+  function normalizeShelfPlanLevel(level) {
+    var normalizedLevel = String(level || "").trim().toUpperCase();
+    return ["A", "B", "C", "D"].indexOf(normalizedLevel) >= 0 ? normalizedLevel : "";
+  }
+
+  function shelfPlanCacheKey(warehouse, hall, level) {
+    return SHELF_PLAN_CACHE_PREFIX + normalizeHallPlanWarehouse(warehouse) + "-" + normalizeShelfPlanHall(hall) + "-" + normalizeShelfPlanLevel(level);
+  }
+
+  function saveShelfPlanCache(warehouse, hall, level, overview) {
+    var normalizedWarehouse = normalizeHallPlanWarehouse(warehouse);
+    var normalizedHall = normalizeShelfPlanHall(hall);
+    var normalizedLevel = normalizeShelfPlanLevel(level);
+    if (!normalizedHall || !normalizedLevel || !overview || !overview.summary || !Array.isArray(overview.rows)) return null;
+    if (!overview.hall || normalizeShelfPlanHall(overview.hall.id) !== normalizedHall || normalizeShelfPlanLevel(overview.level) !== normalizedLevel) return null;
+    var record = {
+      warehouse: normalizedWarehouse,
+      hall: normalizedHall,
+      level: normalizedLevel,
+      cachedAt: new Date().toISOString(),
+      overview: overview
+    };
+    try {
+      window.localStorage.setItem(shelfPlanCacheKey(normalizedWarehouse, normalizedHall, normalizedLevel), JSON.stringify(record));
+      return record;
+    } catch (error) {
+      void error;
+      return null;
+    }
+  }
+
+  function loadShelfPlanCache(warehouse, hall, level) {
+    var normalizedWarehouse = normalizeHallPlanWarehouse(warehouse);
+    var normalizedHall = normalizeShelfPlanHall(hall);
+    var normalizedLevel = normalizeShelfPlanLevel(level);
+    if (!normalizedHall || !normalizedLevel) return null;
+    try {
+      var raw = window.localStorage.getItem(shelfPlanCacheKey(normalizedWarehouse, normalizedHall, normalizedLevel));
+      if (!raw) return null;
+      var record = JSON.parse(raw);
+      if (!record || !record.overview || !record.overview.summary || !Array.isArray(record.overview.rows)) return null;
+      if (normalizeHallPlanWarehouse(record.warehouse) !== normalizedWarehouse) return null;
+      if (normalizeShelfPlanHall(record.hall) !== normalizedHall || normalizeShelfPlanLevel(record.level) !== normalizedLevel) return null;
+      return record;
+    } catch (error) {
+      void error;
+      return null;
+    }
+  }
+
   window.OfflineStore = {
     transferSnapshotApiVersion: TRANSFER_SNAPSHOT_API_VERSION,
+    saveHallPlanCache: saveHallPlanCache,
+    loadHallPlanCache: loadHallPlanCache,
+    saveShelfPlanCache: saveShelfPlanCache,
+    loadShelfPlanCache: loadShelfPlanCache,
     // ── Order list (summaries) ───────────────────────────────────────────────
 
     saveOrderSummaries: function (orders) {
