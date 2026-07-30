@@ -6,14 +6,14 @@
     <meta name="theme-color" content="#167a58">
     <title>Tablet Logistik</title>
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="tablet.css?v=20260724-3">
-    <script src="offline-store.js?v=20260724-3"></script>
+    <link rel="stylesheet" href="tablet.css?v=20260729-2">
+    <script src="offline-store.js?v=20260729-1"></script>
     <script src="shared/storage-hu-rules.js?v=20260702-2"></script>
     <script src="shared/storage-bin-rules.js?v=20260707-1"></script>
     <script src="shared/manual-storage-rules.js?v=20260702-2"></script>
     <script src="shared/quantity-format.js?v=20260720-2"></script>
     <script src="tablet-transfer.js?v=20260724-4"></script>
-    <script src="tablet-legacy.js?v=20260724-5"></script>
+    <script src="tablet-legacy.js?v=20260729-2"></script>
   </head>
   <body>
     <header class="tablet-header">
@@ -30,6 +30,8 @@
           <button id="pickingModeButton" type="button" class="is-active">Kommissionierung</button>
           <button id="storageModeButton" type="button">Einlagerung</button>
           <button id="transferModeButton" type="button">Umlagerungen</button>
+          <button id="hallPlanModeButton" type="button">Blockplätze</button>
+          <button id="shelfPlanModeButton" type="button">Regalplaetze</button>
         </div>
         <div class="tablet-control-fields">
           <label>
@@ -228,6 +230,40 @@
             </table>
           </div>
         </section>
+      </section>
+
+      <section id="hallPlanWorkspace" class="tablet-hall-plan-workspace" hidden aria-label="Blockplätze">
+        <div class="tablet-hall-plan-toolbar">
+          <div>
+            <p>Hallenübersicht</p>
+            <h2>Blockplätze</h2>
+          </div>
+          <button id="refreshHallPlanButton" type="button">Aktualisieren</button>
+        </div>
+        <p id="hallPlanSummary" class="tablet-hall-plan-summary" aria-live="polite"></p>
+        <div id="hallPlanContent" class="tablet-hall-plan-content" aria-live="polite"></div>
+        <p id="hallPlanStatus" class="message" role="status"></p>
+      </section>
+
+      <section id="shelfPlanWorkspace" class="tablet-hall-plan-workspace tablet-shelf-plan-workspace" hidden aria-label="Regalplaetze">
+        <div class="tablet-hall-plan-toolbar">
+          <div>
+            <p>H1</p>
+            <h2>Regalplaetze</h2>
+          </div>
+          <button id="refreshShelfPlanButton" type="button">Aktualisieren</button>
+        </div>
+        <div id="shelfPlanLevelSwitch" class="tablet-shelf-plan-level-switch" role="group" aria-label="Regalebene">
+          <button type="button" data-shelf-level="A" class="is-active">A</button>
+          <button type="button" data-shelf-level="B">B</button>
+          <button type="button" data-shelf-level="C">C</button>
+          <button type="button" data-shelf-level="D">D</button>
+        </div>
+        <p id="shelfPlanSummary" class="tablet-hall-plan-summary" aria-live="polite"></p>
+        <div class="tablet-shelf-plan-legend" aria-label="Legende"><span class="is-free">Frei</span><span class="is-occupied">Belegt</span></div>
+        <div id="shelfPlanContent" class="tablet-shelf-plan-content" aria-live="polite"></div>
+        <p id="shelfPlanDetail" class="tablet-shelf-plan-detail" role="status">Platz auswaehlen.</p>
+        <p id="shelfPlanStatus" class="message" role="status"></p>
       </section>
     </main>
 

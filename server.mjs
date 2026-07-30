@@ -38,6 +38,8 @@ import {
 } from "./server/articles.mjs";
 import {
   readStorageLocations,
+  readBlockPlaceOverview,
+  readShelfPlaceOverview,
   readStorageLocationSnapshot,
   readStorageMovements,
   readStorageTransfers,
@@ -229,6 +231,20 @@ async function route(request, response) {
     const offset = url.searchParams.has("offset") ? readInteger(url.searchParams.get("offset")) : 0;
     const limit = url.searchParams.has("limit") ? readInteger(url.searchParams.get("limit")) : 0;
     sendJson(response, 200, readStorageLocations({ query, materialnummer, locationId, offset, limit, warehouse }));
+    return;
+  }
+
+  // Blockplätze im Hallenplan
+  if (pathname === "/api/storage/block-places" && request.method === "GET") {
+    sendJson(response, 200, readBlockPlaceOverview({ warehouse }));
+    return;
+  }
+
+  // Regalplaetze im Hallenplan
+  if (pathname === "/api/storage/shelf-places" && request.method === "GET") {
+    const hall = url.searchParams.get("hall") || "H1";
+    const level = url.searchParams.get("level") || "A";
+    sendJson(response, 200, readShelfPlaceOverview({ warehouse, hall, level }));
     return;
   }
 

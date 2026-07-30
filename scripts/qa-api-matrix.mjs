@@ -1845,13 +1845,13 @@ async function run() {
       countSourceOccurrences(tabletLegacyServiceWorkerSource, "registration.update()") === 1 &&
       countSourceOccurrences(tabletModernServiceWorkerSource, "registration.update()") === 1 &&
       tabletHtmlSource.includes("tablet-transfer.js?v=20260724-4") &&
-      tabletHtmlSource.includes("offline-store.js?v=20260724-3") &&
-      tabletHtmlSource.includes("tablet-legacy.js?v=20260724-5") &&
-      tabletHtmlSource.includes("tablet.css?v=20260724-3") &&
+      tabletHtmlSource.includes("offline-store.js?v=20260729-1") &&
+      tabletHtmlSource.includes("tablet-legacy.js?v=20260729-2") &&
+      tabletHtmlSource.includes("tablet.css?v=20260729-2") &&
       indexHtmlSource.includes("app-import-line-helpers.js?v=20260724-2") &&
       indexHtmlSource.includes("app.js?v=20260724-3") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.210\"") &&
-      manifestSource.includes("\"version\": \"1.5.210\"") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.219\"") &&
+      manifestSource.includes("\"version\": \"1.5.219\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&

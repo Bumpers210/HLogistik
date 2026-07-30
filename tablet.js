@@ -33,6 +33,11 @@ let listedOrdersById = new Map();
 let acceptedOrderGroupsById = new Map();
 let manualStorageCustomerEdited = false;
 let exportingPdf = false;
+let hallPlanRefreshInProgress = false;
+let shelfPlanRefreshInProgress = false;
+let shelfPlanLevel = "A";
+let selectedShelfPlanPlaceId = "";
+let latestShelfPlanOverview = null;
 
 registerTabletServiceWorker();
 
@@ -118,6 +123,10 @@ function transferModeRequested() {
   return /(?:^|[?&])bereich=umlagerungen(?:&|$)/i.test(String(window.location.search || ""));
 }
 
+function shelfPlanModeRequested() {
+  return /(?:^|[?&])bereich=regalplaetze(?:&|$)/i.test(String(window.location.search || ""));
+}
+
 function canAccessTransfers(group) {
   return ["buero", "tablet", "verwaltung"].includes(String(group || "").trim().toLowerCase());
 }
@@ -144,6 +153,8 @@ function bindElements() {
     "pickingModeButton",
     "storageModeButton",
     "transferModeButton",
+    "hallPlanModeButton",
+    "shelfPlanModeButton",
     "userNameInput",
     "orderSelectRow",
     "orderSelect",
@@ -183,6 +194,18 @@ function bindElements() {
     "manualStoragePositionCountInput",
     "manualStorageQuantityInput",
     "addStorageLineButton",
+    "hallPlanWorkspace",
+    "refreshHallPlanButton",
+    "hallPlanSummary",
+    "hallPlanContent",
+    "hallPlanStatus",
+    "shelfPlanWorkspace",
+    "refreshShelfPlanButton",
+    "shelfPlanLevelSwitch",
+    "shelfPlanSummary",
+    "shelfPlanContent",
+    "shelfPlanDetail",
+    "shelfPlanStatus",
   ].forEach((id) => {
     elements[id] = document.getElementById(id);
   });
@@ -192,6 +215,21 @@ function bindEvents() {
   elements.pickingModeButton.addEventListener("click", () => setMode("picking"));
   elements.storageModeButton.addEventListener("click", () => setMode("storage"));
   elements.transferModeButton.addEventListener("click", () => setMode("transfer"));
+  elements.hallPlanModeButton.addEventListener("click", () => setMode("hallPlan"));
+  elements.shelfPlanModeButton.addEventListener("click", () => setMode("shelfPlan"));
+  elements.refreshHallPlanButton.addEventListener("click", () => refreshHallPlan());
+  elements.refreshShelfPlanButton.addEventListener("click", () => refreshShelfPlan());
+  elements.shelfPlanLevelSwitch.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-shelf-level]");
+    if (!button) return;
+    setShelfPlanLevel(button.dataset.shelfLevel);
+  });
+  elements.shelfPlanContent.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-shelf-place]");
+    if (!button) return;
+    const place = findShelfPlanPlace(button.dataset.shelfPlace);
+    if (place) showShelfPlanDetail(place);
+  });
   elements.userNameInput.addEventListener("change", () => {
     saveUser();
     updateTransferContext();
@@ -261,10 +299,12 @@ async function initialize(options = {}) {
     await apiJson("/api/health", controller ? { signal: controller.signal } : {});
     serverOnline = true;
     setConnectionStatus(true);
+    void refreshHallPlan({ background: currentMode !== "hallPlan" });
+    void refreshShelfPlan({ background: currentMode !== "shelfPlan" });
     await flushSyncQueue();
-    if (currentMode !== "transfer") loadOrderList();
+    if (currentMode !== "transfer" && currentMode !== "hallPlan" && currentMode !== "shelfPlan") loadOrderList();
     if (!orderListTimer) orderListTimer = window.setInterval(() => {
-      if (currentMode !== "transfer") loadOrderList({ silent: true });
+      if (currentMode !== "transfer" && currentMode !== "hallPlan" && currentMode !== "shelfPlan") loadOrderList({ silent: true });
     }, ORDER_LIST_REFRESH_MS);
     if (!saveTimer) {
       saveTimer = window.setInterval(async () => {
@@ -278,7 +318,11 @@ async function initialize(options = {}) {
   } catch {
     serverOnline = false;
     setConnectionStatus(false);
-    if (currentMode === "transfer") return;
+    if (currentMode === "shelfPlan") {
+      renderCachedShelfPlan("Offline: letzter gespeicherter Regalplan.", false);
+      return;
+    }
+    if (currentMode === "transfer" || currentMode === "hallPlan") return;
     const cached = await loadOrderListFromCache();
     setMessage(cached ? "Offline: Auftragsliste aus Cache." : "Server nicht verbunden.", !cached);
   } finally {
@@ -786,12 +830,15 @@ function loadUser() {
     const storedMode = localStorage.getItem(MODE_KEY);
     let storedGroup = String(localStorage.getItem(USER_GROUP_KEY) || "").toLowerCase();
     const requestedTransfer = transferModeRequested();
+    const requestedShelfPlan = shelfPlanModeRequested();
     if (!storedGroup || (!canAccessTransfers(storedGroup) && !requestedTransfer)) {
       storedGroup = "tablet";
       localStorage.setItem(USER_GROUP_KEY, storedGroup);
     }
     currentMode = (requestedTransfer || storedMode === "transfer") && canAccessTransfers(storedGroup)
       ? "transfer"
+      : requestedShelfPlan || storedMode === "shelfPlan" ? "shelfPlan"
+      : storedMode === "hallPlan" ? "hallPlan"
       : storedMode === "storage" ? "storage" : "picking";
     elements.sortModeSelect.value = localStorage.getItem(SORT_MODE_KEY) || "fromBin";
   } catch {
@@ -823,7 +870,7 @@ function saveSortMode() {
 }
 
 function setMode(mode) {
-  const nextMode = mode === "transfer" ? "transfer" : mode === "storage" ? "storage" : "picking";
+  const nextMode = mode === "transfer" ? "transfer" : mode === "hallPlan" ? "hallPlan" : mode === "shelfPlan" ? "shelfPlan" : mode === "storage" ? "storage" : "picking";
   if (nextMode === currentMode) return;
   const preserveCurrentOrder = modeSwitchPreservesCurrentOrder(nextMode);
   if (nextMode === "transfer" && !canAccessTransfers(transferUserGroup())) {
@@ -845,7 +892,7 @@ function setMode(mode) {
   }
   if (preserveCurrentOrder) {
     persistCurrentOrderCache();
-    if (currentMode === "transfer") {
+    if (currentMode === "transfer" || currentMode === "hallPlan" || currentMode === "shelfPlan") {
       updateModeUi();
     } else {
       ensureCurrentOrderInSelect();
@@ -856,11 +903,11 @@ function setMode(mode) {
   }
   resetToStart(`Bitte ${modeLabel()} waehlen.`);
   updateModeUi();
-  if (currentMode !== "transfer") loadOrderList();
+  if (currentMode !== "transfer" && currentMode !== "hallPlan" && currentMode !== "shelfPlan") loadOrderList();
 }
 
 function modeLabel() {
-  return currentMode === "transfer" ? "Umlagerung" : currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
+  return currentMode === "transfer" ? "Umlagerung" : currentMode === "hallPlan" ? "Blockplätze" : currentMode === "shelfPlan" ? "Regalplaetze" : currentMode === "storage" ? "Einlagerung" : "Kommissionierung";
 }
 
 function isStorageOrder() {
@@ -881,18 +928,25 @@ function isLocalStorageOrderId(id) {
 
 function updateModeUi() {
   const isTransfer = currentMode === "transfer";
+  const isHallPlan = currentMode === "hallPlan";
+  const isShelfPlan = currentMode === "shelfPlan";
+  const isDedicatedWorkspace = isTransfer || isHallPlan || isShelfPlan;
   const isStorage = isStorageOrder();
-  if (elements.tabletTitle) elements.tabletTitle.textContent = isTransfer ? "Tablet Umlagerungen" : isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
+  if (elements.tabletTitle) elements.tabletTitle.textContent = isTransfer ? "Tablet Umlagerungen" : isHallPlan ? "Tablet Blockplätze" : isShelfPlan ? "Tablet Regalplaetze" : isStorage ? "Tablet Einlagerung" : "Tablet Pickliste";
   if (elements.pickingModeButton) elements.pickingModeButton.classList.toggle("is-active", currentMode === "picking");
   if (elements.storageModeButton) elements.storageModeButton.classList.toggle("is-active", currentMode === "storage");
   if (elements.transferModeButton) elements.transferModeButton.classList.toggle("is-active", isTransfer);
-  setHidden(elements.orderSelectRow, isTransfer);
-  setHidden(elements.sortModeRow, isTransfer);
-  if (isTransfer) setHidden(elements.acceptedGroupInfo, true);
-  setHidden(elements.orderActionRow, isTransfer);
-  setHidden(elements.orderDangerRow, isTransfer);
-  setHidden(elements.orderStatusPanel, isTransfer);
-  setHidden(elements.orderWorkspace, isTransfer);
+  if (elements.hallPlanModeButton) elements.hallPlanModeButton.classList.toggle("is-active", isHallPlan);
+  if (elements.shelfPlanModeButton) elements.shelfPlanModeButton.classList.toggle("is-active", isShelfPlan);
+  setHidden(elements.orderSelectRow, isDedicatedWorkspace);
+  setHidden(elements.sortModeRow, isDedicatedWorkspace);
+  if (isDedicatedWorkspace) setHidden(elements.acceptedGroupInfo, true);
+  setHidden(elements.orderActionRow, isDedicatedWorkspace);
+  setHidden(elements.orderDangerRow, isDedicatedWorkspace);
+  setHidden(elements.orderStatusPanel, isDedicatedWorkspace);
+  setHidden(elements.orderWorkspace, isDedicatedWorkspace);
+  setHidden(elements.hallPlanWorkspace, !isHallPlan);
+  setHidden(elements.shelfPlanWorkspace, !isShelfPlan);
   if (elements.orderSelect && !elements.orderSelect.value && elements.orderSelect.options[0]) {
     elements.orderSelect.options[0].text = isStorage ? "Einlagerung waehlen" : "Auftrag waehlen";
   }
@@ -923,6 +977,275 @@ function updateModeUi() {
       window.HLogistikTransfer.deactivate();
     }
   }
+  if (isHallPlan) {
+    renderCachedHallPlan();
+    if (serverOnline) void refreshHallPlan();
+  }
+  if (isShelfPlan) {
+    renderCachedShelfPlan();
+    if (serverOnline) void refreshShelfPlan();
+  }
+}
+
+async function refreshHallPlan(options = {}) {
+  const background = options.background === true;
+  if (!serverOnline) {
+    if (!background && currentMode === "hallPlan") renderCachedHallPlan("Offline: letzter gespeicherter Hallenplan.", false);
+    return;
+  }
+  if (hallPlanRefreshInProgress) return;
+  hallPlanRefreshInProgress = true;
+  try {
+    const overview = await apiJson("/api/storage/block-places");
+    if (window.OfflineStore?.saveHallPlanCache) OfflineStore.saveHallPlanCache("SSI", overview);
+    if (currentMode === "hallPlan") renderHallPlan(overview, `Aktualisiert: ${hallPlanTime(overview?.checkedAt)}`, false);
+  } catch (error) {
+    if (!background && currentMode === "hallPlan") {
+      renderCachedHallPlan(`Hallenplan konnte nicht aktualisiert werden: ${error.message}`, true);
+    }
+  } finally {
+    hallPlanRefreshInProgress = false;
+  }
+}
+
+function renderCachedHallPlan(message, isError) {
+  const cached = window.OfflineStore?.loadHallPlanCache?.("SSI") || null;
+  if (cached?.overview) {
+    renderHallPlan(
+      cached.overview,
+      `${message || "Offline: letzter gespeicherter Hallenplan."} Stand: ${hallPlanTime(cached.cachedAt)}`,
+      isError === true
+    );
+    return;
+  }
+  renderHallPlan(null, "Offline: Noch kein Hallenplan gespeichert. Online aktualisieren.", true);
+}
+
+function renderHallPlan(overview, statusMessage, isError) {
+  if (!elements.hallPlanSummary || !elements.hallPlanContent || !elements.hallPlanStatus) return;
+  const summary = overview?.summary || { total: 0, free: 0, occupied: 0 };
+  const halls = Array.isArray(overview?.halls) ? overview.halls : [];
+  elements.hallPlanSummary.innerHTML = `
+    <strong>${escapeHtml(hallPlanNumber(summary.free))} frei</strong>
+    <span>${escapeHtml(hallPlanNumber(summary.occupied))} belegt</span>
+    <span>${escapeHtml(hallPlanNumber(summary.total))} gesamt</span>
+  `;
+  elements.hallPlanContent.innerHTML = "";
+
+  if (!halls.length) {
+    elements.hallPlanContent.innerHTML = '<p class="tablet-hall-plan-empty">Für SSI ist noch kein Hallenplan verfügbar.</p>';
+  } else {
+    halls.forEach((hall) => {
+      const hallElement = document.createElement("section");
+      hallElement.className = "tablet-hall-plan-hall";
+      hallElement.innerHTML = `<h3>${escapeHtml(hall.label || "")}</h3>`;
+
+      (Array.isArray(hall.groups) ? hall.groups : []).forEach((group) => {
+        const groupElement = document.createElement("section");
+        groupElement.className = "tablet-hall-plan-group";
+        groupElement.innerHTML = `<h4>${escapeHtml(group.label || "")}</h4>`;
+        const grid = document.createElement("div");
+        grid.className = "tablet-hall-plan-grid";
+
+        (Array.isArray(group.places) ? group.places : []).forEach((place) => {
+          const occupied = place?.state === "occupied";
+          const materialNumbers = Array.isArray(place?.materialNumbers) ? place.materialNumbers : [];
+          const slot = document.createElement("article");
+          slot.className = `tablet-hall-plan-slot is-${occupied ? "occupied" : "free"}`;
+          slot.setAttribute("aria-label", occupied
+            ? `${place?.label || ""}: belegt, Artikel ${materialNumbers.join(", ") || "unbekannt"}, ${hallPlanNumber(place?.pallets)} Paletten`
+            : `${place?.label || ""}: frei`);
+          const detail = occupied ? `
+            <small title="${escapeHtml(materialNumbers.join(", "))}">Art. ${escapeHtml(hallPlanMaterialLabel(materialNumbers))}</small>
+            <small>${escapeHtml(hallPlanNumber(place?.pallets))} Pal.</small>
+          ` : "";
+          slot.innerHTML = `
+            <strong>${escapeHtml(place?.label || "")}</strong>
+            ${detail}
+          `;
+          grid.appendChild(slot);
+        });
+
+        groupElement.appendChild(grid);
+        hallElement.appendChild(groupElement);
+      });
+      elements.hallPlanContent.appendChild(hallElement);
+    });
+  }
+  elements.hallPlanStatus.className = `message${isError ? " is-error" : ""}`;
+  elements.hallPlanStatus.innerHTML = escapeHtml(statusMessage || "");
+}
+
+function hallPlanNumber(value) {
+  return String(Math.max(0, Number(value) || 0));
+}
+
+function hallPlanMaterialLabel(materialNumbers) {
+  if (!materialNumbers.length) return "Artikel unbekannt";
+  if (materialNumbers.length === 1) return materialNumbers[0];
+  return `${materialNumbers[0]} +${materialNumbers.length - 1}`;
+}
+
+function hallPlanTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "unbekannt";
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function setShelfPlanLevel(level) {
+  const nextLevel = String(level || "").trim().toUpperCase();
+  if (!["A", "B", "C", "D"].includes(nextLevel) || nextLevel === shelfPlanLevel) return;
+  shelfPlanLevel = nextLevel;
+  selectedShelfPlanPlaceId = "";
+  updateShelfPlanLevelButtons();
+  renderCachedShelfPlan(`Gespeicherter Stand der Ebene ${shelfPlanLevel}.`, false);
+  if (serverOnline) void refreshShelfPlan();
+}
+
+function updateShelfPlanLevelButtons() {
+  elements.shelfPlanLevelSwitch?.querySelectorAll("[data-shelf-level]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.shelfLevel === shelfPlanLevel);
+  });
+}
+
+async function refreshShelfPlan(options = {}) {
+  const background = options.background === true;
+  if (!serverOnline) {
+    if (!background && currentMode === "shelfPlan") renderCachedShelfPlan("Offline: letzter gespeicherter Regalplan.", false);
+    return;
+  }
+  if (shelfPlanRefreshInProgress) return;
+  shelfPlanRefreshInProgress = true;
+  let activeOverview = null;
+  let activeError = null;
+  try {
+    for (const level of ["A", "B", "C", "D"]) {
+      try {
+        const overview = await apiJson(`/api/storage/shelf-places?hall=H1&level=${level}`);
+        window.OfflineStore?.saveShelfPlanCache?.("SSI", "H1", level, overview);
+        if (level === shelfPlanLevel) activeOverview = overview;
+      } catch (error) {
+        if (level === shelfPlanLevel) activeError = error;
+      }
+    }
+  } finally {
+    shelfPlanRefreshInProgress = false;
+  }
+  if (activeOverview) {
+    if (currentMode === "shelfPlan") renderShelfPlan(activeOverview, `Aktualisiert: ${hallPlanTime(activeOverview.checkedAt)}`, false);
+    return;
+  }
+  if (!background && currentMode === "shelfPlan") {
+    const message = activeError ? `Regalplan konnte nicht aktualisiert werden: ${activeError.message}` : "Regalplan konnte nicht aktualisiert werden.";
+    renderCachedShelfPlan(message, true);
+  }
+}
+
+function renderCachedShelfPlan(message, isError) {
+  const cached = window.OfflineStore?.loadShelfPlanCache?.("SSI", "H1", shelfPlanLevel) || null;
+  if (cached?.overview) {
+    renderShelfPlan(
+      cached.overview,
+      `${message || "Offline: letzter gespeicherter Regalplan."} Stand: ${hallPlanTime(cached.cachedAt)}`,
+      isError === true
+    );
+    return;
+  }
+  renderShelfPlan(null, "Offline: Noch kein Regalplan gespeichert. Online aktualisieren.", true);
+}
+
+function renderShelfPlan(overview, statusMessage, isError) {
+  if (!elements.shelfPlanSummary || !elements.shelfPlanContent || !elements.shelfPlanStatus) return;
+  latestShelfPlanOverview = overview || null;
+  const summary = overview?.summary || { total: 0, free: 0, occupied: 0 };
+  const rows = Array.isArray(overview?.rows) ? overview.rows : [];
+  elements.shelfPlanSummary.innerHTML = `
+    <strong>${escapeHtml(hallPlanNumber(summary.free))} frei</strong>
+    <span>${escapeHtml(hallPlanNumber(summary.occupied))} belegt</span>
+    <span>${escapeHtml(hallPlanNumber(summary.total))} gesamt</span>
+  `;
+  elements.shelfPlanContent.innerHTML = "";
+  updateShelfPlanLevelButtons();
+
+  if (!rows.length) {
+    elements.shelfPlanContent.innerHTML = '<p class="tablet-hall-plan-empty">Fuer SSI ist kein H1-Regalplan verfuegbar.</p>';
+    elements.shelfPlanDetail.textContent = "Keine Platzdetails verfuegbar.";
+  } else {
+    rows.slice().reverse().forEach((row) => {
+      const rowElement = document.createElement("section");
+      rowElement.className = "tablet-shelf-plan-row";
+      rowElement.innerHTML = `<h3>${escapeHtml(row.id)}</h3>`;
+      const bays = document.createElement("div");
+      bays.className = "tablet-shelf-plan-bays";
+      const bayWidth = "10%";
+      const placesByBay = new Map();
+      (Array.isArray(row.places) ? row.places : []).forEach((place) => {
+        const bayPlaces = placesByBay.get(place.bay) || [];
+        bayPlaces.push(place);
+        placesByBay.set(place.bay, bayPlaces);
+      });
+      for (let number = Number(row.start); number <= Number(row.end); number += 1) {
+        const bay = `${row.id}${number}`;
+        const bayElement = document.createElement("div");
+        bayElement.className = "tablet-shelf-plan-bay";
+        bayElement.style.width = bayWidth;
+        bayElement.innerHTML = `<span>${escapeHtml(bay)}</span>`;
+        const slots = document.createElement("div");
+        slots.className = "tablet-shelf-plan-slots";
+        (placesByBay.get(bay) || []).forEach((place) => {
+          const occupied = place.state === "occupied";
+          const materialNumbers = Array.isArray(place.materialNumbers) ? place.materialNumbers : [];
+          const slot = document.createElement("button");
+          slot.type = "button";
+          slot.dataset.shelfPlace = place.id;
+          slot.className = `tablet-shelf-plan-slot is-${occupied ? "occupied" : "free"}${selectedShelfPlanPlaceId === place.id ? " is-selected" : ""}`;
+          slot.textContent = String(place.position || "");
+          slot.setAttribute("aria-label", occupied
+            ? `${place.label}: belegt, Artikel ${materialNumbers.join(", ") || "unbekannt"}, ${hallPlanNumber(place.pallets)} Paletten`
+            : `${place.label}: frei`);
+          slot.title = occupied
+            ? `${place.label}: ${materialNumbers.join(", ") || "Artikel unbekannt"}, ${hallPlanNumber(place.pallets)} Paletten`
+            : `${place.label}: frei`;
+          slots.appendChild(slot);
+        });
+        bayElement.appendChild(slots);
+        bays.appendChild(bayElement);
+      }
+      rowElement.appendChild(bays);
+      elements.shelfPlanContent.appendChild(rowElement);
+    });
+    const selectedPlace = selectedShelfPlanPlaceId ? findShelfPlanPlace(selectedShelfPlanPlaceId, overview) : null;
+    if (selectedPlace) renderShelfPlanDetail(selectedPlace);
+    else elements.shelfPlanDetail.textContent = "Platz auswaehlen.";
+  }
+  elements.shelfPlanStatus.className = `message${isError ? " is-error" : ""}`;
+  elements.shelfPlanStatus.textContent = statusMessage || "";
+}
+
+function findShelfPlanPlace(id, overview) {
+  const activeOverview = overview || latestShelfPlanOverview || window.OfflineStore?.loadShelfPlanCache?.("SSI", "H1", shelfPlanLevel)?.overview;
+  const rows = Array.isArray(activeOverview?.rows) ? activeOverview.rows : [];
+  for (const row of rows) {
+    const place = (Array.isArray(row.places) ? row.places : []).find((entry) => entry.id === id);
+    if (place) return place;
+  }
+  return null;
+}
+
+function showShelfPlanDetail(place) {
+  selectedShelfPlanPlaceId = place.id;
+  elements.shelfPlanContent.querySelectorAll("[data-shelf-place]").forEach((slot) => {
+    slot.classList.toggle("is-selected", slot.dataset.shelfPlace === selectedShelfPlanPlaceId);
+  });
+  renderShelfPlanDetail(place);
+}
+
+function renderShelfPlanDetail(place) {
+  const materialNumbers = Array.isArray(place.materialNumbers) ? place.materialNumbers : [];
+  elements.shelfPlanDetail.innerHTML = place.state === "occupied"
+    ? `<strong>${escapeHtml(place.label)}</strong> belegt: Artikel ${escapeHtml(materialNumbers.join(", ") || "unbekannt")}, ${escapeHtml(hallPlanNumber(place.pallets))} Paletten, ${escapeHtml(hallPlanNumber(place.pieces))} Stueck.`
+    : `<strong>${escapeHtml(place.label)}</strong> ist frei.`;
 }
 
 function exportButtonLabel() {
@@ -938,7 +1261,7 @@ function isManualStorageHeader() {
 }
 
 async function loadOrderList(options = {}) {
-  if (currentMode === "transfer") return;
+  if (currentMode === "transfer" || currentMode === "hallPlan" || currentMode === "shelfPlan") return;
   const silent = options?.silent === true;
   if (!serverOnline) {
     await loadOrderListFromCache();
@@ -1536,7 +1859,7 @@ function currentOrderLocksSwitch(nextOrderId = "") {
 
 function currentOrderLocksModeSwitch(nextMode) {
   if (!currentOrder?.id || currentOrder.exportedAt) return false;
-  if (nextMode === "transfer") return false;
+  if (nextMode === "transfer" || nextMode === "hallPlan" || nextMode === "shelfPlan") return false;
   if ((currentOrder.orderType || "picking") === nextMode) return false;
   const acceptedBy = String(currentOrder.acceptedBy || "").trim();
   return Boolean(acceptedBy && sameUserName(acceptedBy, currentUserName()));
@@ -1545,7 +1868,7 @@ function currentOrderLocksModeSwitch(nextMode) {
 function modeSwitchPreservesCurrentOrder(nextMode) {
   if (!currentOrderAcceptedByCurrentUser()) return false;
   const orderMode = (currentOrder.orderType || "picking") === "storage" ? "storage" : "picking";
-  return nextMode === "transfer" || (currentMode === "transfer" && nextMode === orderMode);
+  return nextMode === "transfer" || nextMode === "hallPlan" || nextMode === "shelfPlan" || ((currentMode === "transfer" || currentMode === "hallPlan" || currentMode === "shelfPlan") && nextMode === orderMode);
 }
 
 function keepCurrentOrderSelected() {

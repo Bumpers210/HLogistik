@@ -7,9 +7,10 @@
     <title>Buchung</title>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="styles.css?v=20260722-2">
+    <link rel="stylesheet" href="styles.css?v=20260729-2">
     <script src="shared-ui.js?v=20260722-3" defer></script>
-    <script src="lager.js?v=20260722-1" defer></script>
+    <script src="offline-store.js?v=20260729-1"></script>
+    <script src="lager.js?v=20260729-2" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -33,6 +34,8 @@
           <a class="mode-button" href="/">Kommissionierung</a>
           <a id="storageBookingLink" class="mode-button is-active" href="/lager.html">Buchung</a>
           <a id="articleOverviewNavLink" class="mode-button" href="/lager.html?ansicht=artikeluebersicht">Artikelübersicht</a>
+          <a id="blockPlacesNavLink" class="mode-button" href="/lager.html?ansicht=blockplaetze">Blockplätze</a>
+          <a id="shelfPlacesNavLink" class="mode-button" href="/lager.html?ansicht=regalplaetze">Regalplaetze</a>
           <a id="issueLogNavLink" class="mode-button" href="/lager.html?ansicht=buchungsfehler">Buchungsfehler</a>
           <a id="transferNavLink" class="mode-button" href="/tablet.html?bereich=umlagerungen" hidden>Umlagerungen</a>
           <a class="mode-button" href="/artikel.html">Artikelstamm</a>
@@ -191,6 +194,40 @@
               <tbody id="articleOverviewTableBody"></tbody>
             </table>
           </div>
+        </section>
+
+        <section id="blockPlacesPanel" class="list-panel block-places-panel" hidden>
+          <div class="section-heading">
+            <h2>Blockplätze</h2>
+            <span id="blockPlaceCount" class="muted-count">0 Plätze</span>
+          </div>
+          <div class="block-places-toolbar">
+            <p id="blockPlaceSummary" class="block-place-summary" aria-live="polite"></p>
+            <button id="refreshBlockPlacesButton" class="secondary-button" type="button">Aktualisieren</button>
+          </div>
+          <div id="blockPlacePlan" class="block-place-plan" aria-live="polite"></div>
+          <p id="blockPlaceStatus" class="export-status" role="status"></p>
+        </section>
+
+        <section id="shelfPlacesPanel" class="list-panel shelf-places-panel" hidden>
+          <div class="section-heading">
+            <h2>H1 Regalplaetze</h2>
+            <span id="shelfPlaceCount" class="muted-count">0 Plaetze</span>
+          </div>
+          <div class="shelf-places-toolbar">
+            <div id="shelfPlaceLevelSwitch" class="shelf-place-level-switch" role="group" aria-label="Regalebene">
+              <button type="button" data-shelf-level="A" class="is-active">A</button>
+              <button type="button" data-shelf-level="B">B</button>
+              <button type="button" data-shelf-level="C">C</button>
+              <button type="button" data-shelf-level="D">D</button>
+            </div>
+            <button id="refreshShelfPlacesButton" class="secondary-button" type="button">Aktualisieren</button>
+          </div>
+          <p id="shelfPlaceSummary" class="block-place-summary" aria-live="polite"></p>
+          <div class="shelf-place-legend" aria-label="Legende"><span class="is-free">Frei</span><span class="is-occupied">Belegt</span></div>
+          <div id="shelfPlacePlan" class="shelf-place-plan" aria-live="polite"></div>
+          <p id="shelfPlaceDetail" class="shelf-place-detail" role="status">Platz auswaehlen.</p>
+          <p id="shelfPlaceStatus" class="export-status" role="status"></p>
         </section>
 
         <section id="storageHistoryPanel" class="list-panel storage-history-panel">
