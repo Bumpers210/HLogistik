@@ -20,7 +20,7 @@ Weitere regelnahe Listen:
 - `shared/app-pages.mjs`: bekannte App- und Navigationsseiten fuer Node-seitige Nutzung.
 - `server/config/static-files.mjs`: erlaubte statische Serverdateien und Cache-Header-Regeln.
 - `server/reports.mjs`: Buchungsexport-Spalten, Zeitraumvalidierung, read-only Mapping aus `lagerbewegung` sowie Zuordnung von `bestandsbuchung_fehler` zur Auftragsreferenz fuer den Artikelstamm-Excel-Export.
-- `server/storage.mjs`: atomare Umlagerung vollstaendiger Bestandszeilen innerhalb eines Lagers mit Idempotenz, Quellsnapshot-Pruefung und unveraenderten Material-Gesamtsummen sowie rein lesende Blockplatz- und Regalplatzuebersichten aus positiven Bestandszeilen; die Regalansicht liefert 546 Plaetze je H1-Ebene.
+- `server/storage.mjs`: atomare Umlagerung vollstaendiger Bestandszeilen innerhalb eines Lagers mit Idempotenz, Quellsnapshot-Pruefung und unveraenderten Material-Gesamtsummen sowie rein lesende Blockplatz- und Regalplatzuebersichten aus positiven Bestandszeilen beider Lager `SSI` und `SI`; die Regalansicht liefert 546 Plaetze je H1-Ebene.
 - `tablet-transfer.js`: einziger Browser-Controller fuer den in `tablet.html` integrierten Umlagerungsbereich mit Online-/IndexedDB-Suche, Scanner/Kamera, expliziter Buchungsbestaetigung, konkreten Offline-Speicherdiagnosen und lokalen Offline-Entwuerfen ohne Offlinebuchung.
 - `server/original-archive.mjs`: sichere Originaldatei-Archivierung nach erfolgreichem PDF-Export, inklusive Importordner-Schutz, Archivkollisionen und Rename-/Copy-Fallback.
 - `service-worker.js`: klassische Browser-App-Shell-Liste fuer Offline-Cache. Diese Liste bleibt wegen alter Tablet-/Service-Worker-Kompatibilitaet manuell synchronisiert.

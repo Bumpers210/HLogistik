@@ -17,6 +17,7 @@ import { bookStorageReceipt, readBlockPlaceOverview } from "../server/storage.mj
 
 const tempRoot = mkdtempSync(path.join(tmpdir(), "hlogistik-block-places-"));
 const warehouse = "SSI";
+const otherWarehouse = "SI";
 
 before(async () => {
   configure(path.join(tempRoot, "logistik.sqlite"));
@@ -38,6 +39,21 @@ before(async () => {
     erstelltAm: new Date().toISOString(),
     geaendertAm: new Date().toISOString(),
   }], warehouse);
+  await writeArticles([{
+    id: "article-h1-si",
+    materialnummer: "H1-SI-TEST",
+    materialbezeichnung: "H1 SI Testartikel",
+    gebindeArt: "STK",
+    mengeProKarton: 0,
+    mengeProPalette: 1,
+    barcode: "",
+    lagerplatz: "",
+    artikelgruppe: "",
+    bemerkung: "",
+    aktiv: true,
+    erstelltAm: new Date().toISOString(),
+    geaendertAm: new Date().toISOString(),
+  }], otherWarehouse);
 });
 
 after(() => {
@@ -64,6 +80,14 @@ test("SSI-Hallenpläne markieren nur positive Bestände als belegt", () => {
     paletten: 1,
     referenz: "Test",
   }, warehouse);
+  bookStorageReceipt({
+    materialnummer: "H1-SI-TEST",
+    lagerplatz: "H1-R6",
+    leNummer: "HU-H1-SI-1",
+    mengeStueck: 9,
+    paletten: 2,
+    referenz: "Test",
+  }, otherWarehouse);
 
   const overview = readBlockPlaceOverview({ warehouse });
   const places = overview.halls.flatMap((hall) => hall.groups.flatMap((group) => group.places));
@@ -74,16 +98,17 @@ test("SSI-Hallenpläne markieren nur positive Bestände als belegt", () => {
   const h1ag1 = places.find((place) => place.id === "002-H1-SAG1");
 
   assert.deepEqual(overview.halls.map((hall) => hall.id), ["H1", "H2", "H5"]);
+  assert.deepEqual(overview.occupancyWarehouses, ["SSI", "SI"]);
   assert.deepEqual(overview.summary, { total: 126, occupied: 2, free: 124 });
   assert.deepEqual(r6, {
     id: "022-H1-R6",
     label: "R6",
     state: "occupied",
-    stockRows: 1,
-    articleCount: 1,
-    materialNumbers: ["H1-TEST"],
-    pieces: 12,
-    pallets: 1,
+    stockRows: 2,
+    articleCount: 2,
+    materialNumbers: ["H1-SI-TEST", "H1-TEST"],
+    pieces: 21,
+    pallets: 3,
   });
   assert.equal(r7.state, "free");
   assert.equal(h2r56.state, "free");

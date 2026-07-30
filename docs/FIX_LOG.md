@@ -12,6 +12,7 @@ Umgesetzt:
 - Neue Desktop- und Tablet-Reiter `Regalplaetze` mit Ebenenwahl, Freiplatzsumme, Belegungsanzeige und Detailanzeige fuer Artikelnummer, Paletten und Stueckzahl.
 - Modernes und Legacy-Tablet aktualisieren alle vier Ebenen online und speichern ihren letzten erfolgreichen Stand getrennt im lokalen Cache.
 - Service Worker/Manifest auf `1.5.219` angehoben.
+- Die Belegungspruefung fuer Block- und Regalplaetze fasst positive Bestandszeilen aus `SSI` und `SI` zusammen.
 
 Validierung:
 

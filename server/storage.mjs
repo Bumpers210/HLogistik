@@ -4,6 +4,8 @@ import { createStorageId, createStorageMovementId, readInteger, normalizeSearch,
 import { readArticlesSync, findArticleByCode } from "./articles.mjs";
 import { blockPlacePlanForWarehouse, shelfPlacePlanForWarehouse } from "./rules/hall-plan-rules.mjs";
 
+const HALL_PLAN_OCCUPANCY_WAREHOUSES = ["SSI", "SI"];
+
 // ── Locations ─────────────────────────────────────────────────────────────────
 
 export function readStorageLocations({ query = "", materialnummer = "", locationId = "", offset = 0, limit = 0, warehouse = "SSI" } = {}) {
@@ -56,16 +58,7 @@ export function readBlockPlaceOverview({ warehouse = "SSI" } = {}) {
     });
   });
 
-  if (occupancyByPlace.size) {
-    readStorageLocations({ warehouse: normalizedWarehouse }).forEach((location) => {
-      const occupancy = occupancyByPlace.get(location.lagerplatz);
-      if (!occupancy) return;
-      occupancy.stockRows += 1;
-      occupancy.materialNumbers.add(location.materialnummer);
-      occupancy.pieces += Number(location.mengeStueck || 0);
-      occupancy.pallets += Number(location.paletten || 0);
-    });
-  }
+  addHallPlanOccupancy(occupancyByPlace);
 
   let total = 0;
   let occupied = 0;
@@ -93,6 +86,7 @@ export function readBlockPlaceOverview({ warehouse = "SSI" } = {}) {
 
   return {
     warehouse: normalizedWarehouse,
+    occupancyWarehouses: [...HALL_PLAN_OCCUPANCY_WAREHOUSES],
     checkedAt: new Date().toISOString(),
     summary: {
       total,
@@ -129,14 +123,7 @@ export function readShelfPlaceOverview({ warehouse = "SSI", hall = "H1", level =
     });
   });
 
-  readStorageLocations({ warehouse: normalizedWarehouse }).forEach((location) => {
-    const occupancy = occupancyByPlace.get(location.lagerplatz);
-    if (!occupancy) return;
-    occupancy.stockRows += 1;
-    occupancy.materialNumbers.add(location.materialnummer);
-    occupancy.pieces += Number(location.mengeStueck || 0);
-    occupancy.pallets += Number(location.paletten || 0);
-  });
+  addHallPlanOccupancy(occupancyByPlace);
 
   let total = 0;
   let occupied = 0;
@@ -161,6 +148,7 @@ export function readShelfPlaceOverview({ warehouse = "SSI", hall = "H1", level =
 
   return {
     warehouse: normalizedWarehouse,
+    occupancyWarehouses: [...HALL_PLAN_OCCUPANCY_WAREHOUSES],
     checkedAt: new Date().toISOString(),
     hall: { id: plan.id, label: plan.label },
     level: plan.level,
@@ -171,6 +159,22 @@ export function readShelfPlaceOverview({ warehouse = "SSI", hall = "H1", level =
     },
     rows,
   };
+}
+
+function addHallPlanOccupancy(occupancyByPlace) {
+  if (!occupancyByPlace.size) return;
+
+  HALL_PLAN_OCCUPANCY_WAREHOUSES.forEach((warehouse) => {
+    readStorageLocations({ warehouse }).forEach((location) => {
+      const placeId = normalizeSsiStorageBin(location.lagerplatz);
+      const occupancy = occupancyByPlace.get(placeId);
+      if (!occupancy) return;
+      occupancy.stockRows += 1;
+      occupancy.materialNumbers.add(location.materialnummer);
+      occupancy.pieces += Number(location.mengeStueck || 0);
+      occupancy.pallets += Number(location.paletten || 0);
+    });
+  });
 }
 
 export function readStorageLocationSnapshot({ warehouse = "SSI", offset = 0, limit = 0 } = {}) {

@@ -18,6 +18,7 @@ import { shelfPlacePlanForWarehouse } from "../server/rules/hall-plan-rules.mjs"
 
 const tempRoot = mkdtempSync(path.join(tmpdir(), "hlogistik-shelf-places-"));
 const warehouse = "SSI";
+const otherWarehouse = "SI";
 
 before(async () => {
   configure(path.join(tempRoot, "logistik.sqlite"));
@@ -39,6 +40,21 @@ before(async () => {
     erstelltAm: new Date().toISOString(),
     geaendertAm: new Date().toISOString(),
   }], warehouse);
+  await writeArticles([{
+    id: "article-h1-shelf-si",
+    materialnummer: "H1-SHELF-SI",
+    materialbezeichnung: "H1 Regal SI Testartikel",
+    gebindeArt: "STK",
+    mengeProKarton: 0,
+    mengeProPalette: 1,
+    barcode: "",
+    lagerplatz: "",
+    artikelgruppe: "",
+    bemerkung: "",
+    aktiv: true,
+    erstelltAm: new Date().toISOString(),
+    geaendertAm: new Date().toISOString(),
+  }], otherWarehouse);
 });
 
 after(() => {
@@ -90,23 +106,32 @@ test("positive H1-Regalbestaende belegen nur die passende Ebene und werden summi
     paletten: 1,
     referenz: "Test",
   }, warehouse);
+  bookStorageReceipt({
+    materialnummer: "H1-SHELF-SI",
+    lagerplatz: "AA1A1",
+    leNummer: "HU-SHELF-SI-1",
+    mengeStueck: 5,
+    paletten: 1,
+    referenz: "Test",
+  }, otherWarehouse);
 
   const levelA = readShelfPlaceOverview({ warehouse, hall: "H1", level: "A" });
   const aa1a1 = levelA.rows.flatMap((row) => row.places).find((place) => place.id === "002-H1-SAA1A1");
   const at10a3 = levelA.rows.flatMap((row) => row.places).find((place) => place.id === "002-H1-SAT10A3");
 
   assert.deepEqual(levelA.summary, { total: 546, occupied: 1, free: 545 });
+  assert.deepEqual(levelA.occupancyWarehouses, ["SSI", "SI"]);
   assert.deepEqual(aa1a1, {
     id: "002-H1-SAA1A1",
     label: "AA1A1",
     bay: "AA1",
     position: 1,
     state: "occupied",
-    stockRows: 2,
-    articleCount: 1,
-    materialNumbers: ["H1-SHELF-TEST"],
-    pieces: 10,
-    pallets: 3,
+    stockRows: 3,
+    articleCount: 2,
+    materialNumbers: ["H1-SHELF-SI", "H1-SHELF-TEST"],
+    pieces: 15,
+    pallets: 4,
   });
   assert.equal(at10a3.state, "free");
 
