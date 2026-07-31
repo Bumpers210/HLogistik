@@ -874,6 +874,7 @@ input[autocapitalize="characters"] {
 }
 
 .tablet-hall-plan-slot strong {
+  display: block;
   font-size: 13px;
 }
 
@@ -882,6 +883,7 @@ input[autocapitalize="characters"] {
 }
 
 .tablet-hall-plan-slot small {
+  display: block;
   color: #65726c;
   color: var(--muted);
   font-size: 11px;

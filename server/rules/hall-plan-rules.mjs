@@ -4,7 +4,7 @@ const SSI_BLOCK_PLACE_HALLS = Object.freeze([
     label: "Halle 1",
     groups: [
       { id: "h1-r1-r5", label: "R1 bis R5", start: 1, end: 5 },
-      { id: "h1-r6-r15", label: "R6 bis R15", start: 6, end: 15 },
+      { id: "h1-r6-r16", label: "R6 bis R16", start: 6, end: 16 },
       { id: "h1-ag1-am1", label: "AG1 bis AM1", placeLabels: ["AG1", "AH1", "AI1", "AJ1", "AK1", "AL1", "AM1"] },
     ],
   },
@@ -16,10 +16,31 @@ const SSI_BLOCK_PLACE_HALLS = Object.freeze([
     ],
   },
   {
+    id: "H3",
+    label: "Halle 3",
+    groups: [
+      { id: "h3-p1-y3", label: "P1 bis Y3 (ohne R3 und S3)", placeLabels: hallThreePlaceLabels() },
+    ],
+  },
+  {
+    id: "H4",
+    label: "Halle 4",
+    groups: [
+      { id: "h4-r1-r21", label: "R1 bis R21", start: 1, end: 21 },
+    ],
+  },
+  {
     id: "H5",
     label: "Halle 5",
     groups: [
-      { id: "h5-r1-r48", label: "R1 bis R48", start: 1, end: 48 },
+      { id: "h5-r1-r50", label: "R1 bis R50", start: 1, end: 50 },
+    ],
+  },
+  {
+    id: "H7",
+    label: "Halle 7",
+    groups: [
+      { id: "h7-2r1-5r3", label: "2R1 bis 5R3", placeLabels: hallSevenPlaceLabels() },
     ],
   },
 ]);
@@ -83,7 +104,7 @@ export function shelfPlacePlanForWarehouse(warehouse, hallId = "H1", level = "A"
 function blockPlacesForGroup(hallId, group) {
   if (Array.isArray(group.placeLabels)) {
     return group.placeLabels.map((label) => ({
-      id: `002-${hallId}-S${label}`,
+      id: `022-${hallId}-${label}`,
       label,
     }));
   }
@@ -96,6 +117,25 @@ function blockPlacesForGroup(hallId, group) {
     });
   }
   return places;
+}
+
+function hallThreePlaceLabels() {
+  const labels = [];
+  for (let row = "P"; row <= "Y"; row = String.fromCharCode(row.charCodeAt(0) + 1)) {
+    for (let position = 1; position <= 3; position += 1) {
+      const label = `${row}${position}`;
+      if (label !== "R3" && label !== "S3") labels.push(label);
+    }
+  }
+  return labels;
+}
+
+function hallSevenPlaceLabels() {
+  const labels = [];
+  for (let row = 2; row <= 5; row += 1) {
+    for (let position = 1; position <= 3; position += 1) labels.push(`${row}R${position}`);
+  }
+  return labels;
 }
 
 function shelfPlacesForRow(row, level) {
