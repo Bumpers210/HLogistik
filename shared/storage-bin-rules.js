@@ -12,18 +12,14 @@
     var raw = String(value || "").trim().toUpperCase();
     if (!raw) return "";
     var text = cleanStorageBin(raw);
-    var match = text.match(/^022-H([1-7])-R(\d+)$/i);
-    if (match) return normalizeSsiBlockBin(match[1], match[2]);
-    match = text.match(/^002-H([1-7])-R(\d+)$/i);
-    if (match) return normalizeSsiBlockBin(match[1], match[2]);
-    match = text.match(/^002-H[1-7]-SH([1-7])R(\d+)$/i);
-    if (match) return normalizeSsiBlockBin(match[1], match[2]);
-    match = text.match(/^H([1-7])-?R(\d+)$/i);
-    if (match) return normalizeSsiBlockBin(match[1], match[2]);
-    match = text.match(/^H3-?([O-Y][1-3])$/i);
-    if (match) return normalizeSsiH3DirectBin(match[1]);
-    match = text.match(/^002-H3-([O-Y][1-3])$/i);
-    if (match) return normalizeSsiH3DirectBin(match[1]);
+    var fixedHallBin = normalizeFixedHallBin(text);
+    if (fixedHallBin !== undefined) return fixedHallBin;
+    if (/^002-H2-S\d{4}$/i.test(text)) return text;
+
+    var match = text.match(/^S(\d{4})$/i);
+    if (match) return "002-H2-S" + match[1];
+    match = text.match(/^(\d{4})$/);
+    if (match) return "002-H2-S" + match[1];
     match = text.match(/^002-H[1-7]-S([A-Z0-9]+)$/i);
     if (match) return normalizeSsiShelfBin(match[1]) || text;
     if (/^002-H[1-7]-S[A-Z0-9]+$/i.test(text)) return text;
@@ -42,23 +38,38 @@
     return null;
   }
 
-  function normalizeSsiBlockBin(hall, blockNumber) {
-    var hallNumber = Number(hall);
-    var number = Number(blockNumber);
-    if (!isWholeNumber(hallNumber) || hallNumber < 1 || hallNumber > 7 || !isWholeNumber(number) || number <= 0) {
-      return null;
-    }
-    return "022-H" + hallNumber + "-R" + number;
+  function normalizeFixedHallBin(value) {
+    var compact = String(value || "").replace(/-/g, "").toUpperCase();
+    var match = compact.match(/^(?:022|002)?H1R(\d+)$/);
+    if (match) return normalizeRangedHallBin("H1", "R", match[1], 1, 16);
+    match = compact.match(/^(?:022)?H1(A[G-M]1)$/) || compact.match(/^002H1S(A[G-M]1)$/);
+    if (match) return "022-H1-" + match[1];
+    if (/^(?:022)?H1A[A-Z]1$/.test(compact) || /^H1SA[A-Z]1$/.test(compact)) return null;
+
+    match = compact.match(/^(?:022|002)?H2R(\d+)$/);
+    if (match) return normalizeRangedHallBin("H2", "R", match[1], 1, 56);
+    match = compact.match(/^(?:022|002)?H3S?([P-Y][1-3])$/);
+    if (match) return match[1] === "R3" || match[1] === "S3" ? null : "022-H3-" + match[1];
+    if (/^(?:022|002)?H3S?[A-Z][1-3]$/.test(compact)) return null;
+
+    match = compact.match(/^(?:022|002)?H4R(\d+)$/);
+    if (match) return normalizeRangedHallBin("H4", "R", match[1], 1, 21);
+    match = compact.match(/^(?:022|002)?H5R(\d+)$/);
+    if (match) return normalizeRangedHallBin("H5", "R", match[1], 1, 50);
+    match = compact.match(/^(?:022|002)?H7S?([2-5]R[1-3])$/);
+    if (match) return "022-H7-" + match[1];
+    if (/^(?:022|002)?H7S?\dR\d$/.test(compact)) return null;
+    return undefined;
+  }
+
+  function normalizeRangedHallBin(hall, prefix, value, min, max) {
+    var number = Number(value);
+    if (!isWholeNumber(number) || number < min || number > max) return null;
+    return "022-" + hall + "-" + prefix + number;
   }
 
   function isWholeNumber(value) {
     return typeof value === "number" && isFinite(value) && Math.floor(value) === value;
-  }
-
-  function normalizeSsiH3DirectBin(code) {
-    var text = String(code || "").trim().toUpperCase();
-    if (!/^[O-Y][1-3]$/.test(text)) return null;
-    return "002-H3-" + text;
   }
 
   function normalizeSsiShelfBin(shelfCode) {

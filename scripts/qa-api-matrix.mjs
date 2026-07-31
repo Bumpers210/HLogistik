@@ -737,9 +737,10 @@ async function run() {
       siStockPreview.counts.importStockRows === 3 && siStockPreview.counts.importArticles === 3,
     JSON.stringify(siStockPreview.counts)
   );
-  check("ssi H3 O-Y shorthand normalizes to direct H3 bin", normalizeSsiStorageBin("H3T1") === "002-H3-T1", normalizeSsiStorageBin("H3T1"));
-  check("ssi H3 O-Y shorthand accepts hyphen", normalizeSsiStorageBin("H3-T1") === "002-H3-T1", normalizeSsiStorageBin("H3-T1"));
-  check("ssi H3 direct bin remains stable", normalizeSsiStorageBin("002-H3-T1") === "002-H3-T1", normalizeSsiStorageBin("002-H3-T1"));
+  check("ssi H3 P-Y shorthand normalizes to the canonical H3 bin", normalizeSsiStorageBin("H3T1") === "022-H3-T1", normalizeSsiStorageBin("H3T1"));
+  check("ssi H3 P-Y shorthand accepts hyphen", normalizeSsiStorageBin("H3-T1") === "022-H3-T1", normalizeSsiStorageBin("H3-T1"));
+  check("ssi H3 legacy bin normalizes to the canonical H3 bin", normalizeSsiStorageBin("002-H3-T1") === "022-H3-T1", normalizeSsiStorageBin("002-H3-T1"));
+  check("ssi H2 S#### normalizes to the canonical H2 bin", normalizeSsiStorageBin("S0074") === "002-H2-S0074" && normalizeSsiStorageBin("0074") === "002-H2-S0074", `${normalizeSsiStorageBin("S0074")}, ${normalizeSsiStorageBin("0074")}`);
   check("ssi A shelf normalizes to H1", normalizeSsiStorageBin("AA8C3") === "002-H1-SAA8C3", normalizeSsiStorageBin("AA8C3"));
   check("ssi AT shelf normalizes to H1", normalizeSsiStorageBin("AT8A1") === "002-H1-SAT8A1", normalizeSsiStorageBin("AT8A1"));
   check("ssi AU shelf normalizes to H4", normalizeSsiStorageBin("AU8A1") === "002-H4-SAU8A1", normalizeSsiStorageBin("AU8A1"));
@@ -1847,11 +1848,11 @@ async function run() {
       tabletHtmlSource.includes("tablet-transfer.js?v=20260724-4") &&
       tabletHtmlSource.includes("offline-store.js?v=20260729-1") &&
       tabletHtmlSource.includes("tablet-legacy.js?v=20260729-2") &&
-      tabletHtmlSource.includes("tablet.css?v=20260729-2") &&
+      tabletHtmlSource.includes("tablet.css?v=20260731-1") &&
       indexHtmlSource.includes("app-import-line-helpers.js?v=20260724-2") &&
       indexHtmlSource.includes("app.js?v=20260724-3") &&
-      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.219\"") &&
-      manifestSource.includes("\"version\": \"1.5.219\"") &&
+      serviceWorkerSource.includes("const CACHE_VERSION = \"1.5.222\"") &&
+      manifestSource.includes("\"version\": \"1.5.222\"") &&
       !tabletLegacyServiceWorkerSource.includes("location.reload") &&
       !tabletModernServiceWorkerSource.includes("location.reload") &&
       !tabletLegacyServiceWorkerSource.includes("unregister") &&
@@ -3546,7 +3547,7 @@ async function run() {
       storageExcelWorkbook.rows.length === 1 &&
       storageExcelWorkbook.rows[0].direction === "Ein" &&
       storageExcelWorkbook.rows[0].product === storageExcelProduct &&
-      storageExcelWorkbook.rows[0].bin === "002-H3-T2" &&
+      storageExcelWorkbook.rows[0].bin === "022-H3-T2" &&
       storageExcelWorkbook.rows[0].handlingUnit === "000000123456" &&
       storageExcelWorkbook.rows[0].quantity === 4 &&
       storageExcelWorkbook.rows[0].dateIsDate === true &&

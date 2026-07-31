@@ -74,7 +74,7 @@ test("SSI-Hallenpläne markieren nur positive Bestände als belegt", () => {
   }, warehouse);
   bookStorageReceipt({
     materialnummer: "H1-TEST",
-    lagerplatz: "H1-AG1",
+    lagerplatz: "H1AG1",
     leNummer: "HU-H1-2",
     mengeStueck: 6,
     paletten: 1,
@@ -94,12 +94,17 @@ test("SSI-Hallenpläne markieren nur positive Bestände als belegt", () => {
   const r6 = places.find((place) => place.id === "022-H1-R6");
   const r7 = places.find((place) => place.id === "022-H1-R7");
   const h2r56 = places.find((place) => place.id === "022-H2-R56");
-  const h5r48 = places.find((place) => place.id === "022-H5-R48");
-  const h1ag1 = places.find((place) => place.id === "002-H1-SAG1");
+  const h3p1 = places.find((place) => place.id === "022-H3-P1");
+  const h3r3 = places.find((place) => place.id === "022-H3-R3");
+  const h3s3 = places.find((place) => place.id === "022-H3-S3");
+  const h4r21 = places.find((place) => place.id === "022-H4-R21");
+  const h5r50 = places.find((place) => place.id === "022-H5-R50");
+  const h7r = places.find((place) => place.id === "022-H7-2R1");
+  const h1ag1 = places.find((place) => place.id === "022-H1-AG1");
 
-  assert.deepEqual(overview.halls.map((hall) => hall.id), ["H1", "H2", "H5"]);
+  assert.deepEqual(overview.halls.map((hall) => hall.id), ["H1", "H2", "H3", "H4", "H5", "H7"]);
   assert.deepEqual(overview.occupancyWarehouses, ["SSI", "SI"]);
-  assert.deepEqual(overview.summary, { total: 126, occupied: 2, free: 124 });
+  assert.deepEqual(overview.summary, { total: 190, occupied: 2, free: 188 });
   assert.deepEqual(r6, {
     id: "022-H1-R6",
     label: "R6",
@@ -112,9 +117,14 @@ test("SSI-Hallenpläne markieren nur positive Bestände als belegt", () => {
   });
   assert.equal(r7.state, "free");
   assert.equal(h2r56.state, "free");
-  assert.equal(h5r48.state, "free");
+  assert.equal(h3p1.state, "free");
+  assert.equal(h3r3, undefined);
+  assert.equal(h3s3, undefined);
+  assert.equal(h4r21.state, "free");
+  assert.equal(h5r50.state, "free");
+  assert.equal(h7r.state, "free");
   assert.deepEqual(h1ag1, {
-    id: "002-H1-SAG1",
+    id: "022-H1-AG1",
     label: "AG1",
     state: "occupied",
     stockRows: 1,

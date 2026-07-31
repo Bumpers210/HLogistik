@@ -1,6 +1,16 @@
 # HLogistik Fix Log
 
-Stand: 2026-07-29
+Stand: 2026-07-31
+
+## 2026-07-31 - Korrektur Hallenmatrix und Tablet-Hallenplan
+
+Umgesetzt:
+
+- Die Hallenmatrix normalisiert H1, H2, H3, H4, H5 und H7 ausschließlich auf die freigegebenen `022-H…`-Bereiche; H1 reicht bis R16, H5 bis R50. Die nicht existierenden H3-Plätze `R3` und `S3` sind ausgenommen.
+- `S####` und vierstellige Zahlencodes werden fuer SSI eindeutig nach `002-H2-S####` normalisiert, zum Beispiel `S0074` und `0074` nach `002-H2-S0074`.
+- Block- und Regalplan summieren positive Bestandszeilen aus SSI und SI zur physischen Stellplatzbelegung. Laut Fachvorgabe belegen beide Lagerarten nie denselben Platz.
+- Die Tablet-Karten erzwingen getrennte Zeilen fuer Stellplatz, Artikel und Paletten, auch auf alten iPads ohne Grid-Unterstuetzung.
+- Service Worker/Manifest auf `1.5.222` angehoben; `shared/storage-bin-rules.js` nutzt den Cache-Buster `20260731-2`.
 
 ## 2026-07-29 - H1-Regalplatzuebersicht fuer Desktop und Tablet
 

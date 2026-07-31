@@ -58,11 +58,13 @@ Diese Datei beschreibt die aktuell im Code wirksamen Regeln fuer Lagerplatz, Ste
 Fuer SSI wird der Stellplatz serverseitig normalisiert. Bekannte Regeln:
 
 - Leerzeichen werden entfernt, Unterstriche werden zu Bindestrichen, alles wird grossgeschrieben.
-- `022-H1-R5` bis `022-H7-Rn` bleibt Blockplatz und wird normalisiert.
-- `002-H1-R5` bis `002-H7-Rn` wird als Blockplatz auf `022-Hx-Rn` normalisiert.
-- `H1-R5` oder `H1R5` wird zu `022-H1-R5`.
-- `002-H?-SHxRn` wird zu `022-Hx-Rn`, wobei das `x` nach `SH` die Halle bestimmt.
-- `H3[O-Y][1-3]` wird direkt zu `002-H3-[O-Y][1-3]`, z. B. `H3T1` oder `H3-T1` zu `002-H3-T1`.
+- `H1R1` bis `H1R16` wird zu `022-H1-R1` bis `022-H1-R16`; `H1AG1` bis `H1AM1` wird zu `022-H1-AG1` bis `022-H1-AM1`.
+- `H2R1` bis `H2R56` wird zu `022-H2-R1` bis `022-H2-R56`.
+- `H3P1` bis `H3Y3` wird zu `022-H3-P1` bis `022-H3-Y3`, ausgenommen `H3R3` und `H3S3`; diese Stellplätze existieren nicht.
+- `H4R1` bis `H4R21` wird zu `022-H4-R1` bis `022-H4-R21`.
+- `H5R1` bis `H5R50` wird zu `022-H5-R1` bis `022-H5-R50`.
+- `H72R1` bis `H75R3` wird zu `022-H7-2R1` bis `022-H7-5R3`.
+- `S####` oder genau vier Ziffern werden zu `002-H2-S####`, zum Beispiel `S0074` und `0074` zu `002-H2-S0074`.
 - `002-Hx-S...` bleibt gueltig, wenn es dem Shelf-Muster entspricht.
 - Kurze Nummern `1` bis `69` optional mit Suffix werden zu `002-H7-S...`.
 - Werte von `AA...` bis `AT...` werden zu `002-H1-SA...`.
@@ -91,9 +93,12 @@ Fuer SSI wird der Stellplatz serverseitig normalisiert. Bekannte Regeln:
 
 - Die Hallenplanansicht gilt nur für Lager `SSI`.
 - Als Blockplätze gelten ausschließlich:
-  - Halle `H1`: `022-H1-R1` bis `022-H1-R15`, gegliedert in `R1 bis R5` und `R6 bis R15`, sowie `002-H1-SAG1` bis `002-H1-SAM1` (`AG1` bis `AM1`).
+  - Halle `H1`: `022-H1-R1` bis `022-H1-R16`, gegliedert in `R1 bis R5` und `R6 bis R16`, sowie `022-H1-AG1` bis `022-H1-AM1`.
   - Halle `H2`: `022-H2-R1` bis `022-H2-R56`.
-  - Halle `H5`: `022-H5-R1` bis `022-H5-R48`.
+  - Halle `H3`: `022-H3-P1` bis `022-H3-Y3`, ausgenommen `022-H3-R3` und `022-H3-S3`.
+  - Halle `H4`: `022-H4-R1` bis `022-H4-R21`.
+  - Halle `H5`: `022-H5-R1` bis `022-H5-R50`.
+  - Halle `H7`: `022-H7-2R1` bis `022-H7-5R3`.
 - Ein Blockplatz ist belegt, sobald mindestens eine positive Bestandszeile aus `SSI` oder `SI` auf genau diesem normalisierten Stellplatz vorliegt. Ohne positive Bestandszeile ist er frei.
 - Bei belegten Blockplätzen zeigt die Übersicht die Materialnummer und die Palettenanzahl an.
 - Die Eingaben `H1-AG1` bis `H1-AM1` werden bei SSI-Buchungen auf die entsprechenden Stellplätze `002-H1-SAG1` bis `002-H1-SAM1` normalisiert.
